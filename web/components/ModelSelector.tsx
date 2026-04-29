@@ -113,7 +113,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   const [mode, setMode] = useState<"browse" | "custom">("browse");
   const [search, setSearch] = useState("");
 
-  const [selectedModel, setSelectedModel] = useState(value || DEFAULT_PLATFORM_MODEL);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
   const [customInput, setCustomInput] = useState("");
   const [validating, setValidating] = useState(false);
@@ -151,6 +151,31 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   }, []);
 
   useEffect(() => { void fetchModelList(); }, [fetchModelList]);
+
+  // ── Find default model from fetched list ────────────────────────────────────────
+
+  useEffect(() => {
+    if (value) {
+      setSelectedModel(value);
+      return;
+    }
+    if (modelList && selectedModel === null) {
+      let defaultModelId: string | null = null;
+      for (const p of modelList.providers) {
+        if (!p.configured || p.models.length === 0) continue;
+        for (const m of p.models) {
+          if (m.default) {
+            defaultModelId = m.id;
+            break;
+          }
+        }
+        if (defaultModelId) break;
+      }
+      const initial = defaultModelId || DEFAULT_PLATFORM_MODEL;
+      setSelectedModel(initial);
+      if (initial !== value) onChange(initial);
+    }
+  }, [modelList, selectedModel, value, onChange]);
 
   // ── Close on outside click ────────────────────────────────────────────────
 
@@ -258,10 +283,12 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
 
   // ── Derived display name ──────────────────────────────────────────────────
 
+  const displayModelId = value || selectedModel;
+
   const displayName = (() => {
-    if (!value) return "Select model";
-    const found = allModels.find((m) => m.id === value);
-    return found ? found.name : parseModelDisplayName(value);
+    if (!displayModelId) return "Select model";
+    const found = allModels.find((m) => m.id === displayModelId);
+    return found ? found.name : parseModelDisplayName(displayModelId);
   })();
 
   // ── Check if no keys configured at all ───────────────────────────────────
@@ -409,10 +436,10 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
                           key={m.id}
                           type="button"
                           role="option"
-                          aria-selected={value === m.id}
+aria-selected={displayModelId === m.id}
                           onClick={() => { onChange(m.id); setIsOpen(false); }}
                           className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors ${
-                            value === m.id
+                              displayModelId === m.id
                               ? "bg-[var(--accent)]/10 text-[var(--accent)]"
                               : focusedIndex === globalIdx
                               ? "bg-[var(--bg-overlay)] text-[var(--text-primary)]"
