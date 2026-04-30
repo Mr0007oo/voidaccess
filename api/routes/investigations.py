@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import csv
+import hashlib
 import io
 import logging
 import os
@@ -185,7 +186,7 @@ async def _update_investigation_status(
 async def _update_progress(
     investigation_id: uuid.UUID,
     step: Optional[int] = None,
-    extracted_entities: Optional[list] = None,
+    entity_count: Optional[int] = None,
     scraped_pages: Optional[dict] = None,
     label: Optional[str] = None,
 ) -> None:
@@ -203,8 +204,8 @@ async def _update_progress(
                 inv.current_step_label = label if label is not None else STEP_LABELS.get(step, "Processing")
             elif label is not None:
                 inv.current_step_label = label
-            if extracted_entities is not None:
-                inv.entity_count = len(extracted_entities)
+            if entity_count is not None:
+                inv.entity_count = entity_count
             if scraped_pages is not None:
                 inv.page_count = len(scraped_pages)
             session.commit()
@@ -634,13 +635,44 @@ async def _run_investigation_task(
             logger.info("[%s] Cache store failed (non-fatal): %s", inv_uuid, exc)
 
         scraped_pages = {**cached_dict, **freshly_scraped}
+
+        # ===== STEP 5.75: Content safety scan (Layer 4) =====
+        from utils.content_safety import sanitize_content, log_content_safety_event
+        clean_pages: dict[str, str] = {}
+        blocked_count = 0
+        for page_url, page_text in scraped_pages.items():
+            clean_text, was_flagged = sanitize_content(page_text)
+            if was_flagged:
+                blocked_count += 1
+                url_hash = hashlib.sha256(page_url.encode()).hexdigest()[:16]
+                logger.warning(
+                    "[%s] Page content blocked — prohibited content. Page hash: %s",
+                    inv_uuid,
+                    url_hash,
+                )
+                log_content_safety_event(
+                    event_type="content_blocked",
+                    content_hash=url_hash,
+                    user_id=inv_user_id,
+                )
+            else:
+                clean_pages[page_url] = clean_text
+        if blocked_count > 0:
+            logger.warning(
+                "[%s] Blocked %d pages for prohibited content",
+                inv_uuid,
+                blocked_count,
+            )
+        scraped_pages = clean_pages
+
         scraped_count = len(scraped_pages)
         logger.info(
-            "[%s] Total for extraction: %d pages (%d cached + %d fresh)",
+            "[%s] Total for extraction: %d pages (%d cached + %d fresh, %d blocked)",
             inv_uuid,
             scraped_count,
             len(cached_dict),
             len(freshly_scraped),
+            blocked_count,
         )
 
         page_records = [
@@ -728,7 +760,7 @@ async def _run_investigation_task(
             extraction_results = []
             total_entities = 0
 
-        await _update_progress(inv_uuid, 5, extracted_entities=extraction_results)
+        await _update_progress(inv_uuid, 5, entity_count=total_entities)
 
         # ===== STEP 6.5: Cross-reference against seed data (short-lived session) =====
         logger.info("[%s] STEP 6.5: Cross-referencing with historical data...", inv_uuid)
@@ -926,6 +958,30 @@ async def create_investigation(
     that GET /investigations/{run_id} returns a valid record immediately while
     the background pipeline runs.
     """
+    from utils.content_safety import is_blocked_query, log_content_safety_event
+
+    blocked, reason = is_blocked_query(body.query)
+    if blocked:
+        logger.warning(
+            "Investigation blocked — prohibited content detected. User: %s",
+            current_user.user.id,
+        )
+        log_content_safety_event(
+            event_type="query_blocked",
+            content_hash=hashlib.sha256(body.query.encode()).hexdigest()[:16],
+            user_id=current_user.user.id,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "prohibited_content",
+                "message": (
+                    "This query cannot be processed. VoidAccess is intended "
+                    "for legitimate security research only."
+                ),
+                "code": "CONTENT_BLOCKED",
+            },
+        )
 
     run_id = str(uuid.uuid4())
 
@@ -1225,6 +1281,8 @@ async def get_investigation_entities(
     min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    defang: bool = Query(default=True),
+    freshness_exclude: Optional[str] = Query(default=None),
 ) -> dict:
     """Return paginated entities for an investigation, optionally filtered by type and confidence."""
     if not os.getenv("DATABASE_URL"):
@@ -1235,6 +1293,8 @@ async def get_investigation_entities(
         from db.queries import get_investigation_by_id_or_run
         from graph.builder import _make_node_id
         from sqlalchemy import func
+        from utils.ioc_freshness import get_freshness_tag, get_freshness_display
+        from utils.defang import defang_value, defang_text
 
         inv_uuid = uuid.UUID(investigation_id)
         with get_session() as session:
@@ -1264,6 +1324,14 @@ async def get_investigation_entities(
                 .all()
             )
 
+            # Safety net: filter prohibited entity values from the response.
+            # Catches values that may have been stored before FIX 2 was deployed.
+            from utils.content_safety import is_blocked_entity_value as _is_blocked_ev
+            entities = [
+                e for e in entities
+                if not _is_blocked_ev(e.entity_type, e.value)
+            ]
+
             out: list[dict] = []
             for e in entities:
                 source_url = ""
@@ -1272,18 +1340,47 @@ async def get_investigation_entities(
                         source_url = e.page.url or ""
                 except Exception:
                     pass
+
+                freshness_tag = get_freshness_tag(
+                    e.entity_type,
+                    e.last_seen_at,
+                    e.first_seen_at,
+                )
+
+                if freshness_exclude == "expired" and freshness_tag.value == "expired":
+                    continue
+
                 graph_node_id = _make_node_id(e.entity_type, e.value, source_url)
+
+                display_value = e.value
+                display_context = e.context
+                if defang:
+                    display_value = defang_value(e.entity_type, e.value or "")
+                    if e.context:
+                        display_context = defang_text(e.context)
+
+                freshness_display = get_freshness_display(freshness_tag)
+
                 out.append(
                     {
                         "id": str(e.id),
                         "entity_type": e.entity_type,
-                        "value": e.value,
+                        "value": display_value,
                         "confidence": e.confidence,
-                        "context": e.context,
+                        "context": display_context,
                         "created_at": e.created_at.isoformat() if e.created_at else None,
                         "first_seen": e.first_seen.isoformat() if e.first_seen else None,
                         "last_seen": e.last_seen.isoformat() if e.last_seen else None,
+                        "first_seen_at": e.first_seen_at.isoformat() if e.first_seen_at else None,
+                        "last_seen_at": e.last_seen_at.isoformat() if e.last_seen_at else None,
+                        "freshness_tag": freshness_tag.value,
+                        "freshness_label": freshness_display["label"],
+                        "freshness_color": freshness_display["color"],
+                        "source_count": e.source_count or 1,
+                        "corroborating_sources": json.loads(e.corroborating_sources or '["dark_web_scrape"]'),
+                        "cross_referenced": (e.source_count or 1) > 1,
                         "graph_node_id": graph_node_id,
+                        "defanged": defang,
                     }
                 )
             return {"items": out, "total": total, "skip": offset, "limit": limit}

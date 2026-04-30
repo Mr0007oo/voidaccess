@@ -61,6 +61,7 @@ export default function InvestigationPage() {
   const [minConfidence, setMinConfidence] = useState(0.75);
   const [debouncedMinConfidence, setDebouncedMinConfidence] = useState(0.75);
   const [entityMinConfidence, setEntityMinConfidence] = useState(0.75);
+  const [defangEnabled, setDefangEnabled] = useState(true);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleMinConfidenceChange = useCallback((value: number) => {
@@ -102,13 +103,18 @@ export default function InvestigationPage() {
     }
   }, [investigationParamId]);
 
-  const fetchEntities = useCallback(async (minConf?: number) => {
+  const fetchEntities = useCallback(async (minConf?: number, freshness?: string) => {
     if (!investigationParamId) return;
     setEntitiesLoading(true);
     try {
       const token = getToken();
       const conf = minConf !== undefined ? minConf : entityMinConfidence;
-      const qs = new URLSearchParams({ limit: "1000", min_confidence: conf.toString() });
+      const qs = new URLSearchParams({ limit: "1000", min_confidence: conf.toString(), defang: defangEnabled.toString() });
+      if (freshness && freshness !== "expired") {
+        qs.set("freshness_exclude", freshness);
+      } else if (freshness === "expired") {
+        qs.set("freshness_exclude", "expired");
+      }
       const res = await fetch(
         `/api/investigations/${encodeURIComponent(investigationParamId)}/entities?${qs}`,
         { cache: "no-store", headers: { ...(token ? { "Authorization": `Bearer ${token}` } : {}) } }
@@ -121,7 +127,7 @@ export default function InvestigationPage() {
     } finally {
       setEntitiesLoading(false);
     }
-  }, [investigationParamId, entityMinConfidence]);
+  }, [investigationParamId, entityMinConfidence, defangEnabled]);
 
   useEffect(() => {
     void fetchInvestigation();
@@ -297,6 +303,16 @@ export default function InvestigationPage() {
               className="h-1 w-24 cursor-pointer appearance-none rounded-full bg-[var(--border-dim)] accent-[var(--accent)]"
             />
             <span className="w-12 text-[10px] font-mono text-[var(--text-secondary)]">{minConfidence.toFixed(2)}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-secondary)]">Defanged:</span>
+            <button
+              onClick={() => setDefangEnabled(!defangEnabled)}
+              className={`px-3 py-1 text-[10px] font-bold uppercase tracking-widest transition-all rounded ${defangEnabled ? "bg-green-600 text-white shadow-lg" : "bg-[var(--border-dim)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"}`}
+              title="Defanged mode replaces http:// with hxxp:// and dots in IPs with [.] for safe sharing. Disable for programmatic use."
+            >
+              {defangEnabled ? "ON" : "OFF"}
+            </button>
           </div>
           {graphData?.total_entities !== undefined && (
             <span className="text-[10px] font-mono text-[var(--text-muted)]">

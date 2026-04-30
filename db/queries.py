@@ -335,6 +335,8 @@ def upsert_entity_canonical(
             existing.extraction_method = extraction_method
         # Update last_seen
         existing.last_seen = datetime.now(timezone.utc)
+        # Update last_seen_at for freshness tracking
+        existing.last_seen_at = datetime.now(timezone.utc)
         # Link to this investigation if not already linked
         if existing.investigation_id != investigation_id:
             _link_entity_to_investigation(session, existing.id, investigation_id)
@@ -800,3 +802,27 @@ def get_monitor_stats(session: Session, monitor_name: str) -> dict:
         "total_runs": int(total_runs),
         "last_entity_count": getattr(latest, "entity_count_delta", 0) or 0,
     }
+
+
+def update_entity_source_count(
+    session: Session,
+    entity_id: uuid.UUID,
+    source_name: str,
+) -> None:
+    """
+    Increment source count and add source name to corroborating_sources for an entity.
+    """
+    import json
+
+    entity = session.query(Entity).filter_by(id=entity_id).first()
+    if not entity:
+        return
+
+    existing = json.loads(entity.corroborating_sources or "[]")
+
+    if source_name not in existing:
+        existing.append(source_name)
+        entity.corroborating_sources = json.dumps(existing)
+        entity.source_count = len(existing)
+
+    session.flush()

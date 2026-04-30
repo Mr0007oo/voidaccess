@@ -78,10 +78,26 @@ export function InvestigationInput() {
         },
         body: JSON.stringify({ query: q, model, full_intelligence: fullIntel }),
       });
-      const data = (await res.json()) as { run_id?: string; error?: string; detail?: string };
+      const data = (await res.json()) as {
+        run_id?: string;
+        error?: string;
+        detail?: string | { error?: string; message?: string; code?: string };
+      };
       if (!res.ok) {
         if (res.status === 401) { router.push("/login"); return; }
-        setError(data.detail ?? data.error ?? `Request failed (${res.status})`);
+        const detail = data.detail;
+        if (typeof detail === "object" && detail?.code === "CONTENT_BLOCKED") {
+          setError(
+            "This search query cannot be processed. " +
+            "VoidAccess is designed for legitimate security research only."
+          );
+          return;
+        }
+        setError(
+          (typeof detail === "string" ? detail : null) ??
+          data.error ??
+          `Request failed (${res.status})`
+        );
         return;
       }
       if (data.run_id) {

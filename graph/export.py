@@ -41,8 +41,11 @@ def _serialize_value(v: Any) -> Any:
 
 
 def _node_to_dict(node_id: str, data: dict) -> dict:
+    raw_label = data.get("label") or node_id.split("@")[0]
+    label = raw_label[:50] if len(raw_label) > 50 else raw_label
     return {
         "id": node_id,
+        "label": label,
         "type": data.get("node_type", ""),
         "confidence": data.get("confidence", 0.0),
         "first_seen": _serialize_value(data.get("first_seen")),

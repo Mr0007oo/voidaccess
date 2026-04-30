@@ -4,7 +4,7 @@
 
 :root {
   /* Backgrounds — layered depth */
-  --bg-void:    #080b0f;   /* Deepest background */
+  --bg-void:    #080b11;   /* Deepest background (dark navy) */
   --bg-surface: #0d1117;   /* Card/panel backgrounds */
   --bg-raised:  #161b22;   /* Elevated elements */
   --bg-overlay: #1c2128;   /* Hover states, selected */
@@ -18,7 +18,7 @@
   --text-primary:   #e6edf3;  /* Main content */
   --text-secondary: #8b949e;  /* Supporting text */
   --text-muted:     #6e7681;  /* Disabled, placeholders */
-  --text-inverse:   #080b0f;  /* Text on light backgrounds */
+  --text-inverse:   #080b11;  /* Text on light backgrounds */
 
   /* Accent — single, restrained */
   --accent:         #58a6ff;  /* GitHub-blue: trust, precision */
@@ -45,32 +45,49 @@
   --entity-onion:        #9ecbff;
   --entity-email:        #c9a35a;
   --entity-pgp:          #73d397;
+
+  /* ── Typography tokens ─────────────────────────────────── */
+  /* Space Grotesk: headings / display / labels              */
+  --font-display: var(--font-space-grotesk), 'Space Grotesk', ui-sans-serif, system-ui;
+  /* Inter: body text / UI                                   */
+  --font-body:    var(--font-inter), 'Inter', ui-sans-serif, system-ui;
+  /* JetBrains Mono: code / IDs / hashes / technical values  */
+  --font-mono:    var(--font-jetbrains-mono), 'JetBrains Mono', ui-monospace, monospace;
 }
 
 @layer base {
-  :root {
-    --font-heading: var(--font-outfit), ui-sans-serif, system-ui;
-    --font-body:    var(--font-inter), ui-sans-serif, system-ui;
-    --font-code:    var(--font-jetbrains-mono), ui-monospace, monospace;
-  }
-
   body {
     @apply bg-[var(--bg-void)] text-[var(--text-primary)] antialiased;
     font-family: var(--font-body);
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 
-  h1, h2, h3, h4, h5, h6 {
-    font-family: var(--font-heading);
+  h1, h2, h3 {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+  }
+
+  h4, h5, h6 {
+    font-family: var(--font-display);
   }
 
   pre, code, .font-mono {
-    font-family: var(--font-code);
+    font-family: var(--font-mono);
   }
 }
 
+/* ── Entity / technical value classes ───────────────────────── */
+.entity-value,
+.hash-value,
+.ip-address,
+.wallet-address,
+.onion-url,
+.investigation-id {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
 
-/* Redesigned animations */
+/* ── Animations ─────────────────────────────────────────────── */
 @keyframes dash {
   to {
     stroke-dashoffset: 0;
@@ -86,9 +103,7 @@
   animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
-/* Removed grain for cleaner aesthetic */
-
-/* Custom Scrollbar */
+/* ── Custom Scrollbar ────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -103,4 +118,3 @@
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-strong);
 }
-

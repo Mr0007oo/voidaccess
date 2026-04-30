@@ -103,7 +103,10 @@ interface ModelSelectorProps {
 // ---------------------------------------------------------------------------
 
 export function ModelSelector({ value, onChange }: ModelSelectorProps) {
-  const DEFAULT_PLATFORM_MODEL = "openrouter/deepseek/deepseek-chat";
+  const DEFAULT_MODEL_ID    = "openrouter/deepseek/deepseek-chat";
+  const DEFAULT_MODEL_LABEL = "DeepSeek Chat";
+  // Keep backward-compat alias used elsewhere in the component
+  const DEFAULT_PLATFORM_MODEL = DEFAULT_MODEL_ID;
 
   const [modelList, setModelList] = useState<ModelListResponse | null>(null);
   const [loadingList, setLoadingList] = useState(false);
@@ -113,7 +116,9 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   const [mode, setMode] = useState<"browse" | "custom">("browse");
   const [search, setSearch] = useState("");
 
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  // Start with the DeepSeek default so the button shows the correct label
+  // instantly on page load — no flash of Llama or empty state.
+  const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_MODEL_ID);
 
   const [customInput, setCustomInput] = useState("");
   const [validating, setValidating] = useState(false);
@@ -124,6 +129,17 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [focusedIndex, setFocusedIndex] = useState(-1);
+
+  // Notify parent immediately on mount so the form always has a valid model
+  // selected even before the async list fetch completes.
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  useEffect(() => {
+    if (!value) {
+      onChangeRef.current(DEFAULT_MODEL_ID);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Fetch model list ──────────────────────────────────────────────────────
 
@@ -152,30 +168,36 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
 
   useEffect(() => { void fetchModelList(); }, [fetchModelList]);
 
-  // ── Find default model from fetched list ────────────────────────────────────────
+  // ── Sync when parent passes a value, or when the fetched list has a
+  //    server-side default that differs from our client-side default.
 
   useEffect(() => {
+    // Case A: parent explicitly controls the value
     if (value) {
       setSelectedModel(value);
       return;
     }
-    if (modelList && selectedModel === null) {
-      let defaultModelId: string | null = null;
+    // Case B: list loaded — check if server marks a different model as default
+    if (modelList) {
+      let serverDefault: string | null = null;
       for (const p of modelList.providers) {
         if (!p.configured || p.models.length === 0) continue;
         for (const m of p.models) {
           if (m.default) {
-            defaultModelId = m.id;
+            serverDefault = m.id;
             break;
           }
         }
-        if (defaultModelId) break;
+        if (serverDefault) break;
       }
-      const initial = defaultModelId || DEFAULT_PLATFORM_MODEL;
-      setSelectedModel(initial);
-      if (initial !== value) onChange(initial);
+      if (serverDefault && serverDefault !== selectedModel) {
+        setSelectedModel(serverDefault);
+        onChange(serverDefault);
+      }
     }
-  }, [modelList, selectedModel, value, onChange]);
+  // selectedModel intentionally omitted to avoid infinite loop
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelList, value, onChange]);
 
   // ── Close on outside click ────────────────────────────────────────────────
 
@@ -286,7 +308,10 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   const displayModelId = value || selectedModel;
 
   const displayName = (() => {
-    if (!displayModelId) return "Select model";
+    if (!displayModelId) return DEFAULT_MODEL_LABEL;
+    // If the list hasn't loaded yet, fall back to the label for the default
+    if (displayModelId === DEFAULT_MODEL_ID && allModels.length === 0)
+      return DEFAULT_MODEL_LABEL;
     const found = allModels.find((m) => m.id === displayModelId);
     return found ? found.name : parseModelDisplayName(displayModelId);
   })();
