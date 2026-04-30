@@ -510,7 +510,7 @@ async def get_opsec_analysis(entity_id: str) -> dict:
 
 
 @router.get("/{entity_id}")
-async def get_entity(entity_id: str) -> dict:
+async def get_entity(entity_id: str, defang: bool = True) -> dict:
     """Return full entity profile including appearances."""
     if not os.getenv("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="Database not configured")
@@ -520,6 +520,8 @@ async def get_entity(entity_id: str) -> dict:
         from db.session import get_session  # noqa: PLC0415
         from db.models import Entity  # noqa: PLC0415
         from db.queries import get_entity_appearances  # noqa: PLC0415
+        from utils.ioc_freshness import get_freshness_tag, get_freshness_display  # noqa: PLC0415
+        from utils.defang import defang_value, defang_text  # noqa: PLC0415
 
         with get_session() as session:
             entity = session.query(Entity).filter_by(id=eid).first()
@@ -542,12 +544,41 @@ async def get_entity(entity_id: str) -> dict:
 
             appearances = get_entity_appearances(session, eid)
 
+            freshness_tag = get_freshness_tag(
+                entity.entity_type,
+                entity.last_seen_at,
+                entity.first_seen_at,
+            )
+            freshness_display = get_freshness_display(freshness_tag)
+
+            display_value = entity.value
+            display_canonical = entity.canonical_value
+            display_context = entity.context
+            if defang:
+                display_value = defang_value(entity.entity_type, entity.value or "")
+                if entity.canonical_value:
+                    display_canonical = defang_value(entity.entity_type, entity.canonical_value)
+                if entity.context:
+                    display_context = defang_text(entity.context)
+
             return {
                 **_entity_to_dict(entity),
+                "value": display_value,
+                "canonical_value": display_canonical,
+                "context": display_context,
                 "source_url": source_url,
                 "is_seed": is_seed,
                 "appearances": appearances,
                 "appearance_count": len(appearances),
+                "first_seen_at": entity.first_seen_at.isoformat() if entity.first_seen_at else None,
+                "last_seen_at": entity.last_seen_at.isoformat() if entity.last_seen_at else None,
+                "freshness_tag": freshness_tag.value,
+                "freshness_label": freshness_display["label"],
+                "freshness_color": freshness_display["color"],
+                "source_count": entity.source_count or 1,
+                "corroborating_sources": json.loads(entity.corroborating_sources or '["dark_web_scrape"]'),
+                "cross_referenced": (entity.source_count or 1) > 1,
+                "defanged": defang,
                 "blockchain_data": {
                     "wallet_type": entity.entity_type if entity.entity_type in ("BITCOIN_ADDRESS", "ETHEREUM_ADDRESS", "MONERO_ADDRESS") else None,
                     "historical_context": entity.historical_context,

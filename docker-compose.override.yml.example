@@ -6,8 +6,8 @@
 services:
   postgres:
     environment:
-      POSTGRES_PASSWORD: dev_password_change_in_production
+      POSTGRES_PASSWORD: <DEV_PW>
 
   fastapi:
     environment:
-      JWT_SECRET: dev-jwt-secret-change-in-production
+      JWT_SECRET: <DEV_JWT>

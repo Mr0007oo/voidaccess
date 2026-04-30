@@ -149,21 +149,23 @@ class Investigation(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
-    is_seed: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
+    is_seed: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, default=False, server_default="false"
+    )
     graph_status: Mapped[str] = mapped_column(
         sa.String(20), nullable=False, default="pending", server_default="pending"
     )
     current_step: Mapped[int] = mapped_column(
-        sa.Integer, server_default="0", default=0
+        sa.Integer, nullable=False, default=0, server_default="0"
     )
     current_step_label: Mapped[str] = mapped_column(
-        sa.String(200), server_default="", default=""
+        sa.String(200), nullable=False, default="", server_default=""
     )
     entity_count: Mapped[int] = mapped_column(
-        sa.Integer, server_default="0", default=0
+        sa.Integer, nullable=False, default=0, server_default="0"
     )
     page_count: Mapped[int] = mapped_column(
-        sa.Integer, server_default="0", default=0
+        sa.Integer, nullable=False, default=0, server_default="0"
     )
     user_id: Mapped[Optional[int]] = mapped_column(
         sa.Integer,
@@ -172,273 +174,13 @@ class Investigation(Base):
         index=True,
     )
 
-    # Relationships
     sources: Mapped[List["Source"]] = relationship(
-        "Source", secondary=investigation_sources, back_populates="investigations"
-    )
-    entities: Mapped[List["Entity"]] = relationship(
-        "Entity", back_populates="investigation", cascade="all, delete-orphan"
-    )
-
-    def __repr__(self) -> str:
-        return f"<Investigation id={self.id} query={self.query[:50]!r}>"
-
-
-class Source(Base):
-    """
-    Canonical record for a .onion domain.  One row per unique base address.
-    Sources are global — they exist independently of any single investigation.
-    """
-    __tablename__ = "sources"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        sa.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    onion_address: Mapped[str] = mapped_column(
-        sa.String(255), unique=True, nullable=False, index=True
-    )
-    first_seen: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-    )
-    last_seen: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-    )
-    # VARCHAR so we can add new statuses without migrations
-    status: Mapped[str] = mapped_column(
-        sa.String(20), nullable=False, default=SourceStatus.UNKNOWN.value
-    )
-    source_type: Mapped[str] = mapped_column(
-        sa.String(30), nullable=False, default=SourceType.SEARCH_RESULT.value
+        "Source",
+        secondary=investigation_sources,
+        back_populates="investigations",
+        lazy="select",
     )
 
-    # Relationships
-    investigations: Mapped[List["Investigation"]] = relationship(
-        "Investigation", secondary=investigation_sources, back_populates="sources"
-    )
-    pages: Mapped[List["Page"]] = relationship("Page", back_populates="source")
-
-    def __repr__(self) -> str:
-        return f"<Source {self.onion_address!r} status={self.status}>"
-
-
-class Page(Base):
-    """
-    One row per unique URL.  Stores the cleaned text and a content hash for
-    deduplication (Phase 1C crawler will use raw_content_hash to skip re-scraping
-    identical content served at different URLs).
-    """
-    __tablename__ = "pages"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        sa.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    # Nullable: pages discovered by the crawler before their parent domain
-    # is resolved can be stored without a source_id.
-    source_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        sa.UUID(as_uuid=True),
-        sa.ForeignKey("sources.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
-    url: Mapped[str] = mapped_column(sa.Text, unique=True, nullable=False)
-    # SHA-256 hex digest of the raw downloaded content
-    raw_content_hash: Mapped[Optional[str]] = mapped_column(
-        sa.String(64), nullable=True, index=True
-    )
-    cleaned_text: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
-    scrape_timestamp: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-    )
-    # When the post was authored (from HTML); null if not extractable — use scrape_timestamp as fallback
-    posted_at: Mapped[Optional[datetime]] = mapped_column(
-        sa.DateTime(timezone=True), nullable=True, index=True
-    )
-    # Populated by Phase 6 (i18n/detect.py); nullable until then
-    language: Mapped[Optional[str]] = mapped_column(sa.String(10), nullable=True)
-    byte_size: Mapped[Optional[int]] = mapped_column(sa.Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-    )
-
-    # Relationships
-    source: Mapped[Optional["Source"]] = relationship("Source", back_populates="pages")
-    entities: Mapped[List["Entity"]] = relationship(
-        "Entity", back_populates="page", cascade="all, delete-orphan"
-    )
-    relationships_as_source: Mapped[List["EntityRelationship"]] = relationship(
-        "EntityRelationship",
-        back_populates="source_page",
-        foreign_keys="EntityRelationship.source_page_id",
-    )
-
-    def __repr__(self) -> str:
-        return f"<Page url={self.url[:80]!r}>"
-
-
-class Entity(Base):
-    """
-    A single structured intelligence artifact extracted from a Page.
-
-    The same real-world value (e.g. a Bitcoin wallet address) may appear across
-    many pages and therefore produce many Entity rows.  Phase 2D (extractor/normalizer.py)
-    will deduplicate them into canonical records; for now every extraction yields
-    its own row linked to the page where it was found.
-    """
-    __tablename__ = "entities"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        sa.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    page_id: Mapped[uuid.UUID] = mapped_column(
-        sa.UUID(as_uuid=True),
-        sa.ForeignKey("pages.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    # Optional back-reference to the investigation that produced this entity.
-    # Phase 2 extractor will populate this; Phase 1A records may leave it NULL.
-    investigation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        sa.UUID(as_uuid=True),
-        sa.ForeignKey("investigations.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
-    # Use EntityType enum values, but stored as plain VARCHAR for extensibility
-    entity_type: Mapped[str] = mapped_column(sa.String(50), nullable=False, index=True)
-    value: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    canonical_value: Mapped[Optional[str]] = mapped_column(sa.String, nullable=True, index=True)
-    confidence: Mapped[float] = mapped_column(sa.Float, nullable=False, default=1.0)
-    # Surrounding post text for analyst context (longer snippets improve stylometry)
-    context_snippet: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
-    context = sa.orm.synonym("context_snippet")
-    extraction_method: Mapped[Optional[str]] = mapped_column(
-        sa.String(10), nullable=True
-    )  # "regex", "NER", "LLM"
-    historical_context: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
-    first_seen: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-    )
-    last_seen: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-    )
-
-    # Relationships
-    page: Mapped["Page"] = relationship("Page", back_populates="entities")
-    investigation: Mapped[Optional["Investigation"]] = relationship(
-        "Investigation", back_populates="entities"
-    )
-    relationships_as_a: Mapped[List["EntityRelationship"]] = relationship(
-        "EntityRelationship",
-        foreign_keys="EntityRelationship.entity_a_id",
-        back_populates="entity_a",
-        cascade="all, delete-orphan",
-    )
-    relationships_as_b: Mapped[List["EntityRelationship"]] = relationship(
-        "EntityRelationship",
-        foreign_keys="EntityRelationship.entity_b_id",
-        back_populates="entity_b",
-        cascade="all, delete-orphan",
-    )
-
-    def __repr__(self) -> str:
-        return f"<Entity type={self.entity_type!r} value={str(self.value)[:50]!r}>"
-
-    __table_args__ = (
-        sa.Index("ix_entity_canonical", "entity_type", "canonical_value"),
-    )
-
-
-class EntityRelationship(Base):
-    """
-    A directed edge between two Entity records.
-
-    Captures co-occurrence, attribution, and other semantic links.
-    Phase 3 (graph/) will read these to build the NetworkX / Neo4j graph.
-    """
-    __tablename__ = "entity_relationships"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        sa.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    entity_a_id: Mapped[uuid.UUID] = mapped_column(
-        sa.UUID(as_uuid=True),
-        sa.ForeignKey("entities.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    entity_b_id: Mapped[uuid.UUID] = mapped_column(
-        sa.UUID(as_uuid=True),
-        sa.ForeignKey("entities.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    # Use RelationshipType enum values; stored as VARCHAR
-    relationship_type: Mapped[str] = mapped_column(
-        sa.String(50), nullable=False, index=True
-    )
-    source_page_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        sa.UUID(as_uuid=True),
-        sa.ForeignKey("pages.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    confidence: Mapped[float] = mapped_column(sa.Float, nullable=False, default=1.0)
-    first_seen: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-    )
-    investigation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        sa.UUID(as_uuid=True),
-        sa.ForeignKey("investigations.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
-
-    # Relationships
-    entity_a: Mapped["Entity"] = relationship(
-        "Entity", foreign_keys=[entity_a_id], back_populates="relationships_as_a"
-    )
-    entity_b: Mapped["Entity"] = relationship(
-        "Entity", foreign_keys=[entity_b_id], back_populates="relationships_as_b"
-    )
-    source_page: Mapped[Optional["Page"]] = relationship(
-        "Page",
-        foreign_keys=[source_page_id],
-        back_populates="relationships_as_source",
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<EntityRelationship {self.entity_a_id} "
-            f"-[{self.relationship_type}]-> {self.entity_b_id}>"
-        )
-
-    __table_args__ = (
-        sa.Index(
-            "ix_entity_relationships_lookup",
-            "entity_a_id",
-            "entity_b_id",
-            "relationship_type",
-        ),
-    )
 
 
 class MonitorAlertSeverity(str, enum.Enum):
@@ -591,5 +333,286 @@ class UserApiKey(Base):
 
     __table_args__ = (
         sa.UniqueConstraint("user_id", "key_name"),
+    )
+
+
+class ContentSafetyEvent(Base):
+    """
+    Audit log for content safety block events.
+    Never stores actual prohibited content — only event metadata and a hash
+    prefix for correlation.
+    """
+    __tablename__ = "content_safety_events"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(
+        sa.String(50), nullable=False
+    )  # "query_blocked", "url_blocked", "content_blocked"
+    user_id: Mapped[Optional[int]] = mapped_column(sa.Integer, nullable=True)
+    # Hash prefix for correlation — never the actual content
+    content_hash: Mapped[Optional[str]] = mapped_column(sa.String(64), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+    )
+
+
+class Entity(Base):
+    """
+    Structured intelligence artifacts extracted from pages.
+    """
+    __tablename__ = "entities"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        sa.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    page_id: Mapped[uuid.UUID] = mapped_column(
+        sa.UUID(as_uuid=True),
+        sa.ForeignKey("pages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    investigation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.UUID(as_uuid=True),
+        sa.ForeignKey("investigations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    entity_type: Mapped[str] = mapped_column(sa.String(50), nullable=False)
+    value: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(
+        sa.Float(), nullable=False, server_default="1.0"
+    )
+    # DB column is context_snippet; `context` is a backward-compat Python alias
+    context_snippet: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    canonical_value: Mapped[Optional[str]] = mapped_column(
+        sa.String, nullable=True, index=True
+    )
+    historical_context: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    extraction_method: Mapped[Optional[str]] = mapped_column(
+        sa.String(10), nullable=True
+    )
+    first_seen: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    last_seen: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    source_count: Mapped[int] = mapped_column(
+        sa.Integer, server_default="1", default=1
+    )
+    corroborating_sources: Mapped[Optional[str]] = mapped_column(
+        sa.Text, nullable=True
+    )
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        nullable=True,
+    )
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        nullable=True,
+    )
+
+    @property
+    def context(self) -> Optional[str]:
+        """Backward-compat alias for context_snippet (AGENTS.md: do not remove)."""
+        return self.context_snippet
+
+    @context.setter
+    def context(self, value: Optional[str]) -> None:
+        self.context_snippet = value
+
+    __table_args__ = (
+        sa.Index("ix_entities_page_id", "page_id"),
+        sa.Index("ix_entities_investigation_id", "investigation_id"),
+        sa.Index("ix_entities_entity_type", "entity_type"),
+        sa.Index("ix_entity_canonical", "entity_type", "canonical_value"),
+    )
+
+    page: Mapped["Page"] = relationship("Page", back_populates="entities")
+    relationships_as_entity_a: Mapped[List["EntityRelationship"]] = relationship(
+        "EntityRelationship",
+        foreign_keys="EntityRelationship.entity_a_id",
+        back_populates="entity_a",
+    )
+    relationships_as_entity_b: Mapped[List["EntityRelationship"]] = relationship(
+        "EntityRelationship",
+        foreign_keys="EntityRelationship.entity_b_id",
+        back_populates="entity_b",
+    )
+
+
+
+class Page(Base):
+    """
+    Individual scraped page from a source.
+    """
+    __tablename__ = "pages"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        sa.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    source_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.UUID(as_uuid=True),
+        sa.ForeignKey("sources.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    url: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    raw_content_hash: Mapped[Optional[str]] = mapped_column(sa.String(64), nullable=True)
+    cleaned_text: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    scrape_timestamp: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    language: Mapped[Optional[str]] = mapped_column(sa.String(10), nullable=True)
+    byte_size: Mapped[Optional[int]] = mapped_column(sa.Integer, nullable=True)
+    posted_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint("url"),
+        sa.Index("ix_pages_source_id", "source_id"),
+        sa.Index("ix_pages_raw_content_hash", "raw_content_hash"),
+        sa.Index("ix_pages_posted_at", "posted_at"),
+    )
+
+    source: Mapped[Optional["Source"]] = relationship(
+        "Source", back_populates="pages"
+    )
+    entities: Mapped[List["Entity"]] = relationship(
+        "Entity", back_populates="page", cascade="all, delete-orphan"
+    )
+    relationships_as_source: Mapped[List["EntityRelationship"]] = relationship(
+        "EntityRelationship",
+        foreign_keys="EntityRelationship.source_page_id",
+        back_populates="source_page",
+    )
+
+
+class Source(Base):
+    """
+    Canonical .onion domain registry.
+    """
+    __tablename__ = "sources"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        sa.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    onion_address: Mapped[str] = mapped_column(sa.String(255), nullable=False, unique=True)
+    first_seen: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    last_seen: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    status: Mapped[str] = mapped_column(
+        sa.String(20), nullable=False, default="unknown", server_default="unknown"
+    )
+    source_type: Mapped[str] = mapped_column(
+        sa.String(30),
+        nullable=False,
+        default="search_result",
+        server_default="search_result",
+    )
+
+    __table_args__ = (
+        sa.Index("ix_sources_onion_address", "onion_address"),
+    )
+
+    pages: Mapped[List["Page"]] = relationship(
+        "Page", back_populates="source", cascade="all, delete-orphan"
+    )
+    investigations: Mapped[List["Investigation"]] = relationship(
+        "Investigation",
+        secondary=investigation_sources,
+        back_populates="sources",
+        lazy="select",
+    )
+
+
+class EntityRelationship(Base):
+    """
+    Directed edge between two entities.
+    """
+    __tablename__ = "entity_relationships"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        sa.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    entity_a_id: Mapped[uuid.UUID] = mapped_column(
+        sa.UUID(as_uuid=True),
+        sa.ForeignKey("entities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    entity_b_id: Mapped[uuid.UUID] = mapped_column(
+        sa.UUID(as_uuid=True),
+        sa.ForeignKey("entities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    relationship_type: Mapped[str] = mapped_column(sa.String(50), nullable=False)
+    source_page_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.UUID(as_uuid=True),
+        sa.ForeignKey("pages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    confidence: Mapped[float] = mapped_column(
+        sa.Float(), nullable=False, server_default="1.0"
+    )
+    first_seen: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    investigation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.UUID(as_uuid=True),
+        sa.ForeignKey("investigations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        sa.Index(
+            "ix_entity_relationships_lookup",
+            "entity_a_id",
+            "entity_b_id",
+            "relationship_type",
+        ),
+        sa.Index("ix_entity_relationships_investigation_id", "investigation_id"),
+        sa.Index("ix_entity_relationships_source_target", "entity_a_id", "entity_b_id"),
+    )
+
+    entity_a: Mapped["Entity"] = relationship(
+        "Entity",
+        foreign_keys=[entity_a_id],
+        back_populates="relationships_as_entity_a",
+    )
+    entity_b: Mapped["Entity"] = relationship(
+        "Entity",
+        foreign_keys=[entity_b_id],
+        back_populates="relationships_as_entity_b",
+    )
+    source_page: Mapped[Optional["Page"]] = relationship(
+        "Page",
+        foreign_keys=[source_page_id],
+        back_populates="relationships_as_source",
     )
 

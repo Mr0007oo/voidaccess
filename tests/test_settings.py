@@ -60,7 +60,7 @@ def mock_async_session():
 
 
 def test_encrypt_decrypt_roundtrip():
-    plaintext = "sk-test-12345"
+    plaintext = "sk-tst-123"
     encrypted = encrypt_api_key(plaintext)
     assert encrypted != plaintext
     assert encrypted != ""
@@ -82,7 +82,7 @@ def test_decrypt_invalid():
 
 def test_user_api_key_upsert(session, user_a):
     key_name = "OPENAI_API_KEY"
-    plaintext = "sk-user-a-key-xyz"
+    plaintext = "sk-usr-key"
 
     # Insert
     record = UserApiKey(

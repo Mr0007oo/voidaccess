@@ -37,22 +37,21 @@ RUN --mount=type=cache,target=/root/.pip \
     fi
 
 # Install Playwright only if explicitly enabled (opt-in)
-RUN --mount=type=cache,target=/root/.pip \
+# Always create /ms-playwright so COPY --from=builder doesn't fail when disabled
+RUN mkdir -p /ms-playwright && \
     if [ "$PLAYWRIGHT_ENABLED" = "true" ]; then \
         pip install --no-cache-dir playwright && \
-        playwright install chromium && \
-        playwright install-deps chromium; \
+        PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright install chromium && \
+        PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright install-deps chromium; \
     fi
 
 # Copy scripts for seed data download
 COPY scripts/ scripts/
 
-# Download seed data (only if API keys provided)
+# Download seed data (handles missing keys internally)
 RUN --mount=type=cache,target=/root/.pip \
-    if [ -n "$OTX_API_KEY" ] || [ -n "$ABUSECH_API_KEY" ]; then \
-        OTX_API_KEY=$OTX_API_KEY ABUSECH_API_KEY=$ABUSECH_API_KEY \
-        python scripts/download_seed.py || true; \
-    fi
+    OTX_API_KEY=$OTX_API_KEY ABUSECH_API_KEY=$ABUSECH_API_KEY \
+    python scripts/download_seed.py || true
 
 
 # --- Runtime stage ---
@@ -96,7 +95,10 @@ COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Create directories and set ownership early
-RUN mkdir -p /data /app && chown -R voidaccess:voidaccess /app /data
+RUN mkdir -p /data /app /ms-playwright && chown -R voidaccess:voidaccess /app /data /ms-playwright
+
+# Copy ms-playwright from builder
+COPY --from=builder /ms-playwright /ms-playwright
 
 # Copy seed data if it exists (using bracket wildcard to make it optional)
 COPY --from=builder /app/seed_data.json.g[z] /data/seed_data.json.gz
@@ -120,6 +122,7 @@ ENV TF_CPP_MIN_LOG_LEVEL=3
 ENV DATABASE_URL=postgresql://voidaccess:voidaccess@postgres:5432/voidaccess
 ENV TOR_PROXY_HOST=tor
 ENV TOR_PROXY_PORT=9050
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 EXPOSE 8000
 

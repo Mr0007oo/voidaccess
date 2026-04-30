@@ -47,6 +47,15 @@ export type InvestigationEntity = {
   first_seen?: string | null;
   last_seen?: string | null;
   graph_node_id: string;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  freshness_tag?: string;
+  freshness_label?: string;
+  freshness_color?: string;
+  source_count?: number;
+  corroborating_sources?: string[];
+  cross_referenced?: boolean;
+  defanged?: boolean;
 };
 
 export type GraphNodeJSON = {

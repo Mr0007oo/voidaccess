@@ -23,6 +23,16 @@ export const ALL_SHORTCUTS: KeyboardShortcut[] = [
   { key: "/", label: "/", description: "Focus search input" },
 ];
 
+// Graph-specific shortcuts — active when the graph canvas has keyboard focus.
+// Actual handling is in GraphVisualization.tsx; this list is for the help modal.
+export const GRAPH_SHORTCUTS: KeyboardShortcut[] = [
+  { key: "F",      label: "F",   description: "Fit graph to screen (reset camera)" },
+  { key: "P",      label: "P",   description: "Pin / unpin hovered node" },
+  { key: "H",      label: "H",   description: "Hide hovered node" },
+  { key: "R",      label: "R",   description: "Reset all — show all, unpin all, re-layout" },
+  { key: "Escape", label: "Esc", description: "Clear selection, show all nodes" },
+];
+
 interface UseKeyboardShortcutsOptions {
   onHelp?: () => void;
   onClose?: () => void;

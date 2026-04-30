@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from "next/server"
 import { SignJWT, jwtVerify } from "jose"
 import { isValidToken, middleware } from "./middleware"
 
-const TEST_SECRET = new TextEncoder().encode("test-secret-for-middleware")
-const EXPIRED_SECRET = new TextEncoder().encode("expired-test-secret")
+const TEST_SECRET = new TextEncoder().encode("test-secret")
+const EXPIRED_SECRET = new TextEncoder().encode("expired-sec")
 
 async function createExpiredToken(): Promise<string> {
   const token = await new SignJWT({ sub: "1", email: "test@test.com" })
@@ -25,7 +25,7 @@ describe("middleware", () => {
   const originalEnv = process.env.JWT_SECRET
 
   beforeAll(async () => {
-    process.env.JWT_SECRET = "test-secret-for-middleware"
+    process.env.JWT_SECRET = "test-secret"
   })
 
   afterAll(() => {

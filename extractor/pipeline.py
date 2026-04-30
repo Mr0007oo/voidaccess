@@ -250,6 +250,30 @@ async def extract_entities_from_pages(
 
     all_normalized = _resolve_conflicts(all_normalized)
 
+    # -----------------------------------------------------------------------
+    # Content safety: drop prohibited entity values before capping/storing.
+    # Only text-based types are checked; technical IOCs are never filtered.
+    # The actual value is never logged — only type and count.
+    # -----------------------------------------------------------------------
+    from utils.content_safety import is_blocked_entity_value as _is_blocked_entity_value
+    clean_entities: list[NormalizedEntity] = []
+    blocked_entity_count = 0
+    for _ent in all_normalized:
+        if _is_blocked_entity_value(_ent.entity_type, _ent.value):
+            blocked_entity_count += 1
+            logger.debug(
+                "Entity value blocked — prohibited content: type=%s",
+                _ent.entity_type,
+            )
+        else:
+            clean_entities.append(_ent)
+    if blocked_entity_count > 0:
+        logger.info(
+            "Blocked %d entities for prohibited content",
+            blocked_entity_count,
+        )
+    all_normalized = clean_entities
+
     capped_entities, original_count = apply_entity_cap(
         all_normalized, cap=entity_cap, investigation_id=investigation_id
     )

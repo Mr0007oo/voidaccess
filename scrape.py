@@ -443,6 +443,18 @@ async def _fetch_one(
         _logger.warning("SSRF blocked fetch: %s", url)
         return url, title, None, None, None
 
+    try:
+        from utils.content_safety import is_blocked_url
+        url_blocked, _reason = is_blocked_url(url)
+        if url_blocked:
+            _logger.warning(
+                "URL blocked — prohibited content. URL hash: %s",
+                hashlib.sha256(url.encode()).hexdigest()[:16],
+            )
+            return url, title, None, None, None
+    except Exception:
+        pass
+
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return url, title, None, None, None

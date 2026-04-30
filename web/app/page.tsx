@@ -1,43 +1,44 @@
 import Link from "next/link";
 import { Settings } from "lucide-react";
 import { InvestigationInput } from "@/components/InvestigationInput";
-import { ParticleCanvas } from "@/components/ParticleCanvas";
 import { StatusBar } from "@/components/StatusBar";
 import { MonitorNavBadge } from "@/components/MonitorNavBadge";
 
 export default function HomePage() {
   return (
-    <div className="relative min-h-screen overflow-hidden bg-[var(--bg-void)] selection:bg-[var(--accent-dim)] selection:text-[var(--accent)]">
-      {/* Background Layer: Targeting Grid */}
-      <div 
-        className="pointer-events-none fixed inset-0 z-0 opacity-[0.03]"
+    <div
+      className="relative min-h-screen overflow-hidden selection:bg-[var(--accent-dim)] selection:text-[var(--accent)]"
+      style={{ backgroundColor: "#080B11" }}
+    >
+      {/* Background Layer: Subtle dark-navy grid */}
+      <div
+        className="pointer-events-none fixed inset-0 z-0"
         style={{
           backgroundImage: `
-            linear-gradient(to right, var(--text-primary) 1px, transparent 1px),
-            linear-gradient(to bottom, var(--text-primary) 1px, transparent 1px)
+            linear-gradient(rgba(30, 58, 95, 0.15) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(30, 58, 95, 0.15) 1px, transparent 1px)
           `,
-          backgroundSize: '80px 80px'
+          backgroundSize: "60px 60px",
         }}
         aria-hidden
       />
 
-      {/* Background Layer: Subtle Atmosphere Orb */}
-      <div 
-        className="pointer-events-none fixed -bottom-[300px] -right-[200px] z-0 h-[800px] w-[800px] rounded-full opacity-20 blur-[120px]"
+      {/* Background Layer: Radial vignette — darker at edges, lighter at center */}
+      <div
+        className="pointer-events-none fixed inset-0 z-0"
         style={{
-          background: "radial-gradient(circle, #1a3a5c 0%, transparent 70%)"
+          background:
+            "radial-gradient(ellipse at center, rgba(8, 11, 17, 0) 0%, rgba(8, 11, 17, 0.8) 100%)",
         }}
         aria-hidden
       />
-
-      {/* Layer 2 — Minimalist Particle Atmosphere */}
-      <ParticleCanvas />
 
       {/* Navigation */}
-      <header className="fixed left-0 right-0 top-0 z-30 flex h-[64px] items-center justify-between px-6 md:px-10 border-b border-[var(--border-dim)] backdrop-blur-md bg-[var(--bg-void)]/50">
+      <header className="fixed left-0 right-0 top-0 z-30 flex h-[64px] items-center justify-between px-6 md:px-10 border-b border-[var(--border-dim)] backdrop-blur-md bg-[#080B11]/50">
         <Link
           href="/"
-          className="flex items-center gap-2 text-[1.1rem] font-semibold tracking-tight text-[var(--text-primary)] font-heading"
+          className="flex items-center gap-2 text-[1.1rem] font-semibold tracking-tight text-[var(--text-primary)]"
+          style={{ fontFamily: "var(--font-display)" }}
         >
           <span className="text-[var(--accent)]" aria-hidden>
             ●
@@ -73,12 +74,22 @@ export default function HomePage() {
       <main className="relative z-10 flex min-h-screen flex-col items-center justify-center px-4">
         <div className="flex w-full max-w-4xl flex-col items-center gap-12 text-center">
           <div className="flex flex-col items-center gap-4 animate-in fade-in slide-in-from-bottom-4 duration-1000">
-            <h1 className="text-[3.5rem] font-extrabold leading-[1.1] tracking-tight text-[var(--text-primary)] md:text-[4.5rem] font-heading">
+            <h1
+              className="text-[3.5rem] font-bold leading-[1.1] tracking-tight text-[var(--text-primary)] md:text-[4.5rem]"
+              style={{
+                fontFamily: "var(--font-display)",
+                fontWeight: 700,
+                letterSpacing: "-0.02em",
+              }}
+            >
               What will you <br />
               <span className="text-[var(--accent)]">hunt</span> today?
             </h1>
-            <p className="max-w-xl text-[15px] font-medium leading-relaxed text-[var(--text-secondary)]">
-              Professional dark web intelligence platform for serious threat analysts. 
+            <p
+              className="max-w-xl text-[15px] leading-relaxed text-[var(--text-secondary)]"
+              style={{ fontFamily: "var(--font-body)", fontWeight: 400 }}
+            >
+              Professional dark web intelligence platform for serious threat analysts.{" "}
               Search, map, and attribute with precision.
             </p>
           </div>
@@ -87,7 +98,10 @@ export default function HomePage() {
             <InvestigationInput />
           </div>
 
-          <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3 font-mono text-[13px] text-[var(--text-muted)] animate-in fade-in delay-500 duration-1000 fill-mode-both">
+          <div
+            className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3 text-[13px] text-[var(--text-muted)] animate-in fade-in delay-500 duration-1000 fill-mode-both"
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
             <span className="cursor-default">Ransomware Lookup</span>
             <span className="text-[var(--border-strong)]">·</span>
             <span className="cursor-default">Crypto Trace</span>
@@ -103,7 +117,10 @@ export default function HomePage() {
 
       {/* Footer / Legal minimal */}
       <footer className="absolute bottom-6 left-0 right-0 z-10 hidden md:block">
-        <div className="flex items-center justify-center gap-4 text-[11px] font-medium uppercase tracking-[0.2em] text-[var(--text-muted)]">
+        <div
+          className="flex items-center justify-center gap-4 text-[11px] font-medium uppercase tracking-[0.2em] text-[var(--text-muted)]"
+          style={{ fontFamily: "var(--font-mono)" }}
+        >
           <span>Encrypted Architecture</span>
           <span className="h-1 w-1 rounded-full bg-[var(--text-muted)]" />
           <span>Distributed OSINT Nodes</span>
@@ -114,4 +131,3 @@ export default function HomePage() {
     </div>
   );
 }
-

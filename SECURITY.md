@@ -1,63 +1,65 @@
 # Security Policy
 
-## Reporting Security Vulnerabilities
+## Supported Versions
 
-We take security seriously. If you discover a security vulnerability in VoidAccess, please report it responsibly.
+| Version | Supported |
+|---------|-----------|
+| v1.0.0   | Yes       |
+| < v1.0.0  | No        |
 
-### How to Report
+The current version is v1.0.0. Only the latest release receives security fixes.
 
-**Please do NOT report security vulnerabilities through public GitHub issues.**
+## What Counts as a Vulnerability
 
-Instead, please use one of these methods:
+This project connects to dark web sites via Tor, uses LLMs to process queries and content, and stores threat intelligence. A valid vulnerability is something that:
 
-1. **GitHub Private Vulnerability Reporting** (preferred):
-   - Go to the "Security" tab of the repository
-   - Click "Report a vulnerability"
-   - Fill out the vulnerability report form
+- Allows authentication bypass or privilege escalation between user accounts
+- Exposes API keys or secrets stored for other users or the server
+- Executes SSRF by bypassing the URL validation in the scraping layer
+- Injects malicious prompts into LLM workflows via user input
+- Grants access to data belonging to other users
 
-2. **Email**:
-   - Email the maintainers directly (if available in the repository settings)
+The following are not in scope:
 
-### What to Include
+- Issues in third-party dark web search engines this project connects to
+- Findings from automated scanners without a proof of concept
+- Social engineering or phishing that targets users of this platform
+- Theoretical attacks with no realistic exploitation path
 
-When reporting, please include:
+## Reporting
 
-1. **Type of vulnerability** (e.g., SQL injection, XSS, etc.)
-2. **Full paths** of the source file(s) related to the vulnerability
-3. **Steps to reproduce** the issue
-4. **Impact** of the vulnerability (what an attacker could accomplish)
-5. ** Proof of concept** or exploit code (if non-sensitive)
+Use GitHub private vulnerability reporting if available. If not, email security@katriel.moses@gmail.com.
+
+Include in your report:
+
+- Description of the issue
+- Steps to reproduce
+- Affected component (e.g., /auth/login endpoint, scrape.py)
+- Potential impact
+- Any suggested fix you have
 
 ### Response Timeline
 
-- **Acknowledgment**: Within 72 hours, we will confirm receipt of your report
-- **Initial Response**: We aim to provide an initial assessment within 7 days
-- **Resolution**: We work to release a fix as quickly as possible, depending on severity
+- Acknowledge within 48 hours
+- Status updates within 7 days
+- Fix timeline communicated once confirmed
 
-### Severity Levels
+## What Happens After a Report
 
-We prioritize fixes based on severity:
-- **Critical**: Patch released within 24-48 hours
-- **High**: Patch released within 1-2 weeks
-- **Medium**: Patch released within 2-4 weeks
-- **Low**: Patch released in next regular release
+We investigate and confirm the issue. If valid, we fix it before public disclosure. We credit the reporter in release notes unless they prefer anonymity. We do not take legal action against good-faith researchers who follow this policy.
 
-### Scope
+## Security Design
 
-This policy applies to:
-- The VoidAccess core application
-- Official plugins and extensions
-- Documentation and deployment configurations
+The API runs as a non-root user inside Docker containers (uid 1000, gid 1000). JWTs expire after 8 hours and include a unique ID (jti) that gets stored in Redis for revocation when users log out. If Redis is not configured, tokens cannot be revoked.
 
-### What to Expect
+API keys provided by users are encrypted with Fernet (AES-128) using a key derived from JWT_SECRET. Server-level keys are stored in environment variables only.
 
-- We will keep you updated on our progress
-- We will credit you in the security advisory (unless you prefer to remain anonymous)
-- We will publicly acknowledge your contribution in the release notes once the vulnerability is fixed
+Rate limiting is applied to auth endpoints (5/minute login, 3/minute password reset) and a global limit to all API routes (100/minute). These can be disabled via DISABLE_RATE_LIMIT=true.
 
-Thank you for helping keep VoidAccess and its users safe!
-### Known Limitations
+The scraping layer validates every URL before fetch. It blocks internal IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, link-local, IPv6 private) and known internal hostnames. Onion addresses pass through because Tor handles the routing. This prevents accidental internal network exposure.
 
-**SSRF DNS Rebinding**
-The platform employs protections against Server-Side Request Forgery (SSRF) when crawling dark web and clearnet addresses by resolving destination hostnames and rejecting internal IPs (e.g., 10.0.0.0/8, 127.0.0.1). However, this protection is performed at the application layer prior to initiating the HTTP request. It remains partially vulnerable to advanced Time-of-Check to Time-of-Use (TOCTOU) DNS Rebinding attacks. A sophisticated attacker capable of serving DNS responses with extremely short TTLs could theoretically bypass this protection if the DNS record resolves to a safe IP during validation but is subsequently rebound to an internal IP during the actual crawler connection. Administrators deploying VoidAccess on sensitive internal networks are strongly advised to enforce strict egress network policies at the firewall level to fully mitigate this vector.
+## Known Limitations
 
+Tor circuit saturation can cause timeouts or failures under heavy scraping loads. The SSRF protection resolves hostnames once before the request, so short-TTL DNS rebinding is a theoretical risk that firewall-level egress policies would mitigate. This is considered an accepted risk given the tool's threat model focuses on passive OSINT collection rather than defended network targets.
+
+Free-tier LLM providers impose rate limits that trigger retry logic, which could be observed in request patterns.

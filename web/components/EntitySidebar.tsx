@@ -28,6 +28,35 @@ const CONFIDENCE_OPTIONS = [
   { label: ">= 0.50 (low)", value: 0.5 },
 ];
 
+const FRESHNESS_OPTIONS = [
+  { label: "All freshness", value: "" },
+  { label: "Fresh only", value: "fresh" },
+  { label: "Exclude expired", value: "expired" },
+];
+
+const SOURCE_TOOLTIPS: Record<string, string> = {
+  OTX: "AlienVault Open Threat Exchange",
+  ThreatFox: "Abuse.ch ThreatFox IOC database",
+  MalwareBazaar: "Abuse.ch MalwareBazaar",
+  URLhaus: "Abuse.ch URLhaus",
+  Shodan: "Shodan Internet-wide scan data",
+  VirusTotal: "VirusTotal malware database",
+  CISA_KEV: "CISA Known Exploited Vulnerabilities",
+  MITRE_ATTACK: "MITRE ATT&CK framework",
+  dark_web_scrape: "Extracted from dark web pages",
+};
+
+function getFreshnessColor(tag?: string): string {
+  const colors: Record<string, string> = {
+    fresh: "bg-green-500",
+    aging: "bg-yellow-500",
+    stale: "bg-orange-500",
+    expired: "bg-red-500",
+    unknown: "bg-gray-500",
+  };
+  return colors[tag || "unknown"] || "bg-gray-500";
+}
+
 export function EntitySidebar({
   entities,
   selectedIds,
@@ -38,6 +67,7 @@ export function EntitySidebar({
   onMinConfidenceChange,
 }: Props) {
   const [search, setSearch] = useState("");
+  const [freshnessFilter, setFreshnessFilter] = useState("");
 
   const filtered = useMemo(() => {
     const s = search.toLowerCase().trim();
@@ -49,8 +79,13 @@ export function EntitySidebar({
           (e.category as string).toLowerCase().includes(s)
       );
     }
+    if (freshnessFilter === "fresh") {
+      result = result.filter((e) => e.freshness_tag === "fresh");
+    } else if (freshnessFilter === "expired") {
+      result = result.filter((e) => e.freshness_tag !== "expired");
+    }
     return result;
-  }, [entities, search]);
+  }, [entities, search, freshnessFilter]);
 
   const grouped = useMemo(() => {
     const map: Partial<Record<EntityCategoryKey, InvestigationEntity[]>> = {};
@@ -97,6 +132,17 @@ export function EntitySidebar({
           className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-void)] py-1.5 px-2 text-[11px] text-[var(--text-secondary)] outline-none transition-all focus:border-[var(--accent-border)] cursor-pointer"
         >
           {CONFIDENCE_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={freshnessFilter}
+          onChange={(e) => setFreshnessFilter(e.target.value)}
+          className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-void)] py-1.5 px-2 text-[11px] text-[var(--text-secondary)] outline-none transition-all focus:border-[var(--accent-border)] cursor-pointer"
+        >
+          {FRESHNESS_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
               {opt.label}
             </option>
@@ -215,6 +261,32 @@ export function EntitySidebar({
                               >
                                 {typeConfig.label}
                               </span>
+                              {(e.source_count ?? 1) > 1 && (
+                                <span
+                                  className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold ${
+                                    (e.source_count ?? 1) >= 4
+                                      ? "bg-green-600 text-white"
+                                      : "bg-blue-600 text-white"
+                                  }`}
+                                >
+                                  {(e.source_count ?? 1)} sources
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {e.freshness_label && (
+                                <span className="flex items-center gap-1">
+                                  <span className={`h-1.5 w-1.5 rounded-full ${getFreshnessColor(e.freshness_tag)}`} />
+                                  <span className="text-[10px] text-[var(--text-muted)]">
+                                    {e.freshness_label}
+                                  </span>
+                                </span>
+                              )}
+                              {(e.corroborating_sources?.length ?? 0) > 1 && (
+                                <span className="text-[9px] text-[var(--text-muted)] truncate">
+                                  {e.corroborating_sources?.join(" · ")}
+                                </span>
+                              )}
                             </div>
                             {e.context?.[0] && (
                               <span className="truncate text-[10px] text-[var(--text-muted)] leading-tight opacity-70">
