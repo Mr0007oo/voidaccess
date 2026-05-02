@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI):
     # Pre-warm Playwright browser (avoids cold start on first JS page)
     if PLAYWRIGHT_ENABLED:
         try:
-            from scrape_js import get_browser
+            from scraper.scrape_js import get_browser
 
             await get_browser(TOR_PROXY_HOST, TOR_PROXY_PORT)
             logger.warning("Playwright browser pre-warmed")
@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
 # Close Playwright browser
     if PLAYWRIGHT_ENABLED:
         try:
-            from scrape_js import close_browser
+            from scraper.scrape_js import close_browser
 
             await close_browser()
         except Exception:
@@ -150,7 +150,7 @@ async def lifespan(app: FastAPI):
 
     # Close cached scrape sessions (Tor and direct) - always, regardless of PLAYWRIGHT_ENABLED
     try:
-        from scrape import close_cached_sessions
+        from scraper.scrape import close_cached_sessions
 
         await close_cached_sessions()
     except Exception:
@@ -464,7 +464,7 @@ async def search_test(_=Depends(get_current_user)) -> dict:
     TODO: Remove or protect in production.
     """
     try:
-        from search import get_search_results  # noqa: PLC0415
+        from search.search import get_search_results  # noqa: PLC0415
 
         results = get_search_results("bitcoin+dark+web")
         return {

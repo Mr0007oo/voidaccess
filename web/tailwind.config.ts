@@ -8,11 +8,11 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        heading:  ["var(--font-space-grotesk)", "ui-sans-serif", "system-ui"],
-        display:  ["var(--font-space-grotesk)", "ui-sans-serif", "system-ui"],
-        sans:     ["var(--font-inter)", "ui-sans-serif", "system-ui"],
-        body:     ["var(--font-inter)", "ui-sans-serif", "system-ui"],
-        mono:     ["var(--font-jetbrains-mono)", "ui-monospace", "monospace"],
+        heading:  ["var(--font-display)", "ui-sans-serif", "system-ui"],
+        display:  ["var(--font-display)", "ui-sans-serif", "system-ui"],
+        sans:     ["var(--font-body)", "ui-sans-serif", "system-ui"],
+        body:     ["var(--font-body)", "ui-sans-serif", "system-ui"],
+        mono:     ["var(--font-mono)", "ui-monospace", "monospace"],
       },
     },
   },

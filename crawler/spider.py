@@ -40,7 +40,7 @@ from config import TOR_PROXY_HOST, TOR_PROXY_PORT
 from crawler.dedup import ContentDedup, UrlDedup
 from crawler.frontier import Frontier
 from crawler.utils import extract_onion_links, is_valid_onion, normalize_url
-from scrape import _extract_text
+from scraper.scrape import _extract_text
 
 _logger = logging.getLogger(__name__)
 

@@ -31,6 +31,7 @@ export type InvestigationSummary = {
   page_count: number;
   graph_status: string | null;
   model_used: string | null;
+  current_step: number | null;
   preset?: string | null;
   summary?: string | null;
 };
@@ -149,7 +150,7 @@ export const CATEGORY_META: Record<
   { label: string; short: string; icon: string; color: string }
 > = {
   THREAT_ACTOR: { label: "Threat Actors", short: "Threat Actor", icon: "👤", color: "#e05c5c" },
-  WALLET: { label: "Wallets", short: "Wallet", icon: "💰", color: "#58a6ff" },
+  WALLET: { label: "Wallets", short: "Wallet", icon: "💰", color: "#9B9FEE" },
   MALWARE: { label: "Malware", short: "Malware", icon: "🦠", color: "#d08770" },
   FORUM: { label: "Forums", short: "Forum", icon: "💬", color: "#79b8ff" },
   C2_SERVER: { label: "C2 Servers", short: "C2 Server", icon: "🔌", color: "#b392f0" },

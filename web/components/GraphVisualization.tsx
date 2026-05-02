@@ -20,7 +20,7 @@ import { NodeDetailPanel, type SelectedNodeData } from "./NodeDetailPanel";
 
 const CAT_COLOR: Record<EntityCategoryKey, string> = {
   THREAT_ACTOR: "#ff6b6b",
-  WALLET:       "#58a6ff",
+  WALLET:       "#9B9FEE",
   MALWARE:      "#f0a050",
   FORUM:        "#79b8ff",
   C2_SERVER:    "#c678dd",
@@ -33,21 +33,21 @@ const CAT_COLOR: Record<EntityCategoryKey, string> = {
 };
 
 const EDGE_DEFAULT  = "rgba(90,110,140,0.12)";
-const EDGE_ACTIVE   = "#58a6ff";
+const EDGE_ACTIVE   = "#9B9FEE";
 const NODE_DIM      = "#181d26";
 const COLOR_PINNED  = "#F59E0B";  // amber — pinned node indicator
 
 // ─── FA2 Settings ─────────────────────────────────────────────────────────────
 
 const FA2_SETTINGS = {
-  gravity:                        1,
-  scalingRatio:                   2,
+  gravity:                        0.5,
+  scalingRatio:                   20,
   slowDown:                       10,
   barnesHutOptimize:              true,
   barnesHutTheta:                 0.5,
   adjustSizes:                    true,
-  edgeWeightInfluence:            1,
-  linLogMode:                     false,
+  edgeWeightInfluence:            0,
+  linLogMode:                     true,
   outboundAttractionDistribution: false,
   strongGravityMode:              false,
 };
@@ -104,9 +104,11 @@ function buildGraph(data: InvestigationGraphResponse, strongOnly: boolean): Grap
     });
   }
 
-  // Size by degree — log scale 4 → 22
+  // Size by degree — linear scale 8 → 25
+  const maxDeg = Math.max(...g.nodes().map(n => g.degree(n)), 1);
   g.forEachNode((n) => {
-    const sz = Math.max(4, Math.min(22, 4 + Math.log1p(g.degree(n)) * 4));
+    const deg = g.degree(n);
+    const sz  = 8 + (deg / maxDeg) * (25 - 8);
     g.setNodeAttribute(n, "size",     sz);
     g.setNodeAttribute(n, "origSize", sz);
   });
@@ -201,7 +203,7 @@ function buildClusters(g: Graph): Cluster[] {
       if (d > topDeg) { topDeg = d; topNode = n; }
     }
     const domCat  = Object.entries(catCount).sort((a, b) => b[1] - a[1])[0][0] as EntityCategoryKey;
-    const color   = CAT_COLOR[domCat] ?? "#58a6ff";
+    const color   = CAT_COLOR[domCat] ?? "#9B9FEE";
     const numCats = Object.keys(catCount).length;
     const hubRaw  = (g.getNodeAttribute(topNode, "label") as string ?? topNode);
     const label   = numCats === 1
@@ -319,23 +321,6 @@ interface GraphStats {
   hidden: number;
 }
 
-// ─── FA2 Worker (lazy import to avoid SSR issues) ─────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type FA2WorkerInstance = any;
-
-async function tryCreateFA2Worker(g: Graph): Promise<FA2WorkerInstance | null> {
-  try {
-    const mod = await import("graphology-layout-forceatlas2/worker");
-    const FA2Layout = mod.default ?? mod;
-    const sensible = inferSettings(g);
-    const worker = new FA2Layout(g, { settings: { ...sensible, ...FA2_SETTINGS } });
-    return worker;
-  } catch {
-    return null;
-  }
-}
-
 // ─── Component ─────────────────────────────────────────────────────────────────
 
 export type GraphVisualizationProps = {
@@ -348,6 +333,7 @@ export type GraphVisualizationProps = {
   onNodeClick:      (nodeId: string, payload: GraphNodeJSON | null) => void;
   focusNodeId:      string | null;
   onFocusHandled:   () => void;
+  searchQuery?:     string;
 };
 
 export function GraphVisualization({
@@ -360,6 +346,7 @@ export function GraphVisualization({
   onNodeClick,
   focusNodeId,
   onFocusHandled,
+  searchQuery,
 }: GraphVisualizationProps) {
   const containerRef  = useRef<HTMLDivElement>(null);
   const sigmaRef      = useRef<Sigma | null>(null);
@@ -379,9 +366,6 @@ export function GraphVisualization({
   const draggedNodeRef = useRef<string | null>(null);
   const isDraggingRef  = useRef(false);
 
-  // FA2 worker
-  const fa2WorkerRef  = useRef<FA2WorkerInstance | null>(null);
-  const fa2TimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Hover tracking (for keyboard shortcuts H / P)
   const hoveredNodeRef = useRef<string | null>(null);
@@ -502,25 +486,25 @@ export function GraphVisualization({
     sigmaRef.current?.getCamera().animate({ x: 0, y: 0, ratio: 1, angle: 0 }, { duration: 400 });
   }, []);
 
-  const startLayout = useCallback((durationMs = 5000) => {
-    if (fa2TimerRef.current) clearTimeout(fa2TimerRef.current);
-    const worker = fa2WorkerRef.current;
-    if (worker) {
-      try { worker.stop(); } catch { /* ok */ }
-    }
-    const g = graphRef.current;
-    if (!g) return;
-    if (worker) {
-      worker.start();
-      fa2TimerRef.current = setTimeout(() => { try { worker.stop(); } catch { /* ok */ } }, durationMs);
-    }
+  const startLayout = useCallback(() => {
+    const g     = graphRef.current;
+    const sigma = sigmaRef.current;
+    if (!g || !sigma) return;
+    try {
+      const sensible = inferSettings(g);
+      forceAtlas2.assign(g, {
+        iterations: 200,
+        settings: { ...sensible, ...FA2_SETTINGS },
+      });
+    } catch (e) { console.warn("Re-layout failed", e); }
+    sigma.refresh();
   }, []);
 
   const resetAll = useCallback(() => {
     showAll();
     unpinAll();
     resetView();
-    startLayout(5000);
+    startLayout();
   }, [showAll, unpinAll, resetView, startLayout]);
 
   // ── Build sigma ───────────────────────────────────────────────────────────────
@@ -530,11 +514,6 @@ export function GraphVisualization({
 
     // Tear down old instance
     sigmaRef.current?.kill();
-    if (fa2WorkerRef.current) {
-      try { fa2WorkerRef.current.kill(); } catch { /* ok */ }
-      fa2WorkerRef.current = null;
-    }
-    if (fa2TimerRef.current) clearTimeout(fa2TimerRef.current);
     setLabelPositions([]);
     setContextMenu({ visible: false, x: 0, y: 0, nodeId: "" });
 
@@ -544,35 +523,33 @@ export function GraphVisualization({
 
     const sigma = new Sigma(g, el, {
       renderLabels:               true,
-      // FIX 2: Force all labels to white
-      labelFont:                  "Inter, 'IBM Plex Mono', sans-serif",
-      labelSize:                  12,
-      labelWeight:                "500",
+      labelFont:                  "JetBrains Mono, monospace",
+      labelSize:                  15,
+      labelWeight:                "600",
       labelColor:                 { color: "#FFFFFF" },
+      defaultLabelColor:          "#FFFFFF",
       defaultNodeColor:           "#4a5260",
       defaultEdgeColor:           EDGE_DEFAULT,
       stagePadding:               90,
-      labelRenderedSizeThreshold: 20,
-      // FIX 3: Custom label renderer — dark background, white text
+      labelRenderedSizeThreshold: 18,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       drawLabel: (context: CanvasRenderingContext2D, data: any, settings: any) => {
         const { x, y, label, size } = data;
         if (!label) return;
 
-        const fontSize = settings.labelSize ?? 12;
-        const fontStr  = `${settings.labelWeight ?? "500"} ${fontSize}px ${settings.labelFont ?? "Inter, sans-serif"}`;
+        const fontSize = settings.labelSize ?? 15;
+        const fontStr  = `${settings.labelWeight ?? "600"} ${fontSize}px ${settings.labelFont ?? "JetBrains Mono, monospace"}`;
         context.font   = fontStr;
 
         const textWidth = context.measureText(label).width;
-        const padding   = 4;
-        const bx        = x + size + 4;
-        const by        = y - fontSize / 2 - padding;
-        const bw        = textWidth + padding * 2;
-        const bh        = fontSize + padding * 2;
-        const br        = 3;
+        const pad = 5;
+        const bx  = x + size + 4;
+        const by  = y - fontSize / 2 - pad;
+        const bw  = textWidth + pad * 2;
+        const bh  = fontSize + pad * 2;
+        const br  = 4;
 
-        // Dark pill background
-        context.fillStyle = "rgba(5, 8, 14, 0.82)";
+        context.fillStyle = "rgba(0, 0, 0, 0.88)";
         context.beginPath();
         if (context.roundRect) {
           context.roundRect(bx, by, bw, bh, br);
@@ -581,9 +558,64 @@ export function GraphVisualization({
         }
         context.fill();
 
+        context.fillStyle = "#FFFFFF";
+        context.textBaseline = "middle";
+        context.fillText(label, bx + pad, y);
+      },
+
+      // Override hover renderer — same black pill, white text, blue accent border
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      hoverRenderer: (context: CanvasRenderingContext2D, data: any, settings: any) => {
+        const { x, y, label, size, color } = data;
+
+        // Subtle ring around node (no gray disc)
+        context.beginPath();
+        context.arc(x, y, size + 4, 0, Math.PI * 2);
+        context.fillStyle = `${(color as string) ?? "#4a5260"}22`;
+        context.fill();
+        context.strokeStyle = `${(color as string) ?? "#4a5260"}88`;
+        context.lineWidth = 1.5;
+        context.stroke();
+
+        if (!label) return;
+
+        const fontSize = (settings.labelSize ?? 15) + 1;
+        const fontStr  = `700 ${fontSize}px ${settings.labelFont ?? "JetBrains Mono, monospace"}`;
+        context.font   = fontStr;
+
+        const textWidth = context.measureText(label).width;
+        const pad = 6;
+        const bx  = x + size + 6;
+        const by  = y - fontSize / 2 - pad;
+        const bw  = textWidth + pad * 2;
+        const bh  = fontSize + pad * 2;
+        const br  = 4;
+
+        // Black pill
+        context.fillStyle = "rgba(0, 0, 0, 0.95)";
+        context.beginPath();
+        if (context.roundRect) {
+          context.roundRect(bx, by, bw, bh, br);
+        } else {
+          context.rect(bx, by, bw, bh);
+        }
+        context.fill();
+
+        // Blue accent border
+        context.strokeStyle = "rgba(155, 159, 238, 0.55)";
+        context.lineWidth = 1;
+        context.beginPath();
+        if (context.roundRect) {
+          context.roundRect(bx, by, bw, bh, br);
+        } else {
+          context.rect(bx, by, bw, bh);
+        }
+        context.stroke();
+
         // White text
         context.fillStyle = "#FFFFFF";
-        context.fillText(label, bx + padding, y + fontSize / 2 - padding / 2);
+        context.textBaseline = "middle";
+        context.fillText(label, bx + pad, y);
       },
 
       nodeReducer: (node, attrs) => {
@@ -652,9 +684,9 @@ export function GraphVisualization({
         const conf = (attrs.confidence as number) ?? 0.5;
         res.size  = 0.5 + conf * 2;
         if (conf > 0.90) {
-          res.color = "rgba(99,255,132,0.8)";
+          res.color = "rgba(155, 159, 238, 0.85)";
         } else if (conf > 0.75) {
-          res.color = "rgba(99,132,255,0.5)";
+          res.color = "rgba(155, 159, 238, 0.45)";
         } else {
           res.color = "rgba(150,150,150,0.3)";
         }
@@ -795,16 +827,6 @@ export function GraphVisualization({
     // ── Initial stats ──────────────────────────────────────────────────────────
     setGraphStats({ nodes: g.order, edges: g.size, pinned: 0, hidden: 0 });
 
-    // ── Start FA2 worker for smooth live layout ────────────────────────────────
-    tryCreateFA2Worker(g).then((worker) => {
-      if (!worker) return;
-      fa2WorkerRef.current = worker;
-      worker.start();
-      fa2TimerRef.current = setTimeout(() => {
-        try { worker.stop(); } catch { /* ok */ }
-      }, 10_000);
-    });
-
     return () => {
       document.removeEventListener("mouseup", handleDocMouseUp);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -814,11 +836,6 @@ export function GraphVisualization({
       sigma.kill();
       sigmaRef.current = null;
       graphRef.current = null;
-      if (fa2WorkerRef.current) {
-        try { fa2WorkerRef.current.kill(); } catch { /* ok */ }
-        fa2WorkerRef.current = null;
-      }
-      if (fa2TimerRef.current) clearTimeout(fa2TimerRef.current);
       setLabelPositions([]);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1021,7 +1038,7 @@ export function GraphVisualization({
         <div className="flex flex-col gap-1">
           {[
             { label: "Reset view",  title: "Fit graph to screen (F)",       action: resetView  },
-            { label: "Re-layout",   title: "Restart force simulation (5s)",  action: () => startLayout(5000) },
+            { label: "Re-layout",   title: "Recalculate layout",             action: () => startLayout() },
             { label: "Show all",    title: "Unhide all hidden nodes",        action: showAll    },
             { label: "Unpin all",   title: "Release all pinned nodes",       action: unpinAll   },
           ].map((btn) => (
@@ -1104,7 +1121,7 @@ export function GraphVisualization({
             className="absolute bottom-4 right-4 z-20"
             style={{
               background:   "rgba(8, 11, 17, 0.92)",
-              border:       "1px solid rgba(59, 130, 246, 0.20)",
+              border:       "1px solid rgba(155, 159, 238, 0.20)",
               borderRadius: 8,
               padding:      legendCollapsed ? "8px 14px" : "10px 16px 12px",
               minWidth:     152,
@@ -1246,9 +1263,11 @@ export function GraphVisualization({
         />
       )}
 
-      {/* FIX 1: Node detail panel — slides in from left */}
+      {/* Node detail panel — slides in from left */}
       <NodeDetailPanel
         node={selectedNodeDetail}
+        graph={graphRef.current}
+        searchQuery={searchQuery}
         onClose={() => setSelectedNodeDetail(null)}
         onIsolateNeighbors={isolateNeighbors}
       />

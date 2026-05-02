@@ -172,32 +172,12 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   //    server-side default that differs from our client-side default.
 
   useEffect(() => {
-    // Case A: parent explicitly controls the value
+    // Only sync when parent explicitly controls the value
     if (value) {
       setSelectedModel(value);
-      return;
     }
-    // Case B: list loaded — check if server marks a different model as default
-    if (modelList) {
-      let serverDefault: string | null = null;
-      for (const p of modelList.providers) {
-        if (!p.configured || p.models.length === 0) continue;
-        for (const m of p.models) {
-          if (m.default) {
-            serverDefault = m.id;
-            break;
-          }
-        }
-        if (serverDefault) break;
-      }
-      if (serverDefault && serverDefault !== selectedModel) {
-        setSelectedModel(serverDefault);
-        onChange(serverDefault);
-      }
-    }
-  // selectedModel intentionally omitted to avoid infinite loop
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelList, value, onChange]);
+  }, [value]);
 
   // ── Close on outside click ────────────────────────────────────────────────
 

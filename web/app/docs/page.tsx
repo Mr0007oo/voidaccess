@@ -2,7 +2,7 @@ import Link from "next/link";
 
 const ENTITY_TYPES = [
   { name: "Threat Actor", color: "#e05c5c", desc: "Handles, aliases, operator identities" },
-  { name: "Wallet", color: "#58a6ff", desc: "BTC/ETH/XMR addresses (auto blockchain lookup)" },
+  { name: "Wallet", color: "#9B9FEE", desc: "BTC/ETH/XMR addresses (auto blockchain lookup)" },
   { name: "Malware", color: "#d08770", desc: "Malware families, RATs, ransomware strains" },
   { name: "Forum", color: "#79b8ff", desc: "Dark web forum and marketplace names" },
   { name: "C2 Server", color: "#b392f0", desc: "Command & control infrastructure" },
@@ -191,22 +191,17 @@ export default function DocsPage() {
 
         <section className="mb-10">
           <h2 className="font-mono text-[11px] uppercase tracking-widest text-[var(--text-muted)] mb-4">
-            Default Credentials
+            First Login
           </h2>
-          <div className="bg-[var(--bg-raised)] rounded p-4 space-y-2">
-            <div className="flex gap-2">
-              <span className="text-[13px] text-[var(--text-muted)] w-20">Email:</span>
-              <code className="text-[13px] text-[var(--text-secondary)]">admin@voidaccess.tech</code>
-            </div>
-            <div className="flex gap-2">
-              <span className="text-[13px] text-[var(--text-muted)] w-20">Password:</span>
-              <code className="text-[13px] text-[var(--text-secondary)]">voidaccess</code>
-            </div>
-          </div>
+          <p className="text-[14px] text-[var(--text-secondary)]">
+            Admin credentials are set during the initial deployment via <code className="bg-[var(--bg-raised)] text-[var(--accent)] text-[13px] px-2 py-0.5 rounded">bash setup.sh</code>.
+          </p>
           <p className="text-[13px] text-[var(--text-muted)] mt-2">
-            Forced reset on first login.
+            If you did not use the setup script, the default account will require a password reset before first use.
           </p>
         </section>
+
+
       </div>
     </div>
   );

@@ -36,7 +36,7 @@ export function InvestigationInput() {
   const router = useRouter();
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
-  const [model, setModel] = useState<string>("groq/llama-3.3-70b-versatile");
+  const [model, setModel] = useState<string>("");
   const [fullIntel, setFullIntel] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

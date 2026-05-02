@@ -8,7 +8,7 @@ import { Eye, EyeOff, Shield } from "lucide-react"
 import { motion } from "framer-motion"
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("admin@voidaccess.tech")
+  const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -95,7 +95,7 @@ export default function LoginPage() {
                     required
                     autoComplete="email"
                     className="w-full bg-[#27272a] border border-transparent rounded-xl px-4 py-3.5 text-[15px] text-white placeholder:text-[#a1a1aa] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] transition-all font-body font-medium"
-                    placeholder="Email address"
+                    placeholder="your@email.com"
                     style={{
                        boxShadow: "inset 0 2px 4px rgba(0,0,0,0.2)"
                     }}

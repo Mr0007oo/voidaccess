@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends
 
 from api.auth import get_current_user
-from search import SEARCH_ENGINES
+from search.search import SEARCH_ENGINES
 from search.circuit_breaker import get_all_states, record_success, is_open, _engine_failures, _engine_last_success
 
 router = APIRouter(tags=["admin"])
@@ -44,7 +44,7 @@ async def reset_circuit_breaker(engine_name: str) -> dict:
 @router.post("/circuit-breakers/reset-all", dependencies=[Depends(get_current_user)])
 async def reset_all_circuit_breakers() -> dict:
     """Reset all circuit breakers to closed state."""
-    from search import SEARCH_ENGINES
+    from search.search import SEARCH_ENGINES
     for engine in SEARCH_ENGINES:
         await record_success(engine["name"])
     return {"reset_count": len(SEARCH_ENGINES), "state": "all closed"}

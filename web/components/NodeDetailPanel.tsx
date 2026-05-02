@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import type Graph from "graphology";
 import { getMitreUrl, getCveUrl } from "@/lib/utils/entityLinks";
 import { formatRelativeTime } from "@/lib/utils/formatRelativeTime";
 
@@ -54,8 +55,70 @@ interface EnrichedEntityData {
 
 interface NodeDetailPanelProps {
   node: SelectedNodeData | null;
+  graph?: Graph | null;
+  searchQuery?: string;
   onClose: () => void;
   onIsolateNeighbors: (nodeId: string) => void;
+}
+
+// ─── Graph topology helpers ────────────────────────────────────────────────────
+
+function findHubNode(graph: Graph): string | null {
+  const nodes = graph.nodes();
+  if (!nodes.length) return null;
+  return nodes.reduce(
+    (best, n) => graph.degree(n) > graph.degree(best) ? n : best,
+    nodes[0]
+  );
+}
+
+function findClusterHub(nodeId: string, graph: Graph): { id: string; label: string } | null {
+  const neighbors = graph.neighbors(nodeId);
+  if (!neighbors.length) return null;
+  const hub = neighbors.reduce(
+    (best, n) => graph.degree(n) > graph.degree(best) ? n : best,
+    neighbors[0]
+  );
+  return { id: hub, label: (graph.getNodeAttribute(hub, "label") as string) || hub };
+}
+
+function findClusterMembers(nodeId: string, graph: Graph, limit = 3): string[] {
+  const neighbors = new Set(graph.neighbors(nodeId));
+  const coOccurrence: Record<string, number> = {};
+  neighbors.forEach(neighbor => {
+    graph.neighbors(neighbor).forEach(n => {
+      if (n !== nodeId && !neighbors.has(n)) {
+        coOccurrence[n] = (coOccurrence[n] || 0) + 1;
+      }
+    });
+  });
+  return Object.entries(coOccurrence)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([id]) => (graph.getNodeAttribute(id, "label") as string) || id);
+}
+
+function findPathToHub(fromId: string, graph: Graph, maxDepth = 4): string[] {
+  const hubNode = findHubNode(graph);
+  if (!hubNode) return [];
+  if (fromId === hubNode) return [fromId];
+
+  const visited = new Set<string>([fromId]);
+  const queue: string[][] = [[fromId]];
+
+  while (queue.length > 0) {
+    const path = queue.shift()!;
+    const current = path[path.length - 1];
+    if (path.length > maxDepth) continue;
+    for (const neighbor of graph.neighbors(current)) {
+      if (visited.has(neighbor)) continue;
+      visited.add(neighbor);
+      const newPath = [...path, neighbor];
+      if (neighbor === hubNode) return newPath;
+      queue.push(newPath);
+    }
+  }
+  return [];
 }
 
 // ─── Helper: Category label ────────────────────────────────────────────────────
@@ -129,12 +192,28 @@ function ConfidenceBar({ value }: { value: number }) {
 
 // ─── Main panel component ──────────────────────────────────────────────────────
 
-export function NodeDetailPanel({ node, onClose, onIsolateNeighbors }: NodeDetailPanelProps) {
+export function NodeDetailPanel({ node, graph, searchQuery: _searchQuery, onClose, onIsolateNeighbors }: NodeDetailPanelProps) {
   const [enriched, setEnriched] = useState<EnrichedEntityData | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const visible = node !== null;
+
+  // Cluster topology computations
+  const clusterHub = useMemo(() => {
+    if (!node || !graph) return null;
+    try { return findClusterHub(node.id, graph); } catch { return null; }
+  }, [node?.id, graph]);
+
+  const clusterMembers = useMemo(() => {
+    if (!node || !graph) return [];
+    try { return findClusterMembers(node.id, graph); } catch { return []; }
+  }, [node?.id, graph]);
+
+  const connectionPath = useMemo(() => {
+    if (!node || !graph) return [];
+    try { return findPathToHub(node.id, graph); } catch { return []; }
+  }, [node?.id, graph]);
 
   // Reset enriched data when node changes
   useEffect(() => {
@@ -200,7 +279,7 @@ export function NodeDetailPanel({ node, onClose, onIsolateNeighbors }: NodeDetai
     display: "flex",
     flexDirection: "column",
     background: "rgba(8, 11, 17, 0.97)",
-    borderRight: "1px solid rgba(59, 130, 246, 0.18)",
+    borderRight: "1px solid rgba(155, 159, 238, 0.18)",
     backdropFilter: "blur(16px)",
     transform: visible ? "translateX(0)" : "translateX(-100%)",
     transition: "transform 0.28s cubic-bezier(0.4, 0, 0.2, 1)",
@@ -283,7 +362,7 @@ export function NodeDetailPanel({ node, onClose, onIsolateNeighbors }: NodeDetai
               height: 12,
               borderRadius: "50%",
               border: "2px solid rgba(88,166,255,0.3)",
-              borderTopColor: "#58a6ff",
+              borderTopColor: "#9B9FEE",
               animation: "spin 0.8s linear infinite",
             }}
           />
@@ -473,6 +552,55 @@ export function NodeDetailPanel({ node, onClose, onIsolateNeighbors }: NodeDetai
                 View neighbors only
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Cluster context section */}
+        {node && graph && (clusterHub || clusterMembers.length > 0) && (
+          <div className="panel-section">
+            <div className="section-title">Cluster Context</div>
+            {clusterHub && (
+              <div className="context-row">
+                <span className="context-label">Main topic</span>
+                <span className="context-value mono">{clusterHub.label}</span>
+              </div>
+            )}
+            {clusterMembers.length > 0 && (
+              <div className="context-row">
+                <span className="context-label">Related</span>
+                <span className="context-value" style={{ fontSize: 11 }}>{clusterMembers.join(" · ")}</span>
+              </div>
+            )}
+            <div className="context-row">
+              <span className="context-label">Connections</span>
+              <span className="context-value">{graph.degree(node.id)} direct links</span>
+            </div>
+          </div>
+        )}
+
+        {/* Connection path section */}
+        {node && connectionPath.length > 1 && (
+          <div className="panel-section">
+            <div className="section-title">Connection Path</div>
+            <div className="path-display">
+              {connectionPath.map((nid, i) => {
+                const lbl = graph
+                  ? ((graph.getNodeAttribute(nid, "label") as string) || nid)
+                  : nid;
+                const isFirst = i === 0;
+                const isLast  = i === connectionPath.length - 1;
+                const truncated = lbl.length > 20 ? lbl.slice(0, 20) + "…" : lbl;
+                return (
+                  <div key={nid} className="path-step">
+                    <span className={`path-node${isFirst ? " path-current" : ""}${isLast ? " path-hub" : ""}`}>
+                      {truncated}
+                    </span>
+                    {!isLast && <span className="path-arrow">→</span>}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="path-note">Shortest path to investigation hub</div>
           </div>
         )}
 

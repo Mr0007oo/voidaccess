@@ -242,7 +242,7 @@ export default function InvestigationPage() {
   }
 
   if (processing) {
-    return <InvestigationLoadingScreen query={investigation.query} />;
+    return <InvestigationLoadingScreen query={investigation.query} currentStep={investigation.current_step} createdAt={investigation.created_at} />;
   }
 
   return (

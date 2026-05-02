@@ -225,7 +225,7 @@ async def _update_progress(
 async def _get_investigation_model_choice(model: Optional[str]) -> tuple[str, Any]:
     """Get model choices and selected model in a short-lived session."""
     from db.session import get_session
-    from llm_utils import get_model_choices
+    from voidaccess.llm_utils import get_model_choices
     import config as config_module
 
     with get_session() as session:
@@ -303,10 +303,10 @@ async def _run_investigation_task(
         from db.models import Investigation
         from db.session import get_session, get_async_session
         from db.queries import update_investigation_summary
-        from llm import filter_results, generate_summary, get_llm, refine_query
-        from llm_utils import get_model_choices
-        from search import _search_async as _search_engines_async, _dedupe_links as _search_dedupe, ENGINE_WEIGHTS as _engine_weights
-        from scrape import scrape_multiple, validate_urls_for_scraping
+        from voidaccess.llm import filter_results, generate_summary, get_llm, refine_query
+        from voidaccess.llm_utils import get_model_choices
+        from search.search import _search_async as _search_engines_async, _dedupe_links as _search_dedupe, ENGINE_WEIGHTS as _engine_weights
+        from scraper.scrape import scrape_multiple, validate_urls_for_scraping
         from extractor import extract_entities_from_pages
 
         inv_uuid = uuid.UUID(investigation_id)
@@ -473,9 +473,7 @@ async def _run_investigation_task(
             logger.info("[%s] STEP 3.5: Running threat intel enrichment...", inv_uuid)
             try:
                 from sources.enrichment import enrich_investigation
-                from config import OTX_API_KEY
 
-                # Always try original query; add refined only if different
                 queries_to_enrich = [query]
                 if refined_query and refined_query.strip().lower() != query.strip().lower():
                     queries_to_enrich.append(refined_query)
@@ -484,15 +482,21 @@ async def _run_investigation_task(
                 seen_urls: set = set()
                 for eq in queries_to_enrich:
                     try:
-                        batch = await enrich_investigation(
-                            query=eq,
-                            otx_api_key=resolved_keys.get("OTX_API_KEY") or "",
+                        # Hard 60s cap per enrichment query — individual requests already have 30s timeouts
+                        batch = await asyncio.wait_for(
+                            enrich_investigation(
+                                query=eq,
+                                otx_api_key=resolved_keys.get("OTX_API_KEY") or "",
+                            ),
+                            timeout=60,
                         )
                         for p in batch:
                             u = p.get("url") or p.get("link") or ""
                             if u not in seen_urls:
                                 seen_urls.add(u)
                                 all_pages.append(p)
+                    except asyncio.TimeoutError:
+                        logger.warning("[%s] Enrichment query '%s' timed out after 60s", inv_uuid, eq)
                     except Exception as exc:
                         logger.info("[%s] Enrichment batch failed for '%s': %s", inv_uuid, eq, exc)
 
@@ -510,19 +514,37 @@ async def _run_investigation_task(
                 logger.info("[%s] STEP 4: Running recursive crawler...", inv_uuid)
                 seeds = await asyncio.to_thread(get_seeds, category="index", query=refined_query)
                 seed_urls = [seed["url"] for seed in seeds if seed.get("url")]
-                crawler_result = await crawl(seed_urls=seed_urls, query=refined_query, max_depth=2, max_pages=50)
+                # max_depth=1 and max_pages=20 keep the crawler bounded;
+                # 120s hard cap prevents dead Tor circuits from stalling the pipeline
+                crawler_result = await asyncio.wait_for(
+                    crawl(seed_urls=seed_urls, query=refined_query, max_depth=1, max_pages=20),
+                    timeout=120,
+                )
                 logger.info("[%s] Crawler: %s pages, %s failed", inv_uuid, crawler_result.pages_crawled, crawler_result.pages_failed)
-                return [{"link": item.get("url", ""), "title": "Crawler discovery"} 
+                return [{"link": item.get("url", ""), "title": "Crawler discovery"}
                         for item in crawler_result.results if isinstance(item, dict) and item.get("url")]
+            except asyncio.TimeoutError:
+                logger.warning("[%s] Crawler timed out after 120s, continuing without crawler results", inv_uuid)
+                return []
             except Exception as exc:
                 logger.exception("[%s] Crawler failed: %s", inv_uuid, str(exc))
                 return []
 
-        search_urls, enrichment_pages, crawler_urls = await asyncio.gather(
-            run_search_and_filter(),
-            run_enrichment(),
-            run_crawler_task()
-        )
+        # Hard 5-minute cap on the entire parallel phase (search + enrichment + crawler).
+        # Each inner function also has its own timeout so partial results are preserved
+        # even if only one of the three hangs.
+        try:
+            search_urls, enrichment_pages, crawler_urls = await asyncio.wait_for(
+                asyncio.gather(
+                    run_search_and_filter(),
+                    run_enrichment(),
+                    run_crawler_task(),
+                ),
+                timeout=300,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[%s] Parallel phase hit 300s hard cap — using empty results", inv_uuid)
+            search_urls, enrichment_pages, crawler_urls = [], [], []
         await _update_progress(inv_uuid, 2)
 
         if len(search_urls) < 2:

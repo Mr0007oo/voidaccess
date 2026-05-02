@@ -20,7 +20,7 @@ from typing import Any
 import aiohttp
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_OUT = os.path.normpath(os.path.join(_SCRIPT_DIR, "..", "seed_data.json.gz"))
+_DEFAULT_OUT = os.path.normpath(os.path.join(_SCRIPT_DIR, "..", "data", "seed_data.json.gz"))
 SEED_OUTPUT = os.environ.get("SEED_OUTPUT", _DEFAULT_OUT)
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
