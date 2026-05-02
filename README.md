@@ -1,7 +1,9 @@
-# <img src="./public/va_svg.svg" width="48" height="48" align="center" alt="VoidAccess Logo"> VoidAccess
-
-> **A self-hosted OSINT platform for dark web threat intelligence.**  
-> Automate the entire investigation workflow from query refinement to relationship mapping in 13 autonomous pipeline steps.
+<div align="center">
+  <img src="./public/logo_circle.png" width="160" alt="VoidAccess Logo">
+  <h1>VoidAccess</h1>
+  <p><strong>A self-hosted OSINT platform for dark web threat intelligence.</strong></p>
+  <p>Automate the entire investigation workflow from query refinement to relationship mapping in 13 autonomous pipeline steps.</p>
+</div>
 
 <div align="center">
   <video src="./public/how-it-works.mp4" width="100%" controls autoplay loop muted></video>
