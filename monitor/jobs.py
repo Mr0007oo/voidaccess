@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import graph
-    import scrape
-    import search
+    import scraper.scrape as scrape
+    import search.search as search
     import vector
     from extractor import extract_entities_from_page, extract_entities_from_pages
     from monitor import _db
@@ -27,8 +27,8 @@ async def run_keyword_watch(watch: dict, llm=None) -> dict[str, Any]:
     """
     Full pipeline: search → scrape → dedup → extract → graph rebuild.
     """
-    import scrape
-    import search
+    import scraper.scrape as scrape
+    import search.search as search
     import vector
     from extractor import extract_entities_from_pages
     from monitor import _db
@@ -127,7 +127,7 @@ async def run_keyword_watch(watch: dict, llm=None) -> dict[str, Any]:
 
 async def run_url_watch(watch: dict) -> dict[str, Any]:
     """Scrape one URL, diff against DB-backed previous content, extract if changed."""
-    import scrape
+    import scraper.scrape as scrape
     import vector
     from extractor import extract_entities_from_page
     from monitor import _db

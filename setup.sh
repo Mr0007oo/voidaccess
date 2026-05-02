@@ -25,10 +25,6 @@ prompt() { echo -n "${BLUE}▸${NC} $1"; }
 _prompt() {
     local prompt_text="$1"
     local default="$2"
-    if [ ! -t 0 ]; then
-        echo "${default}"
-        return
-    fi
     read -r -p "$prompt_text" answer || answer="$default"
     echo "${answer:-$default}"
 }
@@ -97,9 +93,14 @@ check_cmd() {
 }
 
 check_python() {
-    if python3 --version > /dev/null 2>&1; then
+    # Test with piped stdin since that's how we use Python (parsing curl JSON output)
+    _py_pipe_test() {
+        echo '{}' | "$1" -c "import sys,json; json.load(sys.stdin)" >/dev/null 2>&1
+    }
+
+    if python3 --version > /dev/null 2>&1 && _py_pipe_test python3; then
         PY_CMD="python3"
-    elif python --version > /dev/null 2>&1; then
+    elif python --version > /dev/null 2>&1 && _py_pipe_test python; then
         PY_CMD="python"
     else
         PY_CMD=""
@@ -114,7 +115,7 @@ check_python() {
     if [ -n "$PY_CMD" ]; then
         echo -e "${GREEN}✓ Python ($PY_CMD)${NC}"
     else
-        echo -e "${YELLOW}⚠ Python 3.8+ not found${NC}"
+        echo -e "${YELLOW}⚠ Python 3.8+ not found (or stdin pipe broken)${NC}"
         echo "  Secret generation will use /dev/urandom fallback"
     fi
 }
@@ -405,7 +406,7 @@ case "$CHOICE" in
             print_ok "Ollama is running"
             echo ""
             print_info "Available models:"
-            echo "$OLLAMA_RESPONSE" | python3 -c "
+            echo "$OLLAMA_RESPONSE" | ${PY_CMD:-python3} -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -579,21 +580,26 @@ echo ""
 
 response="$(wait_for_key "Start now" "Y")"
 if [ "$response" = "N" ] || [ "$response" = "n" ]; then
-    print_info "OK — start manually with: docker compose up --build -d"
+    print_info "OK — start manually with: bash run.sh"
     exit 0
 fi
 
 print_info "Building and starting containers..."
 echo ""
 
-DOCKER_BUILDKIT=1 docker compose up --build -d
+DOCKER_BUILDKIT=1 docker compose -f infra/docker-compose.yml \
+    --project-directory . \
+    --env-file .env \
+    up --build -d
 
 print_info "Waiting for services to be ready..."
 echo -n "  "
 
 for i in $(seq 1 60); do
-    STATUS=$(curl -s --max-time 5 http://localhost:8000/healthz/ready 2>/dev/null | \
-        python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+    _HEALTH=$(curl -s --max-time 5 http://localhost:8000/healthz/ready 2>/dev/null || echo "")
+    STATUS=$(echo "$_HEALTH" | \
+        ${PY_CMD:-python3} -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || \
+        echo "$_HEALTH" | grep -o '"status":"ready"' | grep -o 'ready' || echo "")
     if [ "$STATUS" = "ready" ]; then
         echo ""
         print_ok "VoidAccess is ready"
@@ -606,8 +612,93 @@ done
 if [ "$STATUS" != "ready" ]; then
     echo ""
     print_warn "Services may still be starting. Check status with:"
-    echo "  docker compose ps"
-    echo "  docker compose logs -f"
+    echo "  bash run.sh"
+    echo "  docker compose -f infra/docker-compose.yml --project-directory . logs -f"
+fi
+
+# =============================================================================
+# STEP 10: Set Admin Password
+# =============================================================================
+echo ""
+echo "=== Step 10: Set admin password ==="
+echo ""
+echo "The default admin account requires a "
+echo "password to be set before first login."
+echo ""
+
+ADMIN_EMAIL="admin@voidaccess.tech"
+ADMIN_PASS=""
+
+if [ -t 0 ]; then
+    # Interactive: prompt for email and password
+    printf "Admin email [admin@voidaccess.tech]: "
+    read -r _email_input || _email_input=""
+    ADMIN_EMAIL="${_email_input:-admin@voidaccess.tech}"
+
+    while true; do
+        printf "Admin password (min 8 chars, "
+        printf "letters + numbers): "
+        read -rs ADMIN_PASS || ADMIN_PASS=""
+        echo ""
+
+        if [ ${#ADMIN_PASS} -lt 8 ]; then
+            echo "✗ Password too short (min 8 chars)"
+            continue
+        fi
+        if ! echo "$ADMIN_PASS" | grep -qE '[a-zA-Z]' || \
+           ! echo "$ADMIN_PASS" | grep -qE '[0-9]'; then
+            echo "✗ Must contain letters and numbers"
+            continue
+        fi
+
+        printf "Confirm password: "
+        read -rs ADMIN_CONFIRM || ADMIN_CONFIRM=""
+        echo ""
+
+        if [ "$ADMIN_PASS" != "$ADMIN_CONFIRM" ]; then
+            echo "✗ Passwords don't match"
+            continue
+        fi
+        break
+    done
+else
+    # Non-interactive: skip password step, user must set it via Settings UI
+    print_warn "Non-interactive mode — skipping admin password setup."
+    echo "  Log in with the default credentials and set your password via:"
+    echo "  Settings → Security → Change Password"
+fi
+
+# Set password via psql (only when entered interactively)
+if [ -n "$ADMIN_PASS" ]; then
+    echo "Setting admin password..."
+    HASH=$(docker compose -f infra/docker-compose.yml \
+        --project-directory . \
+        --env-file .env \
+        exec -T fastapi \
+        python3 -c "
+from passlib.context import CryptContext
+ctx = CryptContext(schemes=['bcrypt'])
+print(ctx.hash('$ADMIN_PASS'))
+" 2>/dev/null)
+
+    if [ -n "$HASH" ]; then
+        docker compose -f infra/docker-compose.yml \
+            --project-directory . \
+            --env-file .env \
+            exec -T postgres psql \
+            -U voidaccess -d voidaccess -c \
+            "UPDATE users SET
+             hashed_password='$HASH',
+             must_reset_password=false,
+             email='$ADMIN_EMAIL'
+             WHERE email='admin@voidaccess.tech'
+             OR email='$ADMIN_EMAIL';" \
+            2>/dev/null
+        echo "✓ Admin password set"
+    else
+        echo "⚠ Could not set password automatically"
+        echo "  Log in and change it via Settings"
+    fi
 fi
 
 # =============================================================================
@@ -617,13 +708,13 @@ echo ""
 echo "╔════════════════════════════════════════════════════╗"
 echo "║        VoidAccess is ready!                          ║"
 echo "╠════════════════════════════════════════════════════╣"
-echo "║  UI:      http://localhost:3000                     ║"
+echo "║  UI:      http://localhost:3001                     ║"
 echo "║  API:     http://localhost:8000                     ║"
 echo "║  Docs:    http://localhost:8000/docs                ║"
 echo "╠════════════════════════════════════════════════════╣"
-echo "║  Default login:                                    ║"
-echo "║  Email:    admin@voidaccess.tech                    ║"
-echo "║  Password: (set during first login)                 ║"
+echo "║  Login credentials:                                ║"
+echo "║  Email:    $ADMIN_EMAIL        ║"
+echo "║  Password: (set during setup)                      ║"
 echo "╠════════════════════════════════════════════════════╣"
 echo "║  To add API keys later:                            ║"
 echo "║  → Settings page in the UI                         ║"

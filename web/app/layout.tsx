@@ -3,36 +3,24 @@ import { Inter, Space_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { KeyboardShortcutsProvider } from "@/components/KeyboardShortcutsProvider";
 
-/**
- * Space Grotesk — display / headings / labels
- * Used via CSS var: --font-display
- */
 const spaceGrotesk = Space_Grotesk({
   subsets: ["latin"],
   weight: ["300", "400", "500", "600", "700"],
-  variable: "--font-space-grotesk",
+  variable: "--font-display",
   display: "swap",
 });
 
-/**
- * Inter — body text, UI labels, descriptions
- * Used via CSS var: --font-body  →  --font-inter
- */
 const inter = Inter({
   subsets: ["latin"],
   weight: ["300", "400", "500", "600"],
-  variable: "--font-inter",
+  variable: "--font-body",
   display: "swap",
 });
 
-/**
- * JetBrains Mono — hashes, IPs, onion URLs, IDs, elapsed counters, code
- * Used via CSS var: --font-mono  →  --font-jetbrains-mono
- */
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   weight: ["400", "500"],
-  variable: "--font-jetbrains-mono",
+  variable: "--font-mono",
   display: "swap",
 });
 
@@ -47,11 +35,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${spaceGrotesk.variable} ${inter.variable} ${jetbrainsMono.variable}`}
-    >
-      <body className="font-sans antialiased text-[var(--text-primary)] bg-[var(--bg-void)]">
+    <html lang="en">
+      <body className={`${inter.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable} font-sans antialiased text-[var(--text-primary)] bg-[var(--bg-void)]`}>
         <KeyboardShortcutsProvider>
           {children}
         </KeyboardShortcutsProvider>

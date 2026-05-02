@@ -33,6 +33,28 @@ def _no_op_decorator(func):
 login_limit = _limiter.limit("5/minute") if _limiter else _no_op_decorator
 reset_limit = _limiter.limit("3/minute") if _limiter else _no_op_decorator
 
+def validate_password_strength(password: str) -> None:
+    """
+    Validate password meets minimum requirements.
+    Raises ValueError with a user-friendly message.
+    """
+    if len(password) < 8:
+        raise ValueError(
+            "Password must be at least 8 characters"
+        )
+    if len(password) > 128:
+        raise ValueError(
+            "Password must be under 128 characters"
+        )
+    # Must have at least one letter and one number
+    has_letter = any(c.isalpha() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    if not has_letter or not has_digit:
+        raise ValueError(
+            "Password must contain at least one "
+            "letter and one number"
+        )
+
 
 @router.post("/login", response_model=LoginResponse)
 @login_limit
@@ -52,11 +74,9 @@ async def login(request: Request, body: LoginRequest, db: Session = Depends(get_
             detail="Invalid email or password",
         )
 
-    # Update last login
     user.last_login_at = datetime.now(timezone.utc)
     db.commit()
 
-    # Generate token using live user data
     token, jti = create_access_token(user.id, user.email)
 
     return LoginResponse(
@@ -83,19 +103,14 @@ async def reset_password(
             detail="New password and confirmation do not match",
         )
 
-    if len(body.new_password) < 8:
+    try:
+        validate_password_strength(body.new_password)
+    except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be at least 8 characters",
+            detail=str(e),
         )
 
-    if body.new_password == "voidaccess":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot reuse the default password",
-        )
-
-    # current.user is already bound to 'db' thanks to get_current_user's new logic
     if not verify_password(body.current_password, current.user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

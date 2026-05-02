@@ -12,22 +12,23 @@ export default function ResetPasswordPage() {
   const [isLoading, setIsLoading] = useState(false)
   const router = useRouter()
 
+  const hasMinLength = newPassword.length >= 8
+  const hasLetter = /[a-zA-Z]/.test(newPassword)
+  const hasDigit = /[0-9]/.test(newPassword)
+  const hasAllRequirements = hasMinLength && hasLetter && hasDigit
+  const matchesConfirmation = confirmPassword.length > 0 && newPassword === confirmPassword
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
 
+    if (!hasAllRequirements) {
+      setError("Password does not meet requirements")
+      return
+    }
+
     if (newPassword !== confirmPassword) {
       setError("New password and confirmation do not match")
-      return
-    }
-
-    if (newPassword.length < 8) {
-      setError("Password must be at least 8 characters")
-      return
-    }
-
-    if (newPassword === "voidaccess") {
-      setError("Cannot reuse the default password")
       return
     }
 
@@ -45,7 +46,7 @@ export default function ResetPasswordPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-[var(--bg-void)] p-4 relative overflow-hidden">
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-[var(--status-warning)] opacity-[0.03] blur-[120px] rounded-full pointer-events-none" />
-      
+
       <div className="w-full max-w-[400px] relative">
         <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
           <div className="flex items-center gap-2 mb-8">
@@ -60,7 +61,7 @@ export default function ResetPasswordPage() {
           <div className="mb-6 space-y-2">
             <div className="flex items-center gap-2 text-[var(--status-warning)] font-mono text-[13px]">
               <span>⚠</span>
-              <span>Default password detected</span>
+              <span>Password change required</span>
             </div>
             <p className="text-[var(--text-muted)] text-xs">
               Set a new secure password before continuing.
@@ -69,8 +70,8 @@ export default function ResetPasswordPage() {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <label 
-                htmlFor="currentPassword" 
+              <label
+                htmlFor="currentPassword"
                 className="font-mono text-[11px] uppercase tracking-wider text-[var(--text-muted)] ml-1"
               >
                 Current Password
@@ -86,8 +87,8 @@ export default function ResetPasswordPage() {
             </div>
 
             <div className="space-y-2">
-              <label 
-                htmlFor="newPassword" 
+              <label
+                htmlFor="newPassword"
                 className="font-mono text-[11px] uppercase tracking-wider text-[var(--text-muted)] ml-1"
               >
                 New Password
@@ -103,8 +104,8 @@ export default function ResetPasswordPage() {
             </div>
 
             <div className="space-y-2">
-              <label 
-                htmlFor="confirmPassword" 
+              <label
+                htmlFor="confirmPassword"
                 className="font-mono text-[11px] uppercase tracking-wider text-[var(--text-muted)] ml-1"
               >
                 Confirm New Password
@@ -119,10 +120,24 @@ export default function ResetPasswordPage() {
               />
             </div>
 
-            <div className="py-2">
+            <div className="py-2 space-y-1">
               <p className="text-[var(--text-muted)] text-[10px] font-mono leading-relaxed">
-                Requirements: 8+ characters, cannot reuse "voidaccess".
+                Requirements:
               </p>
+              <ul className="space-y-0.5 text-[10px] font-mono">
+                <li className={hasMinLength ? "text-[var(--status-success)]" : "text-[var(--text-muted)]"}>
+                  {hasMinLength ? "✓" : "○"} 8+ characters
+                </li>
+                <li className={hasLetter ? "text-[var(--status-success)]" : "text-[var(--text-muted)]"}>
+                  {hasLetter ? "✓" : "○"} at least one letter
+                </li>
+                <li className={hasDigit ? "text-[var(--status-success)]" : "text-[var(--text-muted)]"}>
+                  {hasDigit ? "✓" : "○"} at least one number
+                </li>
+                <li className={matchesConfirmation ? "text-[var(--status-success)]" : "text-[var(--text-muted)]"}>
+                  {matchesConfirmation ? "✓" : "○"} passwords match
+                </li>
+              </ul>
             </div>
 
             {error && (
@@ -133,11 +148,11 @@ export default function ResetPasswordPage() {
 
             <button
               type="submit"
-              disabled={isLoading}
+              disabled={isLoading || !hasAllRequirements}
               className="w-full bg-[var(--accent)] text-[var(--text-inverse)] font-medium rounded-lg px-4 py-3 flex items-center justify-center gap-2 hover:opacity-90 active:scale-[0.98] transition-all disabled:opacity-50"
             >
               {isLoading ? (
-                <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                <div className="w-5 h-5 border-2 border- current border-t-trasparent rounded-full animate-spin" />
               ) : (
                 <>
                   Set New Password <span className="text-lg">→</span>

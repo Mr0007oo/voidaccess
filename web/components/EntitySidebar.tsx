@@ -269,7 +269,7 @@ export function EntitySidebar({
                                       : "bg-blue-600 text-white"
                                   }`}
                                 >
-                                  {(e.source_count ?? 1)} sources
+                                  {(e.source_count ?? 1) >= 4 ? "✓ " : ""}{(e.source_count ?? 1)} sources
                                 </span>
                               )}
                             </div>

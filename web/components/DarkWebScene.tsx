@@ -48,7 +48,7 @@ export default function DarkWebScene() {
         // Themed colors
         const isAccent = Math.random() > 0.8;
         if (isAccent) {
-            color.setHex(0x58a6ff); // void access blue accent
+            color.setHex(0x9b9fee); // void access blue accent
         } else {
             color.setHex(0x1c2128); // muted background color
         }
@@ -74,11 +74,11 @@ export default function DarkWebScene() {
     scene.add(particles);
 
     // ABSTRACT GRID TUNNEL
-    const gridHelper = new THREE.GridHelper(40, 40, 0x58a6ff, 0x161b22);
+    const gridHelper = new THREE.GridHelper(40, 40, 0x9b9fee, 0x161b22);
     gridHelper.position.y = -3;
     scene.add(gridHelper);
     
-    const gridHelperTop = new THREE.GridHelper(40, 40, 0x58a6ff, 0x161b22);
+    const gridHelperTop = new THREE.GridHelper(40, 40, 0x9b9fee, 0x161b22);
     gridHelperTop.position.y = 3;
     gridHelperTop.rotation.x = Math.PI;
     scene.add(gridHelperTop);

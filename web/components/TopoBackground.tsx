@@ -128,8 +128,8 @@ export function TopoBackground() {
           </radialGradient>
           {/* Hub halo gradient */}
           <radialGradient id="hub-halo" cx="50%" cy="50%" r="50%">
-            <stop offset="0%"   stopColor="#58a6ff" stopOpacity="0.18" />
-            <stop offset="100%" stopColor="#58a6ff" stopOpacity="0"  />
+            <stop offset="0%"   stopColor="#9B9FEE" stopOpacity="0.18" />
+            <stop offset="100%" stopColor="#9B9FEE" stopOpacity="0"  />
           </radialGradient>
         </defs>
 

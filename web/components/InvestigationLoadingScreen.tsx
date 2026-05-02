@@ -54,15 +54,34 @@ function getFactDuration(fact: string): number {
 
 const STEPS = ["SEARCH", "SCRAPE", "EXTRACT", "GRAPH", "SUMMARIZE"] as const;
 
-interface Props {
-  query: string;
+// Map API pipeline step (1-13) to display step index (0-4)
+function apiStepToDisplayIndex(apiStep: number | null | undefined): number {
+  if (!apiStep || apiStep <= 0) return 0;
+  if (apiStep <= 2) return 0; // SEARCH
+  if (apiStep <= 4) return 1; // SCRAPE
+  if (apiStep <= 6) return 2; // EXTRACT
+  if (apiStep <= 7) return 3; // GRAPH
+  return 4;                    // SUMMARIZE
 }
 
-export function InvestigationLoadingScreen({ query }: Props) {
+interface Props {
+  query: string;
+  currentStep?: number | null;
+  createdAt?: string | null;
+}
+
+export function InvestigationLoadingScreen({ query, currentStep, createdAt }: Props) {
   const [factIndex, setFactIndex] = useState(() => Math.floor(Math.random() * FACTS.length));
   const [visible, setVisible] = useState(true);
   const [dots, setDots] = useState(".");
-  const [elapsed, setElapsed] = useState(0);
+
+  // Initialise elapsed from investigation start time, not from tab open
+  const [elapsed, setElapsed] = useState(() => {
+    if (!createdAt) return 0;
+    const diff = Math.floor((Date.now() - new Date(createdAt).getTime()) / 1000);
+    return Math.max(0, diff);
+  });
+
   // Track current fact duration for progress bar animation
   const [factDuration, setFactDuration] = useState(() => getFactDuration(FACTS[Math.floor(Math.random() * FACTS.length)]));
 
@@ -88,14 +107,18 @@ export function InvestigationLoadingScreen({ query }: Props) {
     return () => clearInterval(interval);
   }, []);
 
-  // Track elapsed time
+  // Tick elapsed every second
   useEffect(() => {
     const interval = setInterval(() => setElapsed((e) => e + 1), 1000);
     return () => clearInterval(interval);
   }, []);
 
   const elapsedLabel =
-    elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+    elapsed < 60
+      ? `${elapsed}s`
+      : elapsed < 3600
+        ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+        : `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`;
 
   return (
     <div
@@ -175,27 +198,37 @@ export function InvestigationLoadingScreen({ query }: Props) {
 
           {/* Step pipeline — SEARCH ──●── SCRAPE … */}
           <div className="flex items-center gap-0">
-            {STEPS.map((step, i) => (
-              <div key={step} className="flex items-center">
-                <div className="flex flex-col items-center gap-1.5">
-                  <div
-                    className="step-dot"
-                    style={{
-                      animationDelay: `${i * 0.3}s`,
-                    }}
-                  />
-                  <span
-                    className="text-[9px] uppercase tracking-widest text-[var(--text-muted)]"
-                    style={{ fontFamily: "var(--font-mono)", fontWeight: 500 }}
-                  >
-                    {step}
-                  </span>
+            {STEPS.map((step, i) => {
+              const activeIdx = apiStepToDisplayIndex(currentStep);
+              const isDone    = i < activeIdx;
+              const isCurrent = i === activeIdx;
+              return (
+                <div key={step} className="flex items-center">
+                  <div className="flex flex-col items-center gap-1.5">
+                    {isDone ? (
+                      <div className="step-dot-done">✓</div>
+                    ) : isCurrent ? (
+                      <div className="step-dot" />
+                    ) : (
+                      <div className="step-dot-upcoming" />
+                    )}
+                    <span
+                      className={`text-[9px] uppercase tracking-widest ${
+                        isDone    ? "text-[var(--success)]" :
+                        isCurrent ? "text-[var(--text-secondary)]" :
+                                    "text-[var(--text-muted)]"
+                      }`}
+                      style={{ fontFamily: "var(--font-mono)", fontWeight: 500 }}
+                    >
+                      {step}
+                    </span>
+                  </div>
+                  {i < STEPS.length - 1 && (
+                    <div className={`mb-4 h-px w-8 ${isDone ? "bg-[var(--success)]" : "bg-[var(--border-dim)]"}`} />
+                  )}
                 </div>
-                {i < STEPS.length - 1 && (
-                  <div className="mb-4 h-px w-8 bg-[var(--border-dim)]" />
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Elapsed */}
@@ -287,7 +320,7 @@ export function InvestigationLoadingScreen({ query }: Props) {
           position: absolute;
           top: 50%;
           left: 50%;
-          border: 1px solid rgba(59, 130, 246, 0.6);
+          border: 1px solid rgba(155, 159, 238, 0.6);
           border-radius: 50%;
           transform: translate(-50%, -50%);
           animation: radar-pulse 2s ease-out infinite;
@@ -321,6 +354,28 @@ export function InvestigationLoadingScreen({ query }: Props) {
           border-radius: 50%;
           background: var(--accent);
           animation: pulse-glow 1.5s ease-in-out infinite alternate;
+        }
+
+        .step-dot-done {
+          width: 16px;
+          height: 16px;
+          border-radius: 50%;
+          background: var(--success-dim);
+          border: 1.5px solid var(--success);
+          color: var(--success);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 9px;
+          font-weight: 700;
+        }
+
+        .step-dot-upcoming {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          border: 1.5px solid rgba(255,255,255,0.18);
+          background: transparent;
         }
 
         @keyframes pulse-glow {

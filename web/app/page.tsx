@@ -3,32 +3,22 @@ import { Settings } from "lucide-react";
 import { InvestigationInput } from "@/components/InvestigationInput";
 import { StatusBar } from "@/components/StatusBar";
 import { MonitorNavBadge } from "@/components/MonitorNavBadge";
+import { WebNetworkBg } from "@/components/WebNetworkBg";
 
 export default function HomePage() {
   return (
     <div
       className="relative min-h-screen overflow-hidden selection:bg-[var(--accent-dim)] selection:text-[var(--accent)]"
-      style={{ backgroundColor: "#080B11" }}
     >
-      {/* Background Layer: Subtle dark-navy grid */}
-      <div
-        className="pointer-events-none fixed inset-0 z-0"
-        style={{
-          backgroundImage: `
-            linear-gradient(rgba(30, 58, 95, 0.15) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(30, 58, 95, 0.15) 1px, transparent 1px)
-          `,
-          backgroundSize: "60px 60px",
-        }}
-        aria-hidden
-      />
+      {/* Asymmetric node-web background */}
+      <WebNetworkBg />
 
-      {/* Background Layer: Radial vignette — darker at edges, lighter at center */}
+      {/* Radial vignette — softens edges */}
       <div
         className="pointer-events-none fixed inset-0 z-0"
         style={{
           background:
-            "radial-gradient(ellipse at center, rgba(8, 11, 17, 0) 0%, rgba(8, 11, 17, 0.8) 100%)",
+            "radial-gradient(ellipse at center, rgba(8, 11, 17, 0) 0%, rgba(8, 11, 17, 0.75) 100%)",
         }}
         aria-hidden
       />

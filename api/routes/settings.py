@@ -576,7 +576,7 @@ async def validate_model(
     provider = _infer_provider(model_id)
 
     try:
-        from llm_utils import resolve_model_config, _common_llm_params
+        from voidaccess.llm_utils import resolve_model_config, _common_llm_params
         from langchain_openai import ChatOpenAI
         from langchain_anthropic import ChatAnthropic
         from langchain_google_genai import ChatGoogleGenerativeAI

@@ -20,10 +20,11 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def upgrade():
     # Table 'users' already created in 0001_initial_schema
-    # Seed default admin account
-    # Password: "voidaccess" (hashed)
-    # must_reset_password = True forces reset on first login
-    hashed_pwd = pwd_context.hash("voidaccess")
+    # Seed default admin account with a secure placeholder
+    # Password must be set during setup or changed on first login
+    import secrets
+    placeholder_password = secrets.token_urlsafe(32)
+    hashed_pwd = pwd_context.hash(placeholder_password)
     now = datetime.now(timezone.utc).isoformat()
     
     op.execute(
