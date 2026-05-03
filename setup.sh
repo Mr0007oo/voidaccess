@@ -7,20 +7,44 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m'
 
-print_ok() { echo "${GREEN}✓${NC} $1"; }
-print_fail() { echo "${RED}✗${NC} $1"; }
-print_warn() { echo "${YELLOW}⚠${NC} $1"; }
-print_info() { echo "${BLUE}→${NC} $1"; }
-print_step() { echo ""; echo "${CYAN}${BOLD}━━━ STEP $1 ━━━${NC}"; }
-prompt() { echo -n "${BLUE}▸${NC} $1"; }
+print_ok()   { printf "${GREEN}  ✓${NC}  %s\n" "$1"; }
+print_fail() { printf "${RED}  ✗${NC}  %s\n" "$1"; }
+print_warn() { printf "${YELLOW}  ⚠${NC}  %s\n" "$1"; }
+print_info() { printf "${DIM}  →${NC}  %s\n" "$1"; }
+prompt()     { printf "${CYAN}  ▸${NC}  %s" "$1"; }
+
+print_step() {
+    local num="$1"
+    local title="$2"
+    printf "\n${CYAN}  ┌─────────────────────────────────┐${NC}\n"
+    printf "${CYAN}  │${NC} ${BOLD}  %s / 10  ·  %s${NC}" "$num" "$title"
+    local pad=$((33 - ${#title} - ${#num} - 8))
+    [ $pad -lt 0 ] && pad=0
+    printf "%${pad}s${CYAN}│${NC}\n" ""
+    printf "${CYAN}  └─────────────────────────────────┘${NC}\n\n"
+}
+
+show_progress() {
+    local pid=$1
+    local msg="$2"
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i+1) % 10 ))
+        printf "\r  ${CYAN}${spin:$i:1}${NC}  %s" "$msg"
+        sleep 0.1
+    done
+    printf "\r  ${GREEN}✓${NC}  %s\n" "$msg"
+}
 
 _prompt() {
     local prompt_text="$1"
@@ -70,17 +94,50 @@ wait_for_key() {
         yn_default="y/n"
     fi
     local response=""
-    echo ""
+    printf "\n"
     prompt "$prompt_text [$yn_default]: "
     response="$(_prompt "" "$default")"
     echo "$response"
 }
 
 # =============================================================================
+# Opening banner
+# =============================================================================
+printf "\n"
+printf "${CYAN}"
+printf "  ╔═══════════════════════════════════╗\n"
+printf "  ║                                   ║\n"
+printf "  ║     V O I D A C C E S S           ║\n"
+printf "  ║     Setup Wizard                  ║\n"
+printf "  ║                                   ║\n"
+printf "  ╚═══════════════════════════════════╝\n"
+printf "${NC}\n"
+
+# =============================================================================
+# Docker permission check
+# =============================================================================
+check_docker_permission() {
+    if ! docker info > /dev/null 2>&1; then
+        if sudo docker info > /dev/null 2>&1; then
+            printf "\n  ${YELLOW}⚠${NC}  Docker requires sudo on this system.\n"
+            printf "  ${DIM}→${NC}  Re-run with: ${BOLD}sudo bash setup.sh${NC}\n\n"
+            printf "  ${DIM}→${NC}  Or add yourself to the docker group (no sudo needed after):\n"
+            printf "       ${DIM}sudo usermod -aG docker \$USER && newgrp docker${NC}\n\n"
+            exit 1
+        else
+            printf "\n  ${RED}✗${NC}  Docker not found or not running.\n"
+            printf "  ${DIM}→${NC}  Install: ${DIM}https://docs.docker.com/get-docker/${NC}\n\n"
+            exit 1
+        fi
+    fi
+}
+
+check_docker_permission
+
+# =============================================================================
 # STEP 1: Prerequisites Check
 # =============================================================================
-print_step "1" "Prerequisites Check"
-echo ""
+print_step "1" "Prerequisites"
 
 check_cmd() {
     if command -v "$1" >/dev/null 2>&1; then
@@ -93,7 +150,6 @@ check_cmd() {
 }
 
 check_python() {
-    # Test with piped stdin since that's how we use Python (parsing curl JSON output)
     _py_pipe_test() {
         echo '{}' | "$1" -c "import sys,json; json.load(sys.stdin)" >/dev/null 2>&1
     }
@@ -113,10 +169,10 @@ check_python() {
     fi
 
     if [ -n "$PY_CMD" ]; then
-        echo -e "${GREEN}✓ Python ($PY_CMD)${NC}"
+        print_ok "Python ($PY_CMD)"
     else
-        echo -e "${YELLOW}⚠ Python 3.8+ not found (or stdin pipe broken)${NC}"
-        echo "  Secret generation will use /dev/urandom fallback"
+        print_warn "Python 3.8+ not found (or stdin pipe broken)"
+        print_info "Secret generation will use /dev/urandom fallback"
     fi
 }
 
@@ -127,7 +183,7 @@ PYTHON_OK=false
 GIT_OK=false
 
 if [ ! -t 0 ]; then
-    echo -e "${YELLOW}Warning: Non-interactive mode detected. Using defaults for all prompts.${NC}"
+    print_warn "Non-interactive mode detected. Using defaults for all prompts."
 fi
 
 if check_cmd docker; then
@@ -135,7 +191,7 @@ if check_cmd docker; then
 fi
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    print_ok "docker compose v$(docker compose version 2>/dev/null | grep -oP 'v\K[0-9.]+' | head -1 || 'available')"
+    print_ok "docker compose v$(docker compose version 2>/dev/null | grep -oP 'v\K[0-9.]+' | head -1 || echo 'available')"
     DOCKER_COMPOSE_OK=true
 else
     if command -v docker-compose >/dev/null 2>&1; then
@@ -151,15 +207,15 @@ check_python
 [ -n "$PY_CMD" ] && PYTHON_OK=true
 check_cmd git && GIT_OK=true
 
-echo ""
+printf "\n"
 if [ "$DOCKER_OK" = false ]; then
     print_fail "Docker is required to run VoidAccess."
-    echo ""
-    echo "Install Docker:"
-    echo "  macOS:    brew install --cask docker"
-    echo "  Ubuntu:   sudo apt install docker.io docker-compose"
-    echo "  Windows:  https://docs.docker.com/desktop/install/windows-install/"
-    echo ""
+    printf "\n"
+    printf "  Install Docker:\n"
+    printf "    ${DIM}macOS:    brew install --cask docker${NC}\n"
+    printf "    ${DIM}Ubuntu:   sudo apt install docker.io docker-compose${NC}\n"
+    printf "    ${DIM}Windows:  https://docs.docker.com/desktop/install/windows-install/${NC}\n"
+    printf "\n"
     exit 1
 fi
 
@@ -174,8 +230,7 @@ fi
 # =============================================================================
 # STEP 2: Environment File Setup
 # =============================================================================
-print_step "2" "Environment File Setup"
-echo ""
+print_step "2" "Environment"
 
 ENV_FILE="$SCRIPT_DIR/.env"
 ENV_EXAMPLE="$SCRIPT_DIR/.env.example"
@@ -189,7 +244,7 @@ if [ -f "$ENV_FILE" ]; then
         print_info "Overwriting existing .env"
     else
         print_info "Keeping existing .env — skipping configuration."
-        echo ""
+        printf "\n"
         print_warn "To re-run setup, delete or rename .env and run setup.sh again."
         exit 0
     fi
@@ -206,8 +261,7 @@ fi
 # =============================================================================
 # STEP 3: Generate Required Secrets
 # =============================================================================
-print_step "3" "Generate Required Secrets"
-echo ""
+print_step "3" "Secrets"
 
 if [ -n "$PY_CMD" ]; then
     JWT_SECRET=$($PY_CMD -c "import secrets; print(secrets.token_hex(32))")
@@ -217,7 +271,7 @@ else
         JWT_SECRET=$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 64)
         POSTGRES_PASSWORD=$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 32)
     else
-        echo -e "${RED}Cannot generate secrets — install Python 3${NC}"
+        printf "${RED}  ✗${NC}  Cannot generate secrets — install Python 3\n"
         exit 1
     fi
 fi
@@ -229,35 +283,22 @@ print_ok "Generated JWT_SECRET and POSTGRES_PASSWORD"
 # =============================================================================
 # STEP 4: LLM Provider Selection
 # =============================================================================
-print_step "4" "LLM Provider Selection"
-echo ""
-print_info "Choose your LLM provider (required for investigations):"
-echo ""
-echo "  ${BOLD}[1]${NC} Groq — FREE, fast, no credit card"
-echo "           Llama 3.3 70B via Groq Cloud"
-echo "           Sign up: https://console.groq.com"
-echo ""
-echo "  ${BOLD}[2]${NC} OpenRouter — FREE tier available"
-echo "           100+ models including free options"
-echo "           Sign up: https://openrouter.ai"
-echo ""
-echo "  ${BOLD}[3]${NC} Anthropic Claude — Paid, best quality"
-echo "           Claude 3.5 Sonnet recommended"
-echo "           Sign up: https://console.anthropic.com"
-echo ""
-echo "  ${BOLD}[4]${NC} OpenAI — Paid"
-echo "           GPT-4o recommended"
-echo "           Sign up: https://platform.openai.com"
-echo ""
-echo "  ${BOLD}[5]${NC} Google Gemini — FREE tier available"
-echo "           Gemini 1.5 Flash/Pro"
-echo "           Sign up: https://aistudio.google.com"
-echo ""
-echo "  ${BOLD}[6]${NC} Ollama — FREE, runs locally"
-echo "           No internet needed. Install: https://ollama.ai"
-echo ""
-echo "  ${BOLD}[7]${NC} Skip — I'll configure this later"
-echo ""
+print_step "4" "LLM Provider"
+
+printf "  ${BOLD}Choose your LLM provider:${NC}\n\n"
+printf "  ${CYAN}[1]${NC} ${BOLD}Groq${NC}          ${GREEN}FREE${NC} · No credit card needed\n"
+printf "      Llama 3.3 70B · ${DIM}console.groq.com${NC}\n\n"
+printf "  ${CYAN}[2]${NC} ${BOLD}OpenRouter${NC}    ${GREEN}FREE${NC} models available\n"
+printf "      100+ models · ${DIM}openrouter.ai${NC}\n\n"
+printf "  ${CYAN}[3]${NC} ${BOLD}Anthropic${NC}     ${YELLOW}Paid${NC}\n"
+printf "      Claude models · ${DIM}console.anthropic.com${NC}\n\n"
+printf "  ${CYAN}[4]${NC} ${BOLD}OpenAI${NC}        ${YELLOW}Paid${NC}\n"
+printf "      GPT-4o · ${DIM}platform.openai.com${NC}\n\n"
+printf "  ${CYAN}[5]${NC} ${BOLD}Google Gemini${NC} ${GREEN}FREE${NC} tier available\n"
+printf "      Gemini 1.5 Flash · ${DIM}aistudio.google.com${NC}\n\n"
+printf "  ${CYAN}[6]${NC} ${BOLD}Ollama${NC}        ${GREEN}FREE${NC} · Fully local · No internet\n"
+printf "      ${DIM}ollama.ai${NC}\n\n"
+printf "  ${DIM}[7]  Skip — configure later${NC}\n\n"
 
 CHOICE=""
 while true; do
@@ -288,7 +329,7 @@ test_api_key() {
 
 case "$CHOICE" in
     1)
-        echo ""
+        printf "\n"
         prompt "Enter your Groq API key: "
         GROQ_KEY="$(_prompt "" "")"
         if [ -n "$GROQ_KEY" ]; then
@@ -309,7 +350,7 @@ case "$CHOICE" in
         fi
         ;;
     2)
-        echo ""
+        printf "\n"
         prompt "Enter your OpenRouter API key: "
         OPENROUTER_KEY="$(_prompt "" "")"
         if [ -n "$OPENROUTER_KEY" ]; then
@@ -330,7 +371,7 @@ case "$CHOICE" in
         fi
         ;;
     3)
-        echo ""
+        printf "\n"
         prompt "Enter your Anthropic API key: "
         ANTHROPIC_KEY="$(_prompt "" "")"
         if [ -n "$ANTHROPIC_KEY" ]; then
@@ -351,7 +392,7 @@ case "$CHOICE" in
         fi
         ;;
     4)
-        echo ""
+        printf "\n"
         prompt "Enter your OpenAI API key: "
         OPENAI_KEY="$(_prompt "" "")"
         if [ -n "$OPENAI_KEY" ]; then
@@ -372,7 +413,7 @@ case "$CHOICE" in
         fi
         ;;
     5)
-        echo ""
+        printf "\n"
         prompt "Enter your Google AI API key: "
         GOOGLE_KEY="$(_prompt "" "")"
         if [ -n "$GOOGLE_KEY" ]; then
@@ -404,7 +445,7 @@ case "$CHOICE" in
         OLLAMA_RESPONSE=$(curl -s --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null || echo "")
         if [ -n "$OLLAMA_RESPONSE" ] && echo "$OLLAMA_RESPONSE" | grep -q "models"; then
             print_ok "Ollama is running"
-            echo ""
+            printf "\n"
             print_info "Available models:"
             echo "$OLLAMA_RESPONSE" | ${PY_CMD:-python3} -c "
 import sys, json
@@ -425,18 +466,18 @@ try:
 except:
     print('  (could not parse model list)')
 " 2>/dev/null || echo "  (could not list models)"
-            echo ""
+            printf "\n"
             env_update "OLLAMA_BASE_URL" "http://127.0.0.1:11434"
             print_ok "Ollama configured"
         else
             print_warn "Ollama is not running."
-            echo ""
+            printf "\n"
             print_info "To use Ollama:"
-            echo "  1. Install: https://ollama.ai"
-            echo "  2. Run: ollama serve"
-            echo "  3. Pull a model: ollama pull llama3.2"
-            echo "  4. Re-run setup.sh"
-            echo ""
+            printf "    ${DIM}1. Install: https://ollama.ai${NC}\n"
+            printf "    ${DIM}2. Run: ollama serve${NC}\n"
+            printf "    ${DIM}3. Pull a model: ollama pull llama3.2${NC}\n"
+            printf "    ${DIM}4. Re-run setup.sh${NC}\n"
+            printf "\n"
             env_append "# OLLAMA_BASE_URL=http://127.0.0.1:11434"
             print_info "Skipped for now (uncomment in .env after installing Ollama)"
         fi
@@ -450,11 +491,11 @@ esac
 # =============================================================================
 # STEP 5: Optional Enrichment Keys
 # =============================================================================
-print_step "5" "Optional Enrichment Keys"
-echo ""
+print_step "5" "Enrichment Keys"
+
 print_info "Threat intelligence enrichment keys"
-print_info "(Press Enter to skip any)"
-echo ""
+print_info "Press Enter to skip any"
+printf "\n"
 
 prompt "AlienVault OTX API key (https://otx.alienvault.com): "
 OTX_KEY="$(_prompt "" "")"
@@ -478,7 +519,7 @@ if [ -n "$OTX_KEY" ]; then
     fi
 fi
 
-echo ""
+printf "\n"
 prompt "VirusTotal API key (https://virustotal.com): "
 VT_KEY="$(_prompt "" "")"
 if [ -n "$VT_KEY" ]; then
@@ -504,11 +545,11 @@ fi
 # =============================================================================
 # STEP 6: Redis Configuration
 # =============================================================================
-print_step "6" "Redis Configuration (Optional)"
-echo ""
-print_info "Redis enables JWT token revocation and circuit breaker"
-print_info "persistence. Recommended for production."
-echo ""
+print_step "6" "Redis"
+
+print_info "Redis enables JWT token revocation and circuit breaker persistence."
+print_info "Recommended for production."
+printf "\n"
 
 response="$(wait_for_key "Is Redis available" "N")"
 if [ "$response" = "Y" ] || [ "$response" = "y" ]; then
@@ -539,10 +580,10 @@ fi
 # STEP 7: Pre-seed MITRE ATT&CK Cache
 # =============================================================================
 print_step "7" "MITRE ATT&CK Cache"
-echo ""
+
 print_info "Pre-seeding MITRE ATT&CK database (~33MB, one-time download)"
 print_info "This improves threat actor enrichment quality."
-echo ""
+printf "\n"
 
 response="$(wait_for_key "Download MITRE ATT&CK now" "Y")"
 if [ "$response" != "N" ] && [ "$response" != "n" ]; then
@@ -570,13 +611,13 @@ fi
 # =============================================================================
 # STEP 8: Start the Stack
 # =============================================================================
-print_step "8" "Start VoidAccess"
-echo ""
+print_step "8" "Start Stack"
+
 print_info "Ready to start VoidAccess?"
-echo ""
-echo "  Services: PostgreSQL, Tor, FastAPI, Next.js"
-echo "  This will take 3-5 minutes on first run."
-echo ""
+printf "\n"
+printf "  ${DIM}Services: PostgreSQL, Tor, FastAPI, Next.js${NC}\n"
+printf "  ${DIM}This will take 3-5 minutes on first run.${NC}\n"
+printf "\n"
 
 response="$(wait_for_key "Start now" "Y")"
 if [ "$response" = "N" ] || [ "$response" = "n" ]; then
@@ -584,93 +625,86 @@ if [ "$response" = "N" ] || [ "$response" = "n" ]; then
     exit 0
 fi
 
-print_info "Building and starting containers..."
-echo ""
+printf "\n"
 
 DOCKER_BUILDKIT=1 docker compose -f infra/docker-compose.yml \
     --project-directory . \
     --env-file .env \
-    up --build -d
+    up --build -d &>/tmp/voidaccess_build.log &
+show_progress $! "Building and starting containers..."
 
 print_info "Waiting for services to be ready..."
-echo -n "  "
+printf "  "
 
+STATUS=""
 for i in $(seq 1 60); do
     _HEALTH=$(curl -s --max-time 5 http://localhost:8000/healthz/ready 2>/dev/null || echo "")
     STATUS=$(echo "$_HEALTH" | \
         ${PY_CMD:-python3} -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || \
         echo "$_HEALTH" | grep -o '"status":"ready"' | grep -o 'ready' || echo "")
     if [ "$STATUS" = "ready" ]; then
-        echo ""
+        printf "\n"
         print_ok "VoidAccess is ready"
         break
     fi
-    echo -n "."
+    printf "."
     sleep 5
 done
 
 if [ "$STATUS" != "ready" ]; then
-    echo ""
+    printf "\n"
     print_warn "Services may still be starting. Check status with:"
-    echo "  bash run.sh"
-    echo "  docker compose -f infra/docker-compose.yml --project-directory . logs -f"
+    printf "    ${DIM}docker compose -f infra/docker-compose.yml --project-directory . logs -f${NC}\n"
 fi
 
 # =============================================================================
-# STEP 10: Set Admin Password
+# STEP 9: Set Admin Password
 # =============================================================================
-echo ""
-echo "=== Step 10: Set admin password ==="
-echo ""
-echo "The default admin account requires a "
-echo "password to be set before first login."
-echo ""
+print_step "9" "Admin Password"
+
+printf "  The default admin account requires a password before first login.\n"
+printf "\n"
 
 ADMIN_EMAIL="admin@voidaccess.tech"
 ADMIN_PASS=""
 
 if [ -t 0 ]; then
-    # Interactive: prompt for email and password
-    printf "Admin email [admin@voidaccess.tech]: "
+    prompt "Admin email [admin@voidaccess.tech]: "
     read -r _email_input || _email_input=""
     ADMIN_EMAIL="${_email_input:-admin@voidaccess.tech}"
 
     while true; do
-        printf "Admin password (min 8 chars, "
-        printf "letters + numbers): "
+        prompt "Admin password (min 8 chars, letters + numbers): "
         read -rs ADMIN_PASS || ADMIN_PASS=""
-        echo ""
+        printf "\n"
 
         if [ ${#ADMIN_PASS} -lt 8 ]; then
-            echo "✗ Password too short (min 8 chars)"
+            print_fail "Password too short (min 8 chars)"
             continue
         fi
         if ! echo "$ADMIN_PASS" | grep -qE '[a-zA-Z]' || \
            ! echo "$ADMIN_PASS" | grep -qE '[0-9]'; then
-            echo "✗ Must contain letters and numbers"
+            print_fail "Must contain letters and numbers"
             continue
         fi
 
-        printf "Confirm password: "
+        prompt "Confirm password: "
         read -rs ADMIN_CONFIRM || ADMIN_CONFIRM=""
-        echo ""
+        printf "\n"
 
         if [ "$ADMIN_PASS" != "$ADMIN_CONFIRM" ]; then
-            echo "✗ Passwords don't match"
+            print_fail "Passwords don't match"
             continue
         fi
         break
     done
 else
-    # Non-interactive: skip password step, user must set it via Settings UI
     print_warn "Non-interactive mode — skipping admin password setup."
-    echo "  Log in with the default credentials and set your password via:"
-    echo "  Settings → Security → Change Password"
+    print_info "Log in and set your password via: Settings → Security → Change Password"
 fi
 
-# Set password via psql (only when entered interactively)
 if [ -n "$ADMIN_PASS" ]; then
-    echo "Setting admin password..."
+    print_info "Setting admin password..."
     HASH=$(docker compose -f infra/docker-compose.yml \
         --project-directory . \
         --env-file .env \
@@ -694,30 +728,26 @@ print(ctx.hash('$ADMIN_PASS'))
              WHERE email='admin@voidaccess.tech'
              OR email='$ADMIN_EMAIL';" \
             2>/dev/null
-        echo "✓ Admin password set"
+        print_ok "Admin password set"
     else
-        echo "⚠ Could not set password automatically"
-        echo "  Log in and change it via Settings"
+        print_warn "Could not set password automatically"
+        print_info "Log in and change it via Settings"
     fi
 fi
 
 # =============================================================================
-# STEP 9: Summary
+# STEP 10: Complete
 # =============================================================================
-echo ""
-echo "╔════════════════════════════════════════════════════╗"
-echo "║        VoidAccess is ready!                          ║"
-echo "╠════════════════════════════════════════════════════╣"
-echo "║  UI:      http://localhost:3001                     ║"
-echo "║  API:     http://localhost:8000                     ║"
-echo "║  Docs:    http://localhost:8000/docs                ║"
-echo "╠════════════════════════════════════════════════════╣"
-echo "║  Login credentials:                                ║"
-echo "║  Email:    $ADMIN_EMAIL        ║"
-echo "║  Password: (set during setup)                      ║"
-echo "╠════════════════════════════════════════════════════╣"
-echo "║  To add API keys later:                            ║"
-echo "║  → Settings page in the UI                         ║"
-echo "║  → Or re-run: bash setup.sh                        ║"
-echo "╚════════════════════════════════════════════════════╝"
-echo ""
+print_step "10" "Complete"
+
+printf "\n${GREEN}"
+printf "  ╔═══════════════════════════════════╗\n"
+printf "  ║                                   ║\n"
+printf "  ║   ✓  VoidAccess is ready          ║\n"
+printf "  ║                                   ║\n"
+printf "  ╠═══════════════════════════════════╣\n"
+printf "  ║  UI   →  http://localhost:3001    ║\n"
+printf "  ║  API  →  http://localhost:8000    ║\n"
+printf "  ║                                   ║\n"
+printf "  ╚═══════════════════════════════════╝\n"
+printf "${NC}\n"
