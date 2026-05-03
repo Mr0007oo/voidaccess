@@ -7,14 +7,19 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m'
 
-# ── Python detection (python3 may be a Windows Store stub in Git Bash) ─────────
+print_ok()   { printf "${GREEN}  ✓${NC}  %s\n" "$1"; }
+print_warn() { printf "${YELLOW}  ⚠${NC}  %s\n" "$1"; }
+print_info() { printf "${DIM}  →${NC}  %s\n" "$1"; }
+
+# ── Python detection (python3 may be a Windows Store stub in Git Bash) ────────
 
 if echo '{}' | python3 -c "import sys,json; json.load(sys.stdin)" >/dev/null 2>&1; then
     PYTHON=python3
@@ -32,35 +37,79 @@ _parse_status() {
     fi
 }
 
-# ── Preflight ──────────────────────────────────────────────────────────────────
+# ── Banner ────────────────────────────────────────────────────────────────────
 
-if ! command -v docker >/dev/null 2>&1; then
-    echo -e "${RED}✗ Docker not found. Install Docker and try again.${NC}"
-    exit 1
+printf "\n"
+printf "${CYAN}"
+printf "  ╔═══════════════════════════════════╗\n"
+printf "  ║  VoidAccess  ·  Starting up       ║\n"
+printf "  ╚═══════════════════════════════════╝\n"
+printf "${NC}\n"
+
+# ── Docker permission check ───────────────────────────────────────────────────
+
+if ! docker info > /dev/null 2>&1; then
+    if sudo docker info > /dev/null 2>&1; then
+        printf "\n  ${YELLOW}⚠${NC}  Docker requires sudo on this system.\n"
+        printf "  ${DIM}→${NC}  Re-run with: ${BOLD}sudo bash start.sh${NC}\n\n"
+        exit 1
+    else
+        printf "\n  ${RED}✗${NC}  Docker not found or not running.\n"
+        printf "  ${DIM}→${NC}  Install: ${DIM}https://docs.docker.com/get-docker/${NC}\n\n"
+        exit 1
+    fi
 fi
 
 if [ ! -f "$SCRIPT_DIR/.env" ]; then
-    echo -e "${YELLOW}⚠  No .env file found. Run setup.sh first:${NC}"
-    echo "   bash setup.sh"
+    print_warn "No .env file found. Run setup.sh first:"
+    printf "    ${DIM}bash setup.sh${NC}\n"
     exit 1
 fi
 
-# ── Build & start ──────────────────────────────────────────────────────────────
+# ── Build & start ─────────────────────────────────────────────────────────────
 
-echo ""
-echo -e "${CYAN}${BOLD}Starting VoidAccess...${NC}"
-echo ""
-
+printf "  ${DIM}→${NC}  Building containers...\n"
 DOCKER_BUILDKIT=1 docker compose -f "$SCRIPT_DIR/infra/docker-compose.yml" \
     --project-directory "$SCRIPT_DIR" \
     --env-file "$SCRIPT_DIR/.env" \
-    up --build -d
+    up --build -d \
+    > /tmp/va_start.log 2>&1
+START_EXIT=$?
 
-# ── Wait for API to be ready ───────────────────────────────────────────────────
+if [ $START_EXIT -eq 0 ]; then
+    printf "  ${GREEN}✓${NC}  Containers started\n"
+else
+    printf "  ${RED}✗${NC}  Build failed — check /tmp/va_start.log\n"
+    tail -20 /tmp/va_start.log
+    exit 1
+fi
 
-echo ""
-echo -e "Waiting for services to be ready..."
-echo -n "  "
+# ── Service health ────────────────────────────────────────────────────────────
+
+printf "\n"
+printf "  ${DIM}→${NC}  Waiting for services...\n"
+
+for SVC in postgres tor fastapi nextjs; do
+    FOUND=false
+    for i in $(seq 1 30); do
+        STATE=$(docker inspect \
+            --format='{{.State.Health.Status}}' \
+            voidaccess-$SVC 2>/dev/null || echo "starting")
+        if [ "$STATE" = "healthy" ] || [ "$STATE" = "running" ]; then
+            printf "  ${GREEN}✓${NC}  $SVC\n"
+            FOUND=true
+            break
+        fi
+        sleep 2
+    done
+    if [ "$FOUND" = false ]; then
+        printf "  ${YELLOW}⚠${NC}  $SVC (timeout)\n"
+    fi
+done
+
+# ── Wait for API ready ────────────────────────────────────────────────────────
+
+printf "\n"
 
 STATUS=""
 for i in $(seq 1 60); do
@@ -69,28 +118,25 @@ for i in $(seq 1 60); do
     if [ "$STATUS" = "ready" ]; then
         break
     fi
-    echo -n "."
     sleep 5
 done
 
-echo ""
-
-# ── Ready banner ───────────────────────────────────────────────────────────────
+# ── Ready banner ──────────────────────────────────────────────────────────────
 
 if [ "$STATUS" = "ready" ]; then
-    echo ""
-    echo -e "${GREEN}${BOLD}╔════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}${BOLD}║       VoidAccess is ready!             ║${NC}"
-    echo -e "${GREEN}${BOLD}╠════════════════════════════════════════╣${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Web UI:  http://localhost:3001         ${GREEN}${BOLD}║${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  API:     http://localhost:8000         ${GREEN}${BOLD}║${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  API docs: http://localhost:8000/docs   ${GREEN}${BOLD}║${NC}"
-    echo -e "${GREEN}${BOLD}╠════════════════════════════════════════╣${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Stop:  ./stop.sh                      ${GREEN}${BOLD}║${NC}"
-    echo -e "${GREEN}${BOLD}╚════════════════════════════════════════╝${NC}"
-    echo ""
+    printf "\n${GREEN}"
+    printf "  ╔═══════════════════════════════════╗\n"
+    printf "  ║                                   ║\n"
+    printf "  ║   ✓  VoidAccess is ready          ║\n"
+    printf "  ║                                   ║\n"
+    printf "  ╠═══════════════════════════════════╣\n"
+    printf "  ║  UI   →  http://localhost:3001    ║\n"
+    printf "  ║  API  →  http://localhost:8000    ║\n"
+    printf "  ║                                   ║\n"
+    printf "  ╚═══════════════════════════════════╝\n"
+    printf "${NC}\n"
 else
-    echo -e "${YELLOW}⚠  Services are taking longer than expected.${NC}"
-    echo "   Check status:  docker compose -f infra/docker-compose.yml --project-directory . ps"
-    echo "   View logs:     docker compose -f infra/docker-compose.yml --project-directory . logs -f"
+    print_warn "Services are taking longer than expected."
+    printf "    ${DIM}docker compose -f infra/docker-compose.yml --project-directory . ps${NC}\n"
+    printf "    ${DIM}docker compose -f infra/docker-compose.yml --project-directory . logs -f${NC}\n"
 fi
