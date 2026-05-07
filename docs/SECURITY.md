@@ -5,7 +5,7 @@
 | Version | Supported |
 |---------|-----------|
 | v1.0.0   | Yes       |
-| < v1.0.0  | No        |
+
 
 The current version is v1.0.0. Only the latest release receives security fixes.
 
