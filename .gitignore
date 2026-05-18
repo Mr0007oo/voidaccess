@@ -198,7 +198,14 @@ docs/minimax_Refinements.md
 cleanup_nuclear.sh
 dbg.bat
 
-# QA / smoke-test artifacts
+# QA / testing / local-run artifacts — never commit these
+# QA run directories (fresh-clone test dirs, temp stacks)
+va_final_qa/
+*_qa/
+*_test_run/
+qa_output/
+
+# Individual QA / smoke-test scripts
 build_fastapi.txt
 build_log.txt
 build_log_2.txt
@@ -206,8 +213,14 @@ full_smoke_test.py
 poll.py
 poll2.py
 qa_test.sh
-qa_test_9.sh
-smoke_test.py
+qa_test_*.sh
+patch_setup.sh
+phase*_*.sh
+smoke_test*.py
+*_qa.log
+/tmp/setup_qa.log
+/tmp/voidaccess_*.log
+/tmp/voidaccess_*.json
 
 # Assistant / AI configuration and logs
 # Claude / Anthropic
@@ -248,10 +261,21 @@ system-prompt.md
 ai_notes.md
 .ai/
 
-# Test files
+# Test files and test infrastructure
 tests/
 web/__tests__/
 web/middleware.test.ts
+*.test.ts
+*.test.tsx
+*.test.py
+*.spec.ts
+*.spec.tsx
+conftest.py
+pytest.ini
+.pytest.ini
+pyproject.toml.test
+test_*.py
+*_test.py
 
 # Missing artifacts from code audit
 /tmp/va_*.log
