@@ -625,9 +625,10 @@ def get_entity_neighbors_db(
 def get_entity_appearances(
     session: Session,
     entity_id: uuid.UUID,
+    user_id: int,
 ) -> List[dict]:
     """
-    Return all investigations where this entity appears,
+    Return investigations owned by user_id where this entity appears,
     including via InvestigationEntityLink (cross-investigation references).
     Returns list of {investigation_id, run_id, query, created_at}, newest first.
     """
@@ -653,6 +654,7 @@ def get_entity_appearances(
         investigations = (
             session.query(Investigation)
             .filter(Investigation.id.in_(investigation_ids))
+            .filter(Investigation.user_id == user_id)
             .all()
         )
         inv_map = {inv.id: inv for inv in investigations}
