@@ -18,8 +18,9 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from api.auth import CurrentUser, get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -37,13 +38,14 @@ async def list_entities(
     since: Optional[str] = Query(default=None, description="ISO datetime lower bound for created_at"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> dict:
     """Return paginated entities matching optional filters."""
     if not os.getenv("DATABASE_URL"):
         return {"items": [], "total": 0, "skip": 0, "limit": 20}
     try:
         from db.session import get_session  # noqa: PLC0415
-        from db.models import Entity  # noqa: PLC0415
+        from db.models import Entity, Investigation, InvestigationEntityLink  # noqa: PLC0415
         import sqlalchemy as sa  # noqa: PLC0415
 
         since_dt: Optional[datetime] = None
@@ -54,7 +56,22 @@ async def list_entities(
                 raise HTTPException(status_code=422, detail="Invalid 'since' datetime format")
 
         with get_session() as session:
-            q = session.query(Entity)
+            user_inv_ids = (
+                session.query(Investigation.id)
+                .filter(Investigation.user_id == current_user.user.id)
+                .subquery()
+            )
+            linked_entity_ids = (
+                session.query(InvestigationEntityLink.entity_id)
+                .filter(InvestigationEntityLink.investigation_id.in_(user_inv_ids))
+                .subquery()
+            )
+            q = session.query(Entity).filter(
+                sa.or_(
+                    Entity.investigation_id.in_(user_inv_ids),
+                    Entity.id.in_(linked_entity_ids),
+                )
+            ).distinct()
             if entity_type:
                 q = q.filter(Entity.entity_type == entity_type)
             if value_contains:
@@ -95,7 +112,10 @@ async def list_entities(
 
 
 @router.get("/{entity_id}/export/stix")
-async def export_entity_stix(entity_id: str) -> Response:
+async def export_entity_stix(
+    entity_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> Response:
     """Export single entity as a STIX 2.1 bundle."""
     eid = _parse_uuid(entity_id)
     try:
@@ -144,7 +164,10 @@ async def export_entity_stix(entity_id: str) -> Response:
 
 
 @router.get("/{entity_id}/export/json")
-async def export_entity_json(entity_id: str) -> Response:
+async def export_entity_json(
+    entity_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> Response:
     """Export single entity as JSON."""
     eid = _parse_uuid(entity_id)
     try:
@@ -157,7 +180,7 @@ async def export_entity_json(entity_id: str) -> Response:
             if entity is None:
                 raise HTTPException(status_code=404, detail="Entity not found")
 
-            appearances = get_entity_appearances(session, eid)
+            appearances = get_entity_appearances(session, eid, current_user.user.id)
             data = _entity_to_dict(entity)
             data["appearances"] = appearances
             json_str = json.dumps(data, indent=2, default=str)
@@ -176,7 +199,10 @@ async def export_entity_json(entity_id: str) -> Response:
 
 
 @router.get("/{entity_id}/related")
-async def get_entity_related(entity_id: str) -> dict:
+async def get_entity_related(
+    entity_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict:
     """
     Return DB-based related entities for the profile page mini-graph.
     Uses EntityRelationship table directly — returns DB UUIDs for navigation.
@@ -252,7 +278,10 @@ async def get_entity_related(entity_id: str) -> dict:
 
 
 @router.get("/{entity_id}/analysis/stylometry")
-async def get_stylometry_analysis(entity_id: str) -> dict:
+async def get_stylometry_analysis(
+    entity_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict:
     """
     Run stylometric analysis on all text attributed to this entity.
 
@@ -397,7 +426,10 @@ async def get_stylometry_analysis(entity_id: str) -> dict:
 
 
 @router.get("/{entity_id}/analysis/opsec")
-async def get_opsec_analysis(entity_id: str) -> dict:
+async def get_opsec_analysis(
+    entity_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict:
     """
     Run OPSEC failure analysis for this entity across all their appearances.
 
@@ -512,7 +544,11 @@ async def get_opsec_analysis(entity_id: str) -> dict:
 
 
 @router.get("/{entity_id}")
-async def get_entity(entity_id: str, defang: bool = True) -> dict:
+async def get_entity(
+    entity_id: str,
+    defang: bool = True,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict:
     """Return full entity profile including appearances."""
     if not os.getenv("DATABASE_URL"):
         raise HTTPException(status_code=503, detail="Database not configured")
@@ -544,7 +580,7 @@ async def get_entity(entity_id: str, defang: bool = True) -> dict:
             except Exception:
                 pass
 
-            appearances = get_entity_appearances(session, eid)
+            appearances = get_entity_appearances(session, eid, current_user.user.id)
 
             freshness_tag = get_freshness_tag(
                 entity.entity_type,
@@ -606,6 +642,7 @@ async def get_entity_neighbors(
         default=None,
         description="Scope to a specific investigation",
     ),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> dict:
     """
     Return direct neighbors of an entity using targeted SQL queries.
