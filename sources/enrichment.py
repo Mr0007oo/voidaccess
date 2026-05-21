@@ -40,9 +40,28 @@ THREATFOX_URL = "https://threatfox-api.abuse.ch/api/v1/"
 # All HTTP calls use at most 30s client timeout (enforced per request).
 
 
+_ABUSECH_WARNED = False
+
+
 def _abusech_headers() -> dict[str, str]:
     key = (os.environ.get("ABUSECH_API_KEY") or "").strip()
     return {"Auth-Key": key} if key else {}
+
+
+def _abusech_enabled() -> bool:
+    """abuse.ch APIs (MalwareBazaar/ThreatFox/URLhaus) require an Auth-Key
+    since 2024. Return False (and log once) when the key is missing so we
+    skip the request entirely instead of spamming HTTP 401."""
+    global _ABUSECH_WARNED
+    if (os.environ.get("ABUSECH_API_KEY") or "").strip():
+        return True
+    if not _ABUSECH_WARNED:
+        logger.info(
+            "abuse.ch enrichment skipped — set ABUSECH_API_KEY "
+            "(free at https://auth.abuse.ch) to enable MalwareBazaar/ThreatFox/URLhaus."
+        )
+        _ABUSECH_WARNED = True
+    return False
 
 
 def is_onion_url(url: str) -> bool:
@@ -218,6 +237,8 @@ def otx_pulse_to_page(pulse: dict) -> dict:
 
 async def fetch_malwarebazaar(query: str, limit: int = 20) -> list[dict]:
     """Query MalwareBazaar by tag then by signature."""
+    if not _abusech_enabled():
+        return []
     results: list[dict] = []
     q = (query or "").strip()
     if not q:
@@ -312,6 +333,8 @@ async def fetch_malwarebazaar(query: str, limit: int = 20) -> list[dict]:
 
 async def fetch_threatfox(query: str, limit: int = 50) -> list[dict]:
     """Search ThreatFox IOCs by search term."""
+    if not _abusech_enabled():
+        return []
     results: list[dict] = []
     q = (query or "").strip()
     if not q:
@@ -397,6 +420,8 @@ async def fetch_threatfox(query: str, limit: int = 50) -> list[dict]:
 
 async def fetch_urlhaus(query: str, limit: int = 20) -> list[dict]:
     """Search URLhaus by tag."""
+    if not _abusech_enabled():
+        return []
     results: list[dict] = []
     q = (query or "").strip()
     if not q:

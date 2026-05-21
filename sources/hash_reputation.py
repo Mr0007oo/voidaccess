@@ -164,11 +164,18 @@ async def query_malwarebazaar(hash_value: str) -> dict[str, Any]:
     """
     POST get_info to MalwareBazaar for a file hash.
 
-    No API key required. Returns malware family, file type, first seen date.
+    Requires ABUSECH_API_KEY (abuse.ch made auth-key mandatory in 2024).
+    Returns malware family, file type, first seen date.
     """
+    api_key = (os.environ.get("ABUSECH_API_KEY") or "").strip()
+    if not api_key:
+        return {"found": False, "source": "malwarebazaar_no_key"}
     try:
         timeout = aiohttp.ClientTimeout(total=15)
-        headers = {"User-Agent": "VoidAccess-OSINT/1.1 (security research)"}
+        headers = {
+            "User-Agent": "VoidAccess-OSINT/1.1 (security research)",
+            "Auth-Key": api_key,
+        }
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             async with session.post(
                 MALWAREBAZAAR_URL,
@@ -212,11 +219,18 @@ async def query_threatfox(hash_value: str) -> dict[str, Any]:
     """
     POST search_ioc to ThreatFox for a file hash.
 
-    No API key required. Returns malware family and associated IOCs.
+    Requires ABUSECH_API_KEY (abuse.ch made auth-key mandatory in 2024).
+    Returns malware family and associated IOCs.
     """
+    api_key = (os.environ.get("ABUSECH_API_KEY") or "").strip()
+    if not api_key:
+        return {"found": False, "source": "threatfox_no_key"}
     try:
         timeout = aiohttp.ClientTimeout(total=15)
-        headers = {"User-Agent": "VoidAccess-OSINT/1.1 (security research)"}
+        headers = {
+            "User-Agent": "VoidAccess-OSINT/1.1 (security research)",
+            "Auth-Key": api_key,
+        }
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             async with session.post(
                 THREATFOX_URL,

@@ -57,8 +57,23 @@ def _test_llm_key(provider: str, api_key: str, model: str) -> bool:
         return True
     try:
         from voidaccess.llm import get_llm
+    except ImportError as exc:
+        missing = str(exc).split("'")[-2] if "'" in str(exc) else str(exc)
+        console.print(
+            f"[yellow]Skipped validation:[/yellow] missing dependency [bold]{missing}[/bold]. "
+            f"Install with: [bold]pip install {missing.replace('_', '-')}[/bold]"
+        )
+        return False
+    try:
         get_llm(model, api_keys={cli_config.PROVIDER_ENV.get(provider, ""): api_key})
         return True
+    except ImportError as exc:
+        missing = str(exc).split("'")[-2] if "'" in str(exc) else str(exc)
+        console.print(
+            f"[yellow]Skipped validation:[/yellow] missing dependency [bold]{missing}[/bold]. "
+            f"Install with: [bold]pip install {missing.replace('_', '-')}[/bold]"
+        )
+        return False
     except Exception as exc:
         console.print(f"[yellow]Could not validate key:[/yellow] {exc}")
         return False
@@ -117,25 +132,7 @@ def _prompt_output_dir(cfg: dict) -> None:
 
 
 def _ensure_spacy_model() -> None:
-    console.print("\n  → Downloading spaCy NER model...")
-    try:
-        import subprocess
-        import sys
-
-        result = subprocess.run(
-            [sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            console.print("  ✓ spaCy model ready")
-        else:
-            console.print(
-                "  ⚠ spaCy download failed — run manually: "
-                "python -m spacy download en_core_web_sm"
-            )
-    except Exception as e:
-        console.print(f"  ⚠ spaCy: {e}")
+    cli_config.ensure_spacy_model()
 
 
 @app.callback()

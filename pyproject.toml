@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voidaccess"
-version = "1.3.0"
+version = "1.4.2"
 description = "Dark web OSINT CLI — automated threat intelligence from query to report"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "VoidAccess" }]
 keywords = ["osint", "darkweb", "threat-intelligence", "tor", "cli"]
@@ -15,7 +15,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -35,6 +34,7 @@ dependencies = [
     "langchain-anthropic>=0.1",
     "langchain-google-genai>=1.0",
     "langchain-groq>=0.1",
+    "langchain-ollama>=0.1",
     "python-dotenv>=1.0",
     "httpx>=0.27",
     "spacy>=3.7",

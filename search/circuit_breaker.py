@@ -29,6 +29,7 @@ CIRCUIT_PREFIX = "circuit:"
 _pool: Optional[redis.ConnectionPool] = None
 _redis_client: Optional[redis.Redis] = None
 _circuit_breaker_enabled = False
+_redis_unavailable = False  # latched True once we decide Redis isn't reachable
 
 _engine_failures: dict[str, int] = {}
 _engine_last_success: dict[str, float] = {}
@@ -37,11 +38,16 @@ _engine_open_time: dict[str, float] = {}
 
 
 async def _get_redis() -> Optional[redis.Redis]:
-    global _pool, _redis_client, _circuit_breaker_enabled
+    global _pool, _redis_client, _circuit_breaker_enabled, _redis_unavailable
+
+    if _redis_unavailable:
+        return None
 
     if REDIS_URL is None:
         _circuit_breaker_enabled = False
-        logger.warning("REDIS_URL not configured - circuit breaker using in-memory fallback")
+        if not _redis_unavailable:
+            logger.info("REDIS_URL not configured — circuit breaker using in-memory fallback")
+        _redis_unavailable = True
         return None
 
     if _redis_client is None:
@@ -55,9 +61,10 @@ async def _get_redis() -> Optional[redis.Redis]:
             _circuit_breaker_enabled = True
             logger.info("Circuit breaker enabled via Redis")
         except Exception as e:
-            logger.warning(f"Failed to connect to Redis: %s - circuit breaker using in-memory fallback", e)
+            logger.warning("Failed to connect to Redis: %s — circuit breaker using in-memory fallback", e)
             _redis_client = None
             _circuit_breaker_enabled = False
+            _redis_unavailable = True
 
     return _redis_client
 
