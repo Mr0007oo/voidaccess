@@ -139,6 +139,65 @@ def db_url() -> str:
     return f"sqlite:///{DB_PATH.as_posix()}"
 
 
+def ensure_spacy_model(model_name: str = "en_core_web_sm") -> bool:
+    """
+    Ensure spaCy NER model is installed. Returns True if model is loadable
+    after this call. Handles PEP 668 (externally-managed-environment) on
+    Debian/Ubuntu/Kali by setting PIP_BREAK_SYSTEM_PACKAGES=1, and uses
+    PIP_USER=1 outside virtualenvs.
+
+    Prints progress via rich. Safe to call repeatedly.
+    """
+    import sys
+    import subprocess
+
+    try:
+        import spacy
+        spacy.load(model_name)
+        return True
+    except Exception:
+        pass
+
+    from rich.console import Console
+    con = Console()
+    con.print(f"  [dim]→[/dim] Installing spaCy NER model [bold]{model_name}[/bold] (one-time)...")
+
+    env = dict(os.environ)
+    env["PIP_BREAK_SYSTEM_PACKAGES"] = "1"
+    in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    if not in_venv:
+        env["PIP_USER"] = "1"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "spacy", "download", model_name],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    if result.returncode == 0:
+        try:
+            import importlib
+            import spacy as _spacy  # noqa: F401
+            importlib.invalidate_caches()
+            import spacy as _spacy2
+            _spacy2.load(model_name)
+            con.print(f"  [green]✓[/green] spaCy model ready")
+            return True
+        except Exception:
+            pass
+
+    err_tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
+    con.print(f"  [yellow]⚠[/yellow] spaCy install failed (exit {result.returncode}) — NER will be skipped.")
+    for line in err_tail:
+        con.print(f"    [dim]{line}[/dim]")
+    con.print(
+        f"  Run manually: [bold]PIP_BREAK_SYSTEM_PACKAGES=1 "
+        f"{os.path.basename(sys.executable)} -m spacy download {model_name}[/bold]"
+    )
+    return False
+
+
 def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     """
     Push saved config into os.environ so that the existing voidaccess
@@ -178,3 +237,9 @@ def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     # Enrichment keys
     for k, v in (cfg.get("enrichment_keys") or {}).items():
         _set_env_if_present(k, v, clear_if_empty=True)
+
+    # Keyless APIs (ThreatFox/URLhaus/MalwareBazaar/abuse.ch) must never
+    # receive an empty auth header — clear any empty env remnant.
+    for key in ("ABUSECH_API_KEY", "VT_API_KEY", "OTX_API_KEY"):
+        if not os.environ.get(key):
+            os.environ.pop(key, None)

@@ -19,16 +19,22 @@ logger = logging.getLogger(__name__)
 _pool: Optional[redis.ConnectionPool] = None
 _redis_client: Optional[redis.Redis] = None
 _blacklist_enabled = False
+_redis_unavailable = False
 
 BLACKLIST_PREFIX = "blacklist:"
 
 
 async def _get_redis() -> Optional[redis.Redis]:
-    global _pool, _redis_client, _blacklist_enabled
+    global _pool, _redis_client, _blacklist_enabled, _redis_unavailable
+
+    if _redis_unavailable:
+        return None
 
     if REDIS_URL is None:
         _blacklist_enabled = False
-        logger.warning("REDIS_URL not configured - token blacklist disabled")
+        if not _redis_unavailable:
+            logger.info("REDIS_URL not configured — token blacklist disabled")
+        _redis_unavailable = True
         return None
 
     if _redis_client is None:
@@ -42,9 +48,10 @@ async def _get_redis() -> Optional[redis.Redis]:
             _blacklist_enabled = True
             logger.info("Token blacklist enabled via Redis")
         except Exception as e:
-            logger.warning(f"Failed to connect to Redis: %s - token blacklist disabled", e)
+            logger.warning("Failed to connect to Redis: %s — token blacklist disabled", e)
             _redis_client = None
             _blacklist_enabled = False
+            _redis_unavailable = True
 
     return _redis_client
 

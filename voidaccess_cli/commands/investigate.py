@@ -49,8 +49,17 @@ def run(
     from voidaccess_cli import config as cli_config
 
     cli_config.apply_env()
+
+    cli_config.ensure_spacy_model()
+
     if quiet:
         logging.getLogger().setLevel(logging.ERROR)
+
+    from utils.content_safety import is_blocked_query
+    blocked, reason = is_blocked_query(query)
+    if blocked:
+        console.print(f"[red]Query blocked:[/red] {reason}")
+        raise typer.Exit(code=1)
 
     if not cli_config.is_configured() and not no_llm:
         console.print("[yellow]No LLM configured.[/yellow] Run [bold]voidaccess configure[/bold] first, or pass --no-llm.")
@@ -382,6 +391,7 @@ async def _run_investigation(
         "query": query,
         "refined_query": refined,
         "model_used": chosen_model if llm is not None else None,
+        "status": "completed" if final_entities or scraped_pages else "completed_no_results",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "summary": summary_text,
         "sources_used": sources_used,
@@ -413,6 +423,23 @@ async def _run_investigation(
             "data_path": str(json_path) if fmt in ("json", "both") else None,
         }
     )
+
+    # Close any cached aiohttp sessions so the event loop exits cleanly
+    # (otherwise aiohttp prints "Unclosed client session" warnings).
+    await _close_cached_sessions()
+
+
+async def _close_cached_sessions() -> None:
+    try:
+        from scraper.scrape import close_cached_sessions as _close_scrape
+        await _close_scrape()
+    except Exception:
+        pass
+    try:
+        from search import close_search_session as _close_search
+        await _close_search()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
