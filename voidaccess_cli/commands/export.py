@@ -39,7 +39,7 @@ def run(
         raise typer.Exit(code=1)
 
     payload, suffix = _render(fmt, inv_id, data)
-    out_path = output or _default_out_path(target, suffix)
+    out_path = output or _default_out_path(target, suffix, fmt=fmt)
     out_path = Path(out_path).expanduser()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(payload, bytes):
@@ -150,9 +150,13 @@ def _flatten_for_md(data: dict) -> dict:
     return data
 
 
-def _default_out_path(target: str, suffix: str) -> Path:
+def _default_out_path(target: str, suffix: str, fmt: str = "") -> Path:
     p = Path(target).expanduser()
     if p.exists():
-        return p.with_suffix(suffix)
+        candidate = p.with_suffix(suffix)
+        # Avoid overwriting input when suffix is the same (e.g. stix/misp .json)
+        if candidate == p and fmt and fmt not in ("json",):
+            return p.parent / f"{p.stem}-{fmt}{suffix}"
+        return candidate
     from voidaccess_cli import config as cli_config
     return cli_config.get_output_dir() / f"{target}{suffix}"

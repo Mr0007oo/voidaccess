@@ -253,6 +253,12 @@ copilot-instructions.md
 .gemini/
 # Generic AI scratch files
 .antigravity/
+.agents/
+skills-lock.json
+AGENTS.md
+
+# Windows reserved device name (accidental redirect artifact)
+/nul
 implementation_plan.md
 walkthrough.md
 task.md

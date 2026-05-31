@@ -50,7 +50,20 @@ def run(
 
     cli_config.apply_env()
 
-    cli_config.ensure_spacy_model()
+    try:
+        import spacy
+        spacy.load("en_core_web_sm")
+    except Exception:
+        import subprocess, sys
+        from rich.console import Console
+        Console().print(
+            "  [dim]→[/dim] Installing spaCy NER model (one-time)..."
+        )
+        subprocess.run(
+            [sys.executable, "-m", "spacy",
+             "download", "en_core_web_sm"],
+            capture_output=True
+        )
 
     if quiet:
         logging.getLogger().setLevel(logging.ERROR)
