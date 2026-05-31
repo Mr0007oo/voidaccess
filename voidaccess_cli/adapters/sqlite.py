@@ -22,6 +22,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from sqlalchemy import text
+
 
 def init_db() -> None:
     """Create all tables on the SQLite file if missing. Idempotent."""
@@ -32,14 +34,14 @@ def init_db() -> None:
 
     # Create page_extraction_cache table if missing
     with engine.connect() as conn:
-        conn.execute("""
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS page_extraction_cache (
                 page_hash TEXT PRIMARY KEY,
                 entities_json TEXT NOT NULL,
                 extracted_at TIMESTAMP NOT NULL,
                 expires_at TIMESTAMP NOT NULL
             )
-        """)
+        """))
         conn.commit()
 
 
