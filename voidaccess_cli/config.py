@@ -213,11 +213,12 @@ def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     os.environ.setdefault("PLAYWRIGHT_ENABLED", "false")
 
     def _set_env_if_present(key: str, value: Any, *, clear_if_empty: bool = False) -> None:
-        text = str(value).strip() if value is not None else ""
-        if text:
-            os.environ[key] = text
-        elif clear_if_empty:
-            os.environ.pop(key, None)
+        text = str(value) if value is not None else ""
+        if not text or not text.strip():
+            if clear_if_empty:
+                os.environ.pop(key, None)
+            return
+        os.environ[key] = text.strip()
 
     # Tor proxy
     _set_env_if_present("TOR_PROXY_HOST", cfg.get("tor", {}).get("host", "127.0.0.1"))
@@ -241,5 +242,5 @@ def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     # Keyless APIs (ThreatFox/URLhaus/MalwareBazaar/abuse.ch) must never
     # receive an empty auth header — clear any empty env remnant.
     for key in ("ABUSECH_API_KEY", "VT_API_KEY", "OTX_API_KEY"):
-        if not os.environ.get(key):
+        if not (os.environ.get(key) or "").strip():
             os.environ.pop(key, None)

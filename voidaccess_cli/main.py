@@ -14,6 +14,7 @@ import sys
 # Force UTF-8 on Windows consoles so rich glyphs render reliably
 if sys.platform == "win32":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    os.environ.setdefault("PYTHONUTF8", "1")
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
         sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
@@ -21,6 +22,7 @@ if sys.platform == "win32":
         pass
 
 import typer
+from rich.align import Align
 from rich.console import Console
 from rich.table import Table
 
@@ -30,13 +32,17 @@ from voidaccess_cli.commands import configure, enrich, export, investigate, show
 
 console = Console()
 BANNER = """\
-[color(183)]     ░░[color(141)]████████[color(183)]░░[/]
-[color(183)]   ░░[color(141)]████████████[color(183)]░░[/]
-[color(183)]  ░░[color(141)]██████████████[color(183)]░░[/]
-[color(183)]  ░░[color(141)]████[/]  [bright_white]void[/]  [color(141)]████[color(183)]░░[/]
-[color(183)]  ░░[color(141)]██████████████[color(183)]░░[/]
-[color(183)]   ░░[color(141)]████████████[color(183)]░░[/]
-[color(183)]     ░░[color(141)]████████[color(183)]░░[/]
+[color(183)]     ░░░░░[color(141)]█[color(183)]░░░░░[/]
+[color(183)]  ░░[color(141)]█████████████[color(183)]░░[/]
+[color(183)] ░[color(141)]█████████████████[color(183)]░[/]
+[color(183)]░[color(141)]███████████████████[color(183)]░[/]
+[color(183)]░[color(141)]███████████████████[color(183)]░[/]
+[color(141)]██████[/]  [bright_white]void[/]  [color(141)]███████[/]
+[color(183)]░[color(141)]███████████████████[color(183)]░[/]
+[color(183)]░[color(141)]███████████████████[color(183)]░[/]
+[color(183)] ░[color(141)]█████████████████[color(183)]░[/]
+[color(183)]  ░░[color(141)]█████████████[color(183)]░░[/]
+[color(183)]     ░░░░░[color(141)]█[color(183)]░░░░░[/]
 [dim white]   dark web osint intelligence[/dim white]"""
 
 app = typer.Typer(
@@ -154,10 +160,16 @@ def version() -> None:
 
 
 def show_banner(console: Console) -> None:
-    if not sys.stdout.isatty():
+    import shutil
+    if os.environ.get("TERM") == "dumb":
+        return
+    if not sys.stdout.isatty() and "PS1" not in os.environ and os.name != "nt":
         return
     console.print()
-    console.print(BANNER, justify="center")
+    raw_line = "     oooooXooooo     "  # widest line, 21 chars
+    pad = max(0, (console.width - len(raw_line)) // 2)
+    for line in BANNER.split("\n"):
+        console.print(" " * pad + line)
     console.print()
 
 
@@ -171,7 +183,7 @@ def main(
 ) -> None:
     """Set env vars and render banner before command execution."""
     cli_config.apply_env()
-    if not no_banner and not ctx.invoked_subcommand:
+    if not no_banner and ctx.invoked_subcommand:
         show_banner(console)
 
 

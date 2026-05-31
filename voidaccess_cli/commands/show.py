@@ -24,6 +24,7 @@ def run(
     target: Optional[str] = typer.Argument(
         None, help="Investigation id or path to a .json export"
     ),
+    no_tui: bool = typer.Option(False, "--no-tui", help="Print summary table without launching TUI (for scripted use)."),
 ) -> None:
     """Open the entity browser TUI."""
     from voidaccess_cli import config as cli_config
@@ -32,6 +33,9 @@ def run(
     data: Optional[dict] = None
 
     if target is None:
+        if no_tui:
+            console.print("[yellow]No target specified.[/yellow]")
+            raise typer.Exit(code=1)
         target = _pick_recent()
         if target is None:
             console.print("[yellow]No investigations found. Run `voidaccess investigate` first.[/yellow]")
@@ -49,9 +53,27 @@ def run(
             console.print(f"[red]Unknown investigation:[/red] {target}")
             raise typer.Exit(code=1)
 
+    if no_tui:
+        _print_summary(data)
+        return
+
     from voidaccess_cli.browser import EntityBrowserApp
     app = EntityBrowserApp(data=data)
     app.run()
+
+
+def _print_summary(data: dict) -> None:
+    inv = data.get("investigation") or data
+    entities = data.get("entities", [])
+    table = Table(title="Investigation summary")
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Query", str(inv.get("query") or ""))
+    table.add_row("Status", str(inv.get("status") or ""))
+    table.add_row("Entities", str(len(entities)))
+    table.add_row("Created", str(inv.get("created_at") or "")[:19])
+    table.add_row("Summary", (str(inv.get("summary") or "—"))[:120])
+    console.print(table)
 
 
 def _pick_recent() -> Optional[str]:
