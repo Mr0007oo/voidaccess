@@ -2,6 +2,28 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [1.4.7] - 2026-06-04
+### Fixed
+- Critical: clearnet pages (GitHub, GitLab,
+  paste sites, RSS feeds) were silently dropped
+  due to text_content key mismatch in CLI
+  pipeline merge step. Every --no-tor
+  investigation returned 0 entities from
+  clearnet sources. Fix adds text_content to
+  the fallback chain. Before: 0 pages, 0
+  entities. After: 24+ pages, 113+ entities.
+  (PR #12 by SecJuan)
+
+## [1.4.6] - 2026-06-01
+### Fixed
+- Domain/hash/email enrichment steps now run
+  before graph building (were running after
+  finalize, too late to affect results)
+- Cache expires_at datetime tzinfo error on
+  Python 3.13 / SQLAlchemy 2.x
+- Increased LLM filter top_n from 5 to 15
+  for more pages scraped per investigation
+
 ## [1.4.3] - 2026-05-31
 
 ### Fixed
