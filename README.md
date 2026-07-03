@@ -19,8 +19,9 @@ Commercial threat intelligence platforms often charge prohibitive annual fees fo
 
 ---
 
-## What's New in v1.6.0
+## What's New in v1.6.2
 
+- **Residential proxy release alignment** — release metadata, package metadata, and docs now all report `v1.6.2`.
 - **Optional clearnet ScrapingAnt integration** — paste sites and RSS feeds can now be routed through ScrapingAnt. Affects clearnet scraping only; Tor, `.onion`, GitHub, and GitLab traffic are never affected.
 - **Three independent products** — Web Scraping API, Residential Proxy transport, and Datacenter Proxy transport are documented separately so the API key is not conflated with the proxy credentials.
 - **One-shot CLI flags** — `voidaccess investigate --use-scraping-api` and `voidaccess investigate --use-proxies` select the REST API or proxy transport for a single run.
@@ -30,7 +31,7 @@ Commercial threat intelligence platforms often charge prohibitive annual fees fo
 
 ---
 
-## What's New in v1.5.0
+## What's New in v1.6.2
 
 - 37 new entity types across crypto, credentials, messaging, and network/forensic indicators.
 - YARA, Snort, Suricata, and IOC package ZIP exports.
@@ -224,7 +225,7 @@ Export formats:
 
 ## Actor Intelligence
 
-VoidAccess v1.5.0 persists actor profiles across investigations in `actor_profiles`, with linked aliases and infrastructure in `actor_aliases` and `actor_infrastructure`. Profiles are populated from threat actor, ransomware group, and handle entities, then enriched with co-occurring infrastructure and timeline events.
+VoidAccess v1.6.2 persists actor profiles across investigations in `actor_profiles`, with linked aliases and infrastructure in `actor_aliases` and `actor_infrastructure`. Profiles are populated from threat actor, ransomware group, and handle entities, then enriched with co-occurring infrastructure and timeline events.
 
 Cross-alias resolution scores five signals: shared infrastructure, shared PGP, string similarity, temporal co-activity, and co-investigation. Use `voidaccess actors` to list profiles, `voidaccess actor <handle>` for the full profile, `voidaccess actor <handle> --timeline` for chronology, and `voidaccess actor <handle> --note "text"` for analyst notes.
 

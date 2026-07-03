@@ -206,7 +206,7 @@ def status(
     # transport selector so the display ALWAYS matches what
     # clearnet_fetch() will actually do.  Never reveals raw keys.
     #
-    #   both off          → red    "disabled"           (direct — v1.5.0 behavior)
+    #   both off          → red    "disabled"           (direct — pre-1.6.2 behavior)
     #   proxy only        → cyan   "proxy transport"         (HTTP CONNECT through the configured ScrapingAnt proxy endpoint)
     #   api only          → green  "REST API"          (POST api.scrapingant.com/v2/general)
     #   both on (proxy wins) → magenta "proxy transport (api would be overridden)"

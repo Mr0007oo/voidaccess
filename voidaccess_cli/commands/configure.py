@@ -334,7 +334,7 @@ def configure_proxy(
     enable: Optional[bool] = typer.Option(
         None,
         "--enable/--disable",
-        help="Enable or disable the REST API transport (legacy v1.5.0 toggle).",
+        help="Enable or disable the REST API transport (legacy pre-1.6.2 toggle).",
     ),
     enable_proxy: Optional[bool] = typer.Option(
         None,
@@ -350,7 +350,7 @@ def configure_proxy(
     """Configure the optional clearnet proxy (ScrapingAnt).
 
     With no flags, runs the interactive prompt.  With --enable / --disable,
-    sets the REST API transport toggle non-interactively (legacy v1.5.0
+    sets the REST API transport toggle non-interactively (legacy pre-1.6.2
     flag).  With --enable-proxy / --disable-proxy, sets the proxy transport
     transport toggle (new in v1.6.2 — requires SCRAPINGANT_API_KEY to
     actually activate).

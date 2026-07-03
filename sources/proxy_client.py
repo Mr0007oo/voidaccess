@@ -6,7 +6,7 @@ single-axis dispatch on clearnet HTTP fetches:
 
     Transport:  How requests reach ScrapingAnt's backend
     ---------   --------------------------------------------------------
-    direct      Local aiohttp.ClientSession, no proxy (v1.5.0 behavior)
+    direct      Local aiohttp.ClientSession, no proxy (pre-1.6.2 behavior)
     api         POST to https://api.scrapingant.com/v2/general (REST)
     proxy       HTTP CONNECT through the configured ScrapingAnt proxy endpoint (proxy transport)
 
@@ -60,7 +60,7 @@ Design:
       This is a routing invariant, not a proxy concern.
     - Single transport per request, picked by config:
         - If VOIDACCESS_USE_PROXY=true (and SCRAPINGANT_API_KEY set) → proxy
-        - Else if VOIDACCESS_USE_PROXIES=true (legacy v1.5.0,
+        - Else if VOIDACCESS_USE_PROXIES=true (legacy pre-1.6.2,
           and SCRAPINGANT_API_KEY set) → api
         - Else → direct
       If BOTH VOIDACCESS_USE_PROXY and VOIDACCESS_USE_PROXIES are set,
@@ -226,7 +226,7 @@ def is_api_transport_enabled() -> bool:
     """Return True when the REST API transport should be used.
 
     Triggered by:
-        - VOIDACCESS_USE_PROXIES=true (legacy v1.5.0 alias — kept for
+        - VOIDACCESS_USE_PROXIES=true (legacy pre-1.6.2 alias — kept for
           backward compatibility with Phase 1 deployments)
 
     Requires SCRAPINGANT_API_KEY to be set and non-empty.
@@ -378,7 +378,7 @@ async def clearnet_fetch(
 
     Picks ONE transport based on env-var configuration:
         - direct (default, when no ScrapingAnt env vars are set)
-        - api (VOIDACCESS_USE_PROXIES=true; legacy v1.5.0 alias)
+        - api (VOIDACCESS_USE_PROXIES=true; legacy pre-1.6.2 alias)
         - proxy (VOIDACCESS_USE_PROXY=true; proxy transport per docs)
 
     Per https://docs.scrapingant.com/proxy-mode: "The proxy transport is a

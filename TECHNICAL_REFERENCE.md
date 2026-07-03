@@ -557,7 +557,7 @@ Regex results take precedence over NER results for shared entity types.
 
 ### 4.2 Entity Types
 
-VoidAccess v1.5.0 recognises 55+ entity type strings. The `TYPE_PRIORITY` map controls conflict resolution when an entity's type is ambiguous.
+VoidAccess v1.6.2 recognises 55+ entity type strings. The `TYPE_PRIORITY` map controls conflict resolution when an entity's type is ambiguous.
 
 #### Critical IOCs
 
@@ -1319,7 +1319,7 @@ At least one LLM provider key is needed for query refinement, result filtering, 
 | `RSS_MAX_ARTICLES` | `20` | Max RSS articles per investigation |
 | `SCRAPINGANT_API_KEY` | — | Optional. Credential for the Web Scraping API transport and the proxy transports. Routes paste site and RSS feed fetches through ScrapingAnt to improve reliability on flaky upstreams. Affects clearnet scraping only — never Tor, `.onion`, GitHub, or GitLab (those two carry auth tokens and are permanently excluded). Any transport failure (timeout, auth, 5xx, malformed response) silently falls back to a direct request. See §3.2 for the routing mechanism. |
 | `SCRAPINGANT_PROXY_TYPE` | `residential` | Pool type for the proxy transports. `residential` (default; harder to detect, slightly higher latency) or `datacenter` (faster, cheaper, easier to fingerprint). Selects the proxy pool and does not change the host. Env-var-only; not a secret. Ignored when neither transport is active. |
-| `VOIDACCESS_USE_PROXIES` | `false` | **REST API transport.** Set to `true` to route paste sites and RSS feeds through the ScrapingAnt Web Scraping API (`POST https://api.scrapingant.com/v2/general`). Without `SCRAPINGANT_API_KEY`, this is a no-op. Legacy v1.5.0 toggle; CLI: also set by `voidaccess configure proxy --enable / --disable` or the `--use-scraping-api` flag on `voidaccess investigate`. Mutually exclusive with `VOIDACCESS_USE_PROXY`; if both are set, the proxy transport wins for that request. |
+| `VOIDACCESS_USE_PROXIES` | `false` | **REST API transport.** Set to `true` to route paste sites and RSS feeds through the ScrapingAnt Web Scraping API (`POST https://api.scrapingant.com/v2/general`). Without `SCRAPINGANT_API_KEY`, this is a no-op. Legacy pre-1.6.2 toggle; CLI: also set by `voidaccess configure proxy --enable / --disable` or the `--use-scraping-api` flag on `voidaccess investigate`. Mutually exclusive with `VOIDACCESS_USE_PROXY`; if both are set, the proxy transport wins for that request. |
 | `VOIDACCESS_USE_PROXY` | `false` | **Proxy transport.** Set to `true` to route requests through the configured ScrapingAnt proxy pool. Requires the proxy username/password pair and uses `SCRAPINGANT_PROXY_TYPE` to select the pool. Mutually exclusive with `VOIDACCESS_USE_PROXIES` — if both are set, the proxy transport wins for that request. CLI: `voidaccess configure proxy --enable-proxy / --disable-proxy`. New in v1.6.0. |
 
 ### 13.6 DNS/WHOIS Enrichment

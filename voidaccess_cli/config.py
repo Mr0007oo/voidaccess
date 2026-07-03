@@ -82,7 +82,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         #
         # use_proxies           → VOIDACCESS_USE_PROXIES=true
         #                         Selects the REST API transport.
-        #                         (legacy v1.5.0 alias; Phase 1 verified
+        #                         (legacy pre-1.6.2 alias; Phase 1 verified
         #                         correct, must not be touched.)
         #
         # use_proxy             → VOIDACCESS_USE_PROXY=true
@@ -291,7 +291,7 @@ def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     # gates (see sources/proxy_client.py §Architectural grounding for
     # the full quote from https://docs.scrapingant.com/proxy-mode).
     #
-    # - features.use_proxies (legacy v1.5.0) → VOIDACCESS_USE_PROXIES=true
+    # - features.use_proxies (legacy pre-1.6.2) → VOIDACCESS_USE_PROXIES=true
     #   Selects the REST API transport.
     # - features.use_proxy (new in v1.6.2)  → VOIDACCESS_USE_PROXY=true
     #   Selects the proxy transport.
