@@ -2,6 +2,16 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [1.6.3] - 2026-07-07
+### Fixed
+- LLM entity extraction no longer streams raw JSON fragments to stdout during investigations with LLM enabled.
+- STIX export no longer writes an empty bundle silently when `stix2` is missing; `stix2` is now a declared dependency and the export produces a real bundle.
+- `click` is now a declared dependency, so the first-run spaCy model download triggered by `voidaccess configure` no longer fails silently and leave NER disabled.
+- `use_proxies` and `use_proxy` config flags have been renamed to `rest_api_transport_enabled` and `residential_proxy_enabled`, with automatic migration for existing config files and a fix for BOM-prefixed JSON loading.
+
+### Known Issues
+- Entities extracted from Tor/.onion-scraped pages are not yet persisted to the entity store. The LLM summary correctly references `.onion` content, but structured entities from those pages are still missing and will be addressed in a follow-up release.
+
 ## [1.6.2] - 2026-07-03
 ### Added
 - Clarified the final release state after the residential proxy fallback QA pass and the `--use-scraping-api` transport reintroduction.
