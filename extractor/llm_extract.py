@@ -404,34 +404,9 @@ async def _extract_chunk(chunk: str, llm) -> str:
     generate_summary) keep their streaming output unchanged.
     """
     try:
-        from langchain_core.callbacks import BaseCallbackHandler
-
-        class _SilentHandler(BaseCallbackHandler):
-            """No-op callback that suppresses the streaming handler's stdout
-            prints for this single extraction call.  Every hook is a
-            no-op; we only care about preventing the parent's stdout
-            noise — we still want ``ainvoke`` to return the full response
-            content as before, just without the per-token terminal spam.
-            """
-
-            def on_llm_new_token(self, token: str, **kwargs) -> None:  # noqa: D401
-                return None
-
-            def on_llm_end(self, response, **kwargs) -> None:  # noqa: D401
-                return None
-
-            def on_llm_error(self, error, **kwargs) -> None:  # noqa: D401
-                return None
-
         prompt = _PROMPT_TEMPLATE.format(chunk=chunk)
-        # Note: LangChain merges this callback config with the runnable's
-        # default callbacks for THIS call only.  Default callbacks on
-        # other call sites (refine_query, filter_results, summary) are
-        # not affected.
-        response = await llm.ainvoke(
-            prompt,
-            config={"callbacks": [_SilentHandler()]},
-        )
+        silent_llm = llm.bind(streaming=False, callbacks=[])
+        response = await silent_llm.ainvoke(prompt)
         content = response.content if hasattr(response, "content") else str(response)
         return content.strip()
     except Exception as exc:

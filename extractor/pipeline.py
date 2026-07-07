@@ -42,6 +42,13 @@ PER_TYPE_CAPS = {
     "PERSON_NAME": 30,
     "LOCATION": 20,
     "THREAT_ACTOR_HANDLE": 80,
+    # v1.7 MED-3: DATE entities from RSS changelogs and GitHub commit
+    # timestamps dominated one run (85/182 entities).  A hard sub-cap keeps
+    # genuinely relevant dates (ransomware leak announcement, CVE publication)
+    # while suppressing changelog/commit noise.  20 dates per investigation is
+    # far more than any analyst needs; the global entity_cap (400) handles
+    # the ceiling for all types combined.
+    "DATE": 20,
 }
 
 # ---------------------------------------------------------------------------
@@ -545,27 +552,40 @@ def apply_entity_cap(
     """
     original_count = len(entities)
 
-    # Step a: confidence filter
+    # Step a: confidence filter — also drops placeholder entities (source_quality=0.0)
     filtered = [e for e in entities if e.confidence >= 0.80]
-    removed_confidence = original_count - len(filtered)
+    placeholder_count = sum(1 for e in entities if getattr(e, "source_quality", 1.0) == 0.0)
+    filtered = [e for e in filtered if getattr(e, "source_quality", 1.0) != 0.0]
+    removed_confidence = original_count - placeholder_count - len(filtered)
     if removed_confidence:
-        logger.warning(f"Entity confidence filter removed {removed_confidence} low-confidence entities")
+        logger.warning(f"Entity confidence/placeholder filter removed {removed_confidence} low-confidence entities")
+    if placeholder_count:
+        logger.info(f"Entity placeholder filter dropped {placeholder_count} reserved-range entities")
 
     # Count occurrences per entity (by type+value) and boost confidence
+    # v1.7 Q-2: multiply the boost by source_quality so low-quality sources
+    # (GitHub README at 0.6) get a smaller boost than primary sources (1.0).
     total_pages = len(set(e.source_url for e in filtered)) or 1
     for ent in filtered:
         occ = _occurrence_count(ent, filtered)
         ent._occurrence = occ
         occurrence_ratio = occ / total_pages
-        confidence_boost = min(occurrence_ratio * 0.10, 0.10)
+        source_quality = getattr(ent, "source_quality", 1.0)
+        confidence_boost = min(occurrence_ratio * 0.10, 0.10) * source_quality
         ent.confidence = min(ent.confidence + confidence_boost, 1.0)
 
     # Step b: per-type sub-caps
     filtered = _apply_per_type_caps(filtered)
 
-    # Step c: sort and cap
+    # Step c: sort and cap — source_quality is a secondary sort key so
+    # GitHub/README entities with equal confidence are ranked below primary sources.
     if len(filtered) > cap:
-        filtered.sort(key=lambda e: (-e.confidence, _type_priority(e.entity_type), -e._occurrence))
+        filtered.sort(key=lambda e: (
+            -e.confidence,
+            -getattr(e, "source_quality", 1.0),  # higher quality = higher rank
+            _type_priority(e.entity_type),
+            -e._occurrence,
+        ))
         filtered = filtered[:cap]
         logger.warning(
             f"Entity cap applied: {original_count} entities reduced to {len(filtered)} "

@@ -160,7 +160,13 @@ def _render(
 
     if fmt == "stix":
         from export import investigation_to_stix_bundle, bundle_to_json
+        from export.stix import get_last_relationship_warning
         bundle = investigation_to_stix_bundle(inv_uuid)
+        warning = get_last_relationship_warning()
+        if warning:
+            console.print(
+                f"[yellow]Warning:[/yellow] STIX relationships were not included: {warning}"
+            )
         return bundle_to_json(bundle), ".json"
 
     if fmt == "misp":

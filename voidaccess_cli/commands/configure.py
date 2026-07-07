@@ -10,6 +10,7 @@ cli/commands/configure.py — first-run wizard and config sub-commands.
 
 from __future__ import annotations
 
+import sys
 from typing import Optional
 
 import typer
@@ -18,6 +19,14 @@ from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
 from voidaccess_cli import config as cli_config
+
+
+def _is_interactive() -> bool:
+    """Return True if stdin is a TTY (interactive terminal)."""
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
 
 app = typer.Typer(help="Configure the voidaccess CLI.", no_args_is_help=False, invoke_without_command=True)
 console = Console()
@@ -242,23 +251,27 @@ def _prompt_scrapingant(cfg: dict) -> None:
     # both means the chokepoint picks proxy (logged at runtime with a
     # one-shot info message).
     if new_key.strip():
-        current_api = bool(cfg.get("features", {}).get("use_proxies", False))
+        current_api = bool(cfg.get("features", {}).get("rest_api_transport_enabled", cfg.get("features", {}).get("use_proxies", False)))
         if Confirm.ask(
             "  Enable REST API transport (ScrapingAnt Web Scraping API) for clearnet scrapes?",
             default=current_api,
         ):
+            cfg.setdefault("features", {})["rest_api_transport_enabled"] = True
             cfg.setdefault("features", {})["use_proxies"] = True
         else:
+            cfg.setdefault("features", {})["rest_api_transport_enabled"] = False
             cfg.setdefault("features", {})["use_proxies"] = False
 
-        current_proxy = bool(cfg.get("features", {}).get("use_proxy", False))
+        current_proxy = bool(cfg.get("features", {}).get("residential_proxy_enabled", cfg.get("features", {}).get("use_proxy", False)))
         if Confirm.ask(
             f"  Enable proxy transport (HTTP CONNECT through the configured ScrapingAnt proxy endpoint, "
             f"{new_type} pool) for clearnet scrapes?",
             default=current_proxy,
         ):
+            cfg.setdefault("features", {})["residential_proxy_enabled"] = True
             cfg.setdefault("features", {})["use_proxy"] = True
         else:
+            cfg.setdefault("features", {})["residential_proxy_enabled"] = False
             cfg.setdefault("features", {})["use_proxy"] = False
 
 
@@ -277,6 +290,21 @@ def configure_default(ctx: typer.Context) -> None:
     """Run the full wizard when no sub-command is given."""
     if ctx.invoked_subcommand is not None:
         return
+    # v1.7 MED-6: detect non-TTY stdin (piped / scripted invocation).
+    # Abort with a clear message rather than silently accepting defaults
+    # at every prompt, which produces an unexpected config silently.
+    if not _is_interactive():
+        console.print(
+            "[yellow]voidaccess configure requires an interactive terminal.[/yellow]"
+        )
+        console.print(
+            "Use non-interactive sub-commands instead:\n"
+            "  voidaccess configure llm\n"
+            "  voidaccess configure keys\n"
+            "  voidaccess configure tor --host <host> --port <port>\n"
+            "  voidaccess configure proxy\n"
+        )
+        raise typer.Exit(code=1)
     cfg = cli_config.load_config()
     console.print("[bold magenta]voidaccess — initial setup[/bold magenta]\n")
     _prompt_llm(cfg)
@@ -364,7 +392,6 @@ def configure_proxy(
     Clearnet scraping only — Tor and .onion traffic are never affected.
     """
     cfg = cli_config.load_config()
-
     # --show: display current state with the key masked, and exit.
     if show and enable is None and enable_proxy is None:
         key = cfg.get("enrichment_keys", {}).get("SCRAPINGANT_API_KEY", "")
@@ -373,8 +400,8 @@ def configure_proxy(
         proxy_type = (
             cfg.get("enrichment_keys", {}).get("SCRAPINGANT_PROXY_TYPE", "") or "—"
         )
-        api_transport = bool(cfg.get("features", {}).get("use_proxies", False))
-        proxy_transport = bool(cfg.get("features", {}).get("use_proxy", False))
+        api_transport = bool(cfg.get("features", {}).get("rest_api_transport_enabled", cfg.get("features", {}).get("use_proxies", False)))
+        proxy_transport = bool(cfg.get("features", {}).get("residential_proxy_enabled", cfg.get("features", {}).get("use_proxy", False)))
 
         masked_key = (
             f"{key[:4]}…{key[-4:]}" if len(key) > 8 else ("set" if key else "—")
@@ -390,8 +417,8 @@ def configure_proxy(
         console.print(f"  Pool type       : {proxy_type}")
         api_label = "[green]enabled[/green]" if api_transport else "[red]disabled[/red]"
         proxy_label = "[green]enabled[/green]" if proxy_transport else "[red]disabled[/red]"
-        console.print(f"  API transport   : {api_label}")
-        console.print(f"  Proxy transport : {proxy_label}")
+        console.print(f"  REST API transport      : {api_label}")
+        console.print(f"  Residential proxy       : {proxy_label}")
         console.print("  Scope           : paste + RSS only, never Tor")
         if proxy_transport and (not proxy_username or not proxy_password):
             console.print(
@@ -409,6 +436,7 @@ def configure_proxy(
         return
 
     if enable is not None:
+        cfg.setdefault("features", {})["rest_api_transport_enabled"] = bool(enable)
         cfg.setdefault("features", {})["use_proxies"] = bool(enable)
         cli_config.save_config(cfg)
         state = "enabled" if enable else "disabled"
@@ -422,6 +450,7 @@ def configure_proxy(
         return
 
     if enable_proxy is not None:
+        cfg.setdefault("features", {})["residential_proxy_enabled"] = bool(enable_proxy)
         cfg.setdefault("features", {})["use_proxy"] = bool(enable_proxy)
         cli_config.save_config(cfg)
         state = "enabled" if enable_proxy else "disabled"

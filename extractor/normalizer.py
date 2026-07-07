@@ -20,8 +20,7 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -734,6 +733,130 @@ def is_blocked_entity(entity_type: str, entity_value: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Reserved-range / placeholder blocklists  (v1.7 — Q-1/Q-2 fixes)
+# ---------------------------------------------------------------------------
+#
+# RFC 5737 documentation IP ranges — reserved for use in examples/docs,
+# never real routable addresses.
+#   192.0.2.0/24  (TEST-NET-1)
+#   198.51.100.0/24 (TEST-NET-2)
+#   203.0.113.0/24 (TEST-NET-3)
+_RFC5737_NETWORKS: list[tuple[str, str]] = [
+    ("192.0.2.0", "255.255.255.0"),    # 192.0.2.0/24
+    ("198.51.100.0", "255.255.255.0"),  # 198.51.100.0/24
+    ("203.0.113.0", "255.255.255.0"),   # 203.0.113.0/24
+]
+
+# RFC 2606 reserved domain names.
+_RFC2606_DOMAINS: frozenset[str] = frozenset({
+    "example.com",
+    "example.net",
+    "example.org",
+    "example.edu",
+    "test",
+})
+
+# Well-known placeholder email patterns that appear in examples/docs.
+_PLACEHOLDER_EMAIL_RE = re.compile(
+    r"(?i)^(test|user|admin|example|foo|bar|noreply|no.reply)"
+    r"@(example\.com|example\.net|example\.org|domain\.com|localhost)$"
+)
+
+
+def _is_rfc5737_ip(value: str) -> bool:
+    """Return True if value is an IPv4 address in an RFC 5737 documentation range."""
+    try:
+        ip = __import__("ipaddress").ip_address(value.strip())
+        if not isinstance(ip, __import__("ipaddress").IPv4Address):
+            return False
+        for net_str, mask_str in _RFC5737_NETWORKS:
+            network = __import__("ipaddress").IPv4Network(f"{net_str}/{mask_str}", strict=False)
+            if ip in network:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _is_rfc2606_domain(value: str) -> bool:
+    """Return True if value is an RFC 2606 reserved domain."""
+    v = value.strip().lower()
+    # Exact match
+    if v in _RFC2606_DOMAINS:
+        return True
+    # Suffix match: "foo.example.com" etc.
+    parts = v.split(".")
+    for i in range(1, len(parts)):
+        suffix = ".".join(parts[i:])
+        if suffix in _RFC2606_DOMAINS:
+            return True
+    return False
+
+
+def _is_placeholder_email(value: str) -> bool:
+    """Return True if value looks like a documentation/example email address."""
+    return bool(_PLACEHOLDER_EMAIL_RE.match(value.strip()))
+
+
+# ---------------------------------------------------------------------------
+# Source quality assignment  (v1.7 — Q-2: GitHub source tier)
+# ---------------------------------------------------------------------------
+#
+# Known low-trust URL patterns that are documentation/example content, not
+# actual threat intelligence.  Entities extracted from these are given
+# source_quality=0.6 and are further de-prioritised in the entity cap.
+
+_LOW_TRUST_URL_PATH_RE = re.compile(
+    r"(?i)"
+    # README, CHANGELOG, LICENSE, CONTRIBUTING, SECURITY, INSTALL, docs/
+    # anything at the repo root that looks like documentation
+    r"(^|/)(README|CHANGELOG|LICENSE|CONTRIBUTING|SECURITY|"
+    r"INSTALL|USER_GUIDE|DOCUMENTATION"
+    r"(\.md|\.txt|\.rst|\.html)?"
+    r"|(^|/)(docs?|examples?|specs?|schemas?)"
+    r"|(\.github[/\\])"          # GitHub Actions / stored workflow files
+    r"|((^|/)examples?/)"         # example/ directory
+    r"|(/issues/[0-9]+)"          # GitHub issue comment — moderate signal
+    r"|(/pull/[0-9]+)"            # PR comment — moderate signal
+    r"|(\.git)"                   # git metadata URLs
+    r")"
+)
+
+
+def _source_quality_from_url(url: str) -> float:
+    """
+    Return a source-quality multiplier (0.0-1.0) for a given source URL.
+
+    Higher values = more trustworthy source.  Used to de-prioritise
+    documentation and example content vs. actual threat intel sources.
+    """
+    if not url:
+        return 1.0
+    url_lower = url.lower()
+
+    # GitHub
+    if "github.com" in url_lower:
+        if _LOW_TRUST_URL_PATH_RE.search(url):
+            return 0.6
+        # GitHub issue / PR comments — moderate value
+        if "/issues/" in url_lower or "/pull/" in url_lower:
+            return 0.7
+        # Default GitHub pages (raw blob from a repo)
+        return 0.6
+
+    # GitLab
+    if "gitlab.com" in url_lower:
+        if _LOW_TRUST_URL_PATH_RE.search(url):
+            return 0.6
+        if "/issues/" in url_lower or "/merge_requests/" in url_lower:
+            return 0.7
+        return 0.6
+
+    # Default: primary threat source
+    return 1.0
+
+
 _ORG_NOISE_RE = re.compile(
     r'\b(paid|bought|sold|hacked|leaked)\b'
     r'|\b(attempt|operations|disrupted)\b'
@@ -770,10 +893,21 @@ class NormalizedEntity:
     page_id: Optional[uuid.UUID]
     context_snippet: str = field(default="")
     extraction_method: str = field(default="")
+    # v1.7 — source_quality reflects the trustworthiness of the source.
+    # Higher = more credible.  Used to downgrade README / documentation sources.
+    # 1.0 = primary threat source (dark web, paste sites, RSS, forum posts)
+    # 0.6 = secondary source (GitHub README, GitLab repo files)
+    # 0.0 = placeholder / reserved range (RFC 5737 IPs, RFC 2606 domains)
+    source_quality: float = field(default=1.0)
 
     @property
     def canonical_value(self) -> str:
         return self.value
+
+    @property
+    def is_placeholder(self) -> bool:
+        """True when the entity is a known reserved-range value, not real intel."""
+        return self.source_quality == 0.0
 
     def get(self, key: str, default=None):
         return getattr(self, key, default)
@@ -1152,6 +1286,34 @@ def normalize_entities(
             if dedup_key in seen_values:
                 continue
             seen_values.add(dedup_key)
+
+            # v1.7 Q-1 — reserved-range / placeholder filtering.
+            # Assign source_quality=0.0 so these are excluded from the entity
+            # store (pipeline.py's apply_entity_cap drops confidence < 0.80,
+            # and source_quality=0.0 propagates a near-zero effective score).
+            source_quality = _source_quality_from_url(page_url)
+
+            if entity_type == "IP_ADDRESS" and _is_rfc5737_ip(canonical):
+                source_quality = 0.0
+                logger.debug(
+                    "RFC 5737 IP rejected (reserved documentation range): %s", canonical
+                )
+                continue
+
+            if entity_type == "DOMAIN" and _is_rfc2606_domain(canonical):
+                source_quality = 0.0
+                logger.debug(
+                    "RFC 2606 domain rejected (reserved documentation domain): %s", canonical
+                )
+                continue
+
+            if entity_type == "EMAIL_ADDRESS" and _is_placeholder_email(canonical):
+                source_quality = 0.0
+                logger.debug(
+                    "Placeholder email rejected (documentation/example address): %s", canonical
+                )
+                continue
+
             snip = _context_snippet(page_text, canonical) if page_text else ""
             result.append(
                 NormalizedEntity(
@@ -1162,6 +1324,7 @@ def normalize_entities(
                     page_id=page_id,
                     context_snippet=snip,
                     extraction_method=_extraction_method_for(entity_type),
+                    source_quality=source_quality,
                 )
             )
 

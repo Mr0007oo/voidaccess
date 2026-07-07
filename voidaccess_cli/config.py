@@ -11,8 +11,13 @@ from __future__ import annotations
 
 import json
 import os
+import logging
+import warnings
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+_DEPRECATION_NOTIFIED = False
 
 CLI_HOME = Path(os.path.expanduser("~/.voidaccess"))
 CONFIG_PATH = CLI_HOME / "config.json"
@@ -99,6 +104,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         #                         emits a one-shot info log.
         "use_proxies": False,
         "use_proxy": False,
+        "rest_api_transport_enabled": False,
+        "residential_proxy_enabled": False,
     },
     "tor": {
         "host": "127.0.0.1",
@@ -118,7 +125,7 @@ def load_config() -> dict[str, Any]:
     if not CONFIG_PATH.exists():
         return json.loads(json.dumps(DEFAULT_CONFIG))
     try:
-        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
     except Exception:
         return json.loads(json.dumps(DEFAULT_CONFIG))
     # Merge with defaults so missing keys don't crash
@@ -127,17 +134,80 @@ def load_config() -> dict[str, Any]:
     merged["tor"].update(cfg.get("tor", {}))
     merged["enrichment_keys"].update(cfg.get("enrichment_keys", {}))
     merged["features"].update(cfg.get("features", {}))
+    features = merged["features"]
+    global _DEPRECATION_NOTIFIED
+    deprecated_keys = []
+    if "rest_api_transport_enabled" not in cfg.get("features", {}) and "use_proxies" in cfg.get("features", {}):
+        features["rest_api_transport_enabled"] = bool(cfg["features"].get("use_proxies"))
+        deprecated_keys.append("use_proxies")
+    if "residential_proxy_enabled" not in cfg.get("features", {}) and "use_proxy" in cfg.get("features", {}):
+        features["residential_proxy_enabled"] = bool(cfg["features"].get("use_proxy"))
+        deprecated_keys.append("use_proxy")
+    if deprecated_keys and not _DEPRECATION_NOTIFIED:
+        message = (
+            "Deprecated config keys "
+            + ", ".join(sorted(deprecated_keys))
+            + " found; prefer 'rest_api_transport_enabled' and 'residential_proxy_enabled'."
+        )
+        logger.warning(message)
+        warnings.warn(message, DeprecationWarning, stacklevel=2)
+    _DEPRECATION_NOTIFIED = True
+    if "rest_api_transport_enabled" in cfg.get("features", {}):
+        features["use_proxies"] = bool(features.get("rest_api_transport_enabled", False))
+    elif "use_proxies" in cfg.get("features", {}):
+        features["use_proxies"] = bool(cfg["features"].get("use_proxies", False))
+
+    if "residential_proxy_enabled" in cfg.get("features", {}):
+        features["use_proxy"] = bool(features.get("residential_proxy_enabled", False))
+    elif "use_proxy" in cfg.get("features", {}):
+        features["use_proxy"] = bool(cfg["features"].get("use_proxy", False))
     if cfg.get("output_dir"):
         merged["output_dir"] = cfg["output_dir"]
     return merged
 
 
+def _lock_file(path: Path) -> None:
+    """
+    Lock *path* so only the owner can read/write it.
+
+    On POSIX (Linux/macOS): sets mode to 0600.
+    On Windows: uses icacls to revoke inherited permissions and grant
+    only the current user read+write access.  Falls back to os.chmod
+    silently if the call fails (e.g. non-admin on a restricted host).
+    """
+    try:
+        if os.name == "nt":
+            import subprocess
+            import getpass
+            user = getpass.getuser()
+            # Revoke all inherited / granted permissions, then grant user RW.
+            for cmd in [
+                ["icacls", str(path), "/inheritance:r"],
+                ["icacls", str(path), "/grant:r", f"{user}:(F,RX)"],
+            ]:
+                try:
+                    subprocess.run(cmd, check=False, capture_output=True)
+                except Exception:
+                    pass
+        else:
+            os.chmod(str(path), 0o600)
+    except Exception:
+        # Never let a permission fix block the CLI — fall back gracefully.
+        pass
+
+
 def save_config(config: dict[str, Any]) -> None:
+    features = config.setdefault("features", {})
+    features["rest_api_transport_enabled"] = bool(features.get("rest_api_transport_enabled", features.get("use_proxies", False)))
+    features["residential_proxy_enabled"] = bool(features.get("residential_proxy_enabled", features.get("use_proxy", False)))
+    features["use_proxies"] = features["rest_api_transport_enabled"]
+    features["use_proxy"] = features["residential_proxy_enabled"]
     _ensure_home()
     CONFIG_PATH.write_text(
         json.dumps(config, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    _lock_file(CONFIG_PATH)
 
 
 def is_configured() -> bool:
@@ -291,9 +361,11 @@ def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     # gates (see sources/proxy_client.py §Architectural grounding for
     # the full quote from https://docs.scrapingant.com/proxy-mode).
     #
-    # - features.use_proxies (legacy pre-1.6.2) → VOIDACCESS_USE_PROXIES=true
+    # - features.rest_api_transport_enabled (preferred) →
+    #   VOIDACCESS_USE_PROXIES=true
     #   Selects the REST API transport.
-    # - features.use_proxy (new in v1.6.2)  → VOIDACCESS_USE_PROXY=true
+    # - features.residential_proxy_enabled (preferred) →
+    #   VOIDACCESS_USE_PROXY=true
     #   Selects the proxy transport.
     #
     # Each is set ONLY when the user has explicitly enabled it.  The
@@ -302,11 +374,11 @@ def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     # fallback surprise.  This is the same logic already proven in
     # Phase 1's tests.
     features = cfg.get("features") or {}
-    if features.get("use_proxies"):
+    if features.get("rest_api_transport_enabled", features.get("use_proxies")):
         os.environ["VOIDACCESS_USE_PROXIES"] = "true"
     else:
         os.environ.pop("VOIDACCESS_USE_PROXIES", None)
-    if features.get("use_proxy"):
+    if features.get("residential_proxy_enabled", features.get("use_proxy")):
         os.environ["VOIDACCESS_USE_PROXY"] = "true"
     else:
         os.environ.pop("VOIDACCESS_USE_PROXY", None)

@@ -557,7 +557,7 @@ Regex results take precedence over NER results for shared entity types.
 
 ### 4.2 Entity Types
 
-VoidAccess v1.6.3 recognises 55+ entity type strings. The `TYPE_PRIORITY` map controls conflict resolution when an entity's type is ambiguous.
+VoidAccess v1.7.0 recognises 55+ entity type strings. The `TYPE_PRIORITY` map controls conflict resolution when an entity's type is ambiguous.
 
 #### Critical IOCs
 

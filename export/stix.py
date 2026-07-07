@@ -18,10 +18,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Optional, Union
+from typing import Any, Optional
 import uuid
 
 logger = logging.getLogger(__name__)
+_LAST_RELATIONSHIP_WARNING: Optional[str] = None
 
 # ---------------------------------------------------------------------------
 # Graceful import of stix2
@@ -196,6 +197,7 @@ def investigation_to_stix_bundle(
     - investigation not found
     """
     if not _STIX2_AVAILABLE:
+        _set_relationship_warning("stix2 is not installed")
         return _empty_bundle()
 
     filter_uuids: Optional[list[uuid.UUID]] = None
@@ -233,7 +235,13 @@ def investigation_to_stix_bundle(
             stix_id_map.setdefault(entity.value, actor.id)
 
     if include_relationships and stix_objects:
-        stix_objects.extend(_build_stix_relationships(investigation_id, stix_id_map))
+        relationships, relationship_warning = _build_stix_relationships(
+            investigation_id, stix_id_map
+        )
+        stix_objects.extend(relationships)
+        _set_relationship_warning(relationship_warning)
+    else:
+        _set_relationship_warning(None)
 
     try:
         return stix2.Bundle(*stix_objects, allow_custom=True)
@@ -280,6 +288,16 @@ def _empty_bundle() -> Any:
         return stix2.Bundle()
 
 
+def _set_relationship_warning(message: Optional[str]) -> None:
+    global _LAST_RELATIONSHIP_WARNING
+    _LAST_RELATIONSHIP_WARNING = message
+
+
+def get_last_relationship_warning() -> Optional[str]:
+    """Return the last relationship-build warning, if any."""
+    return _LAST_RELATIONSHIP_WARNING
+
+
 def _load_entities_for_investigation(
     investigation_id: Any,
     entity_ids: Optional[list[uuid.UUID]] = None,
@@ -310,6 +328,11 @@ def _load_entities_for_investigation(
             if inv is None:
                 return []
 
+            # v1.7 MED-9: use .c.column explicitly for the IN clause subquery.
+            # In SQLAlchemy 2.x, passing a plain subquery object to Column.in_()
+            # triggers a "Subquery is not yet a select()" coercion warning.
+            # Using subquery.c.column accesses the explicit column object so
+            # the ORM knows exactly what to coerce — no suppression needed.
             linked_ids_subq = (
                 session.query(InvestigationEntityLink.entity_id)
                 .filter(InvestigationEntityLink.investigation_id == inv.id)
@@ -317,7 +340,7 @@ def _load_entities_for_investigation(
             )
             q = session.query(Entity).filter(
                 (Entity.investigation_id == inv.id)
-                | Entity.id.in_(linked_ids_subq)
+                | Entity.id.in_(linked_ids_subq.c.entity_id)
             )
             db_entities = q.all()
 
@@ -353,14 +376,14 @@ def _load_entities_for_investigation(
 def _build_stix_relationships(
     investigation_id: Any,
     stix_id_map: dict[str, str],
-) -> list[Any]:
+) -> tuple[list[Any], Optional[str]]:
     """
     Build STIX Relationship objects from graph edges for the investigation.
 
     Returns [] on any error.
     """
     if not _STIX2_AVAILABLE:
-        return []
+        return [], "stix2 is not installed"
     try:
         from graph.builder import build_graph_from_db  # noqa: PLC0415
 
@@ -385,10 +408,10 @@ def _build_stix_relationships(
                 relationships.append(rel)
             except Exception:
                 continue
-        return relationships
+        return relationships, None
     except Exception as exc:
         logger.warning("_build_stix_relationships failed: %s", exc)
-        return []
+        return [], f"_build_stix_relationships failed: {exc}"
 
 
 def _edge_type_to_stix(edge_type: str) -> str:

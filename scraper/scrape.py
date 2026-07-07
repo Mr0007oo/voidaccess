@@ -476,7 +476,7 @@ async def _fetch_one(
                     connector = _tor_aiohttp_connector() if is_onion_url(url) else _direct_tcp_connector()
                     async with aiohttp.ClientSession(
                         connector=connector,
-                        timeout=aiohttp.ClientTimeout(connect=5, sock_read=25 if not is_onion_url(url) else 5),
+                        timeout=aiohttp.ClientTimeout(connect=5, sock_read=25 if not is_onion_url(url) else 20),
                     ) as local_session:
                         async with local_session.get(url, headers=headers) as resp:
                             if resp.status in RETRYABLE_STATUS:
@@ -523,7 +523,10 @@ async def _fetch_one(
                 display_text = f"{title} - {db_text}" if db_text else title
 
                 # --- Playwright fallback for JS-rendered pages ---
-                if PLAYWRIGHT_ENABLED and db_text and len(db_text) < 300:
+                # Onion pages are more likely to be JS-rendered (Tor Browser default)
+                # and more likely to have slow initial loads, so use a lower threshold.
+                _pw_threshold = 500 if is_onion_url(url) else 300
+                if PLAYWRIGHT_ENABLED and db_text and len(db_text) < _pw_threshold:
                     # Import lazily to avoid import errors when playwright not installed
                     try:
                         from scraper.scrape_js import fetch_with_playwright, is_js_rendered
@@ -558,6 +561,15 @@ async def _fetch_one(
                         # Keep original aiohttp result if Playwright fails
                         _logger.debug("Playwright fallback failed: %s", e)
                         pass
+
+                # HIGH-3: warn when a page fetched but yielded no extractable text —
+                # helps distinguish "fetch failed / timed out" from "genuinely empty".
+                # Onion pages are exempt because many Tor sites serve minimal content.
+                if not db_text and not is_onion_url(url):
+                    _logger.warning(
+                        "Page fetched but no text extracted: %s",
+                        url[:80] if len(url) > 80 else url,
+                    )
 
                 return url, display_text, raw_bytes, db_text, posted_at
 

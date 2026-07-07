@@ -338,15 +338,18 @@ def update_investigation_metadata(
 async def cleanup_stuck_investigations(
     cutoff_minutes: Optional[int] = None,
 ) -> int:
-    """Phase 6.3: mark CLI investigations left in 'processing' as 'failed'.
+    """Phase 6.3: mark CLI investigations left in 'running' as 'failed'.
 
     Mirrors ``api.main._sweep_stuck_investigations`` for the SQLite CLI path.
     The CLI runs investigations synchronously inside ``asyncio.run()`` so
     in-process hangs shouldn't happen, but a Ctrl-C or kill -9 can leave
     a row stuck — this cleanup handles that on next CLI startup.
 
+    The CLI sets status='running' (not 'processing') per the investigation
+    command.  The original 'processing' filter was wrong — v1.7 fixes it.
+
     Args:
-        cutoff_minutes: When ``None`` (startup mode), sweep *all* processing
+        cutoff_minutes: When ``None`` (startup mode), sweep *all* running
             rows.  When ``int``, sweep only rows older than the cutoff.
 
     Returns the number of rows swept.  Returns 0 when DB is unconfigured.
@@ -358,7 +361,7 @@ async def cleanup_stuck_investigations(
 
         with get_session() as session:
             query = session.query(Investigation).filter(
-                Investigation.status == "processing"
+                Investigation.status == "running"
             )
             if cutoff_minutes is not None:
                 cutoff_dt = datetime.now(timezone.utc) - timedelta(

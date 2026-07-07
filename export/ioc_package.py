@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PACKAGE_FORMAT = "voidaccess-ioc-v1"
-PACKAGE_VERSION = "1.6.3"
+PACKAGE_VERSION = "1.7.0"
 SNORT_SID_BASE = 9000001  # 9xxxxxx reserved for VoidAccess-generated rules
 
 # Map extractor upper-case entity types to the per-file bucket they belong to.
@@ -461,7 +461,15 @@ def _write_emails(entities: Iterable[Any]) -> str:
             v = _entity_value(e).strip()
             if v:
                 items.append(v)
-    return "\n".join(items).rstrip() + ("\n" if items else "")
+    content = "\n".join(items).rstrip()
+    # v1.7 MED-4: if entities matched but all had empty values, write a
+    # header comment so the file is never 0 bytes (0-byte files inside a
+    # ZIP are technically valid but confusing to downstream tooling).
+    if items and not content:
+        return "# Email addresses extracted by VoidAccess\n"
+    if content:
+        return content + "\n"
+    return ""
 
 
 def _write_urls(entities: Iterable[Any]) -> str:
@@ -654,6 +662,16 @@ def _safe_stix_json(entities: list[Any], investigation_id: Any) -> str:
         # session.  When running with dict entities (e.g. CLI export), we
         # can't pass them through that path — fall back to the empty bundle.
         bundle = investigation_to_stix_bundle(investigation_id)
+        try:
+            from export.stix import get_last_relationship_warning
+            warning = get_last_relationship_warning()
+            if warning:
+                logger.warning(
+                    "STIX relationships were not included in IOC package: %s",
+                    warning,
+                )
+        except Exception:
+            pass
         return bundle_to_json(bundle)
     except Exception as exc:
         logger.warning("STIX generation for IOC package failed: %s", exc)

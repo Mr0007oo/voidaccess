@@ -10,15 +10,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from voidaccess.llm_utils import _common_llm_params, resolve_model_config, get_model_choices, DEFAULT_MODELS, DEFAULT_MODEL
-from config import (
-    OPENAI_API_KEY,
-    ANTHROPIC_API_KEY,
-    GOOGLE_API_KEY,
-    OPENROUTER_API_KEY,
-    GROQ_API_KEY,
-)
 import logging
-from typing import Any, Callable
+from typing import Any
 import re as re_module
 
 logger = logging.getLogger("voidaccess.llm")
@@ -296,22 +289,25 @@ def _ensure_credentials(model_choice: str, llm_class, model_params: dict) -> Non
     params = model_params or {}
     class_name = getattr(llm_class, "__name__", str(llm_class))
 
+    # v1.7 — use os.getenv() so the current runtime value (set by
+    # apply_env() from the CLI's saved config.json) is checked, not the
+    # stale module-level constant that was read from .env at import time.
     if "ChatAnthropic" in class_name:
-        key = params.get("anthropic_api_key") or ANTHROPIC_API_KEY
+        key = params.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY", "")
         _require(key, "ANTHROPIC_API_KEY", "Anthropic")
     elif "ChatGoogleGenerativeAI" in class_name:
-        key = params.get("google_api_key") or GOOGLE_API_KEY
+        key = params.get("google_api_key") or os.getenv("GOOGLE_API_KEY", "")
         _require(key, "GOOGLE_API_KEY", "Google Gemini")
     elif "ChatOpenAI" in class_name:
         base_url = params.get("base_url", "").lower()
         if "openrouter" in base_url:
-            key = params.get("api_key") or params.get("openai_api_key") or OPENROUTER_API_KEY
+            key = params.get("api_key") or params.get("openai_api_key") or os.getenv("OPENROUTER_API_KEY", "")
             _require(key, "OPENROUTER_API_KEY", "OpenRouter")
         elif "groq" in base_url:
-            key = params.get("api_key") or params.get("openai_api_key") or GROQ_API_KEY
+            key = params.get("api_key") or params.get("openai_api_key") or os.getenv("GROQ_API_KEY", "")
             _require(key, "GROQ_API_KEY", "Groq")
         else:
-            key = params.get("api_key") or params.get("openai_api_key") or OPENAI_API_KEY
+            key = params.get("api_key") or params.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
             _require(key, "OPENAI_API_KEY", "OpenAI")
 
 

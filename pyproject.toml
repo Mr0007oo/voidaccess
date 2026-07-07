@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voidaccess"
-version = "1.6.3"
+version = "1.7.0"
 description = "Dark web OSINT CLI — automated threat intelligence from query to report"
 readme = "README.md"
 license = "MIT"
@@ -26,10 +26,16 @@ dependencies = [
     "rich>=13",
     "textual>=0.60",
     "click>=8.0",
+    "fastapi>=0.115",
     "aiohttp>=3.9",
     "aiohttp-socks>=0.8",
+    "alembic>=1.13",
+    "apscheduler>=3.10",
+    "pillow>=10.0",
     "sqlalchemy>=2.0",
     "aiosqlite>=0.20",
+    "filelock>=3.14",
+    "numpy>=1.26",
     "langchain>=0.2",
     "langchain-openai>=0.1",
     "langchain-anthropic>=0.1",
@@ -41,7 +47,19 @@ dependencies = [
     "spacy>=3.7",
     "beautifulsoup4>=4.12",
     "feedparser>=6.0",
+    "networkx>=3.0",
+    "pydantic>=2.7",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+    "slowapi>=0.1.9",
+    "redis>=5.0",
+    "pyyaml>=6.0",
+    "openai>=1.30",
+    "cryptography>=42.0",
     "python-dateutil>=2.9",
+    "langdetect>=1.0",
+    "pyvis>=0.3",
+    "urllib3>=2.2",
     "trafilatura>=1.6",
     "requests>=2.31",
     "python-socks>=2.4",
@@ -51,6 +69,27 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio"]
+nlp = [
+    "sentence-transformers>=3.0",
+    "torch>=2.3",
+    "transformers>=4.42",
+]
+vector = [
+    "chromadb>=0.5",
+    "sentence-transformers>=3.0",
+    "torch>=2.3",
+]
+telegram = ["telethon>=1.36"]
+js = ["playwright>=1.45"]
+# Convenience: all optional packages at once
+all = [
+    "chromadb>=0.5",
+    "playwright>=1.45",
+    "sentence-transformers>=3.0",
+    "telethon>=1.36",
+    "torch>=2.3",
+    "transformers>=4.42",
+]
 
 [project.scripts]
 voidaccess = "voidaccess_cli.main:app"

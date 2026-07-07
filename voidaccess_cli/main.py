@@ -455,6 +455,12 @@ def _banner_line_visible_width(line: str) -> int:
 
 
 def show_banner(console: Console) -> None:
+    # v1.7 — respect both VOIDACCESS_NO_BANNER=1 and --no-banner.
+    # VOIDACCESS_NO_BANNER=1 suppresses the banner for an entire session
+    # without needing --no-banner on every command.  --no-banner overrides
+    # it per-invocation (same precedence as git -C / --no-verify).
+    if os.environ.get("VOIDACCESS_NO_BANNER") == "1":
+        return
     if os.environ.get("TERM") == "dumb":
         return
     if not sys.stdout.isatty() and "PS1" not in os.environ and os.name != "nt":
@@ -499,12 +505,22 @@ def show_banner(console: Console) -> None:
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
+    version: bool = typer.Option(
+        False, "--version",
+        is_eager=True,
+        help="Print version and exit.",
+    ),
     no_banner: bool = typer.Option(
         False, "--no-banner",
-        help="Skip banner"
+        help="Skip banner.  Set VOIDACCESS_NO_BANNER=1 in the environment "
+             "to suppress the banner for an entire session without passing "
+             "--no-banner on every command."
     ),
 ) -> None:
     """Set env vars and render banner before command execution."""
+    if version:
+        console.print(f"voidaccess {__version__}")
+        raise typer.Exit()
     cli_config.apply_env()
     if not no_banner and ctx.invoked_subcommand:
         show_banner(console)
