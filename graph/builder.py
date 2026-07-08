@@ -939,17 +939,19 @@ def persist_graph_edges(
     entity_confidence: dict[uuid.UUID, float] = {}
 
     from db.models import InvestigationEntityLink  # noqa: PLC0415
-    linked_ids_subq = (
-        session.query(InvestigationEntityLink.entity_id)
-        .filter(InvestigationEntityLink.investigation_id == investigation_id)
-        .subquery()
-    )
+    # Phase 0 fix: use a JOIN instead of a subquery IN clause to avoid the
+    # SQLAlchemy 2.x ArgumentError that fires when Entity.id.in_(subquery)
+    # receives the subquery's column object rather than a clean scalar list.
     entities = (
         session.query(Entity)
         .options(joinedload(Entity.page))
+        .outerjoin(
+            InvestigationEntityLink,
+            InvestigationEntityLink.entity_id == Entity.id,
+        )
         .filter(
             (Entity.investigation_id == investigation_id)
-            | Entity.id.in_(linked_ids_subq)
+            | (InvestigationEntityLink.investigation_id == investigation_id)
         )
         .yield_per(2000)
     )
@@ -960,7 +962,6 @@ def persist_graph_edges(
         node_to_entity[node_id] = ent.id
         entity_confidence[ent.id] = ent.confidence
 
-    edges_to_insert: list[dict] = []
     edges_to_update: list[tuple[uuid.UUID, uuid.UUID, str, float]] = []
     edge_keys: set[tuple] = set()
 

@@ -20,6 +20,7 @@ from graph.builder import (
     add_entity_to_graph,
     add_relationship,
     build_graph_from_db,
+    build_graph_from_db_cached,
     infer_relationships,
 )
 
@@ -52,6 +53,7 @@ __all__ = [
     "EDGE_TYPES",
     # builder
     "build_graph_from_db",
+    "build_graph_from_db_cached",
     "add_entity_to_graph",
     "add_relationship",
     "infer_relationships",

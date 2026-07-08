@@ -2,6 +2,18 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [1.7.1] - 2026-07-07
+### Fixed
+- STIX export was silently producing an empty 82-byte bundle (regression from 1.6.3's working fix); now produces real bundles with entities and relationships
+- Entity extraction quality had regressed on queries containing CVE/financial terms, returning only organization-name noise; CVE extraction now works correctly
+- Confidence scores were clustered at 1-2 discrete values across an entire investigation; now show genuine multi-value spread reflecting source quality, extraction method, and corroboration
+- Source-quality scoring (previously claimed but not actually implemented) is now genuinely present on extracted entities and contributes to confidence
+- Fixed a CLI readback bug where entities were successfully extracted and persisted but the final displayed/exported count could read as zero, because the query only checked direct investigation_id matches and ignored entities linked via InvestigationEntityLink
+- Fixed duplicate canonical entities appearing in results when the same entity existed in both the direct-match and linked-match branches of the entity query; results are now deduped after the union, not before
+
+### Known Issues
+- corroborating_sources field still not populated (carried over from 1.6.4, tracked separately)
+
 ## [1.7.0] - 2026-07-07
 ### Fixed
 - --version now works as a top-level flag

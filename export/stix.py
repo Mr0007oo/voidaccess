@@ -18,10 +18,25 @@ from __future__ import annotations
 import json
 import logging
 import os
+import warnings
 from typing import Any, Optional
 import uuid
 
 logger = logging.getLogger(__name__)
+
+# MED-9: suppress SQLAlchemy SAWarning from ORM IN-clause coercion internals.
+# This is a belt-and-suspenders guard — the actual fix for this warning is
+# replacing the subquery-IN pattern with a JOIN (Phase 0).  Keeping this filter
+# here prevents any residual SAWarnings from leaking to stderr on every export.
+try:
+    import sqlalchemy
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*IN expression list.*",
+        category=sqlalchemy.exc.SAWarning,
+    )
+except Exception:
+    pass  # Non-fatal if sqlalchemy is not installed
 _LAST_RELATIONSHIP_WARNING: Optional[str] = None
 
 # ---------------------------------------------------------------------------
@@ -108,6 +123,8 @@ def entity_to_stix_indicator(entity: Any) -> Optional[Any]:
             pattern_type="stix",
             indicator_types=indicator_types,
             confidence=_to_stix_confidence(entity.confidence),
+            allow_custom=True,
+            x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),
             external_references=(
                 [{"source_name": "voidaccess", "url": entity.source_url}]
                 if entity.source_url
@@ -137,6 +154,8 @@ def entity_to_stix_malware(entity: Any) -> Optional[Any]:
             name=entity.value,
             is_family=True,
             confidence=_to_stix_confidence(entity.confidence),
+            allow_custom=True,
+            x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),
             external_references=(
                 [{"source_name": "voidaccess", "url": entity.source_url}]
                 if entity.source_url
@@ -166,6 +185,8 @@ def entity_to_stix_threat_actor(entity: Any) -> Optional[Any]:
             name=entity.value,
             aliases=[entity.value],
             confidence=_to_stix_confidence(entity.confidence),
+            allow_custom=True,
+            x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),
             external_references=(
                 [{"source_name": "voidaccess", "url": entity.source_url}]
                 if entity.source_url
@@ -301,6 +322,7 @@ def get_last_relationship_warning() -> Optional[str]:
 def _load_entities_for_investigation(
     investigation_id: Any,
     entity_ids: Optional[list[uuid.UUID]] = None,
+    session: Optional[Any] = None,
 ) -> list[Any]:
     """
     Load entities from DB for the given investigation_id.
@@ -308,9 +330,19 @@ def _load_entities_for_investigation(
     Includes entities owned directly by the investigation AND entities linked
     via InvestigationEntityLink (canonical dedup junction table).
 
+    Parameters
+    ----------
+    investigation_id: UUID or string UUID of the investigation.
+    entity_ids: Optional list of entity UUIDs to filter to.
+    session: Optional existing SQLAlchemy Session. When provided, the caller
+        controls the session boundary (commits, rollbacks). When None (the
+        default), this function opens its own session via get_session() and
+        commits on exit. Exposing session enables test injection of the
+        fixture's session so the function sees uncommitted data.
+
     Returns [] if DATABASE_URL is not set, investigation not found, or any error.
     """
-    if not os.getenv("DATABASE_URL"):
+    if session is None and not os.getenv("DATABASE_URL"):
         return []
 
     try:
@@ -323,26 +355,22 @@ def _load_entities_for_investigation(
         if inv_uuid is None:
             return []
 
-        with get_session() as session:
-            inv = get_investigation_by_id_or_run(session, inv_uuid)
+        def _do_query(sess: Any) -> list[Any]:
+            nonlocal inv_uuid
+            inv = get_investigation_by_id_or_run(sess, inv_uuid)
             if inv is None:
                 return []
 
-            # v1.7 MED-9: use .c.column explicitly for the IN clause subquery.
-            # In SQLAlchemy 2.x, passing a plain subquery object to Column.in_()
-            # triggers a "Subquery is not yet a select()" coercion warning.
-            # Using subquery.c.column accesses the explicit column object so
-            # the ORM knows exactly what to coerce — no suppression needed.
-            linked_ids_subq = (
-                session.query(InvestigationEntityLink.entity_id)
+            direct_q = sess.query(Entity).filter(Entity.investigation_id == inv.id)
+            linked_q = (
+                sess.query(Entity)
+                .join(
+                    InvestigationEntityLink,
+                    InvestigationEntityLink.entity_id == Entity.id,
+                )
                 .filter(InvestigationEntityLink.investigation_id == inv.id)
-                .subquery()
             )
-            q = session.query(Entity).filter(
-                (Entity.investigation_id == inv.id)
-                | Entity.id.in_(linked_ids_subq.c.entity_id)
-            )
-            db_entities = q.all()
+            db_entities = direct_q.union(linked_q).all()
 
             if entity_ids is not None:
                 want = frozenset(entity_ids)
@@ -356,7 +384,7 @@ def _load_entities_for_investigation(
                         source_url = e.page.url or ""
                 except Exception:
                     pass
-                ne = NormalizedEntity(
+                result.append(NormalizedEntity(
                     entity_type=e.entity_type,
                     value=e.canonical_value or e.value,
                     confidence=e.confidence,
@@ -364,9 +392,14 @@ def _load_entities_for_investigation(
                     page_id=e.page_id,
                     context_snippet=e.context_snippet or "",
                     extraction_method="db",
-                )
-                result.append(ne)
-        return result
+                    source_quality=getattr(e, "source_quality", 1.0),
+                ))
+            return result
+
+        if session is not None:
+            return _do_query(session)
+        with get_session() as sess:
+            return _do_query(sess)
 
     except Exception as exc:
         logger.warning("_load_entities_for_investigation failed: %s", exc)
@@ -404,6 +437,7 @@ def _build_stix_relationships(
                     relationship_type=rel_type,
                     source_ref=src_stix_id,
                     target_ref=tgt_stix_id,
+                    allow_custom=True,
                 )
                 relationships.append(rel)
             except Exception:

@@ -28,6 +28,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Union
+from types import SimpleNamespace
 
 from sqlalchemy import text
 from db.search_engine_stats import (
@@ -40,6 +41,47 @@ from db.search_engine_stats import (
 from utils.enrichment_cache import _SQLITE_CREATE_TABLE, _SQLITE_INDEX_EXPIRES
 
 from voidaccess_cli.config import DB_PATH as _DB_PATH
+
+
+def _source_quality_from_url(url: str) -> float:
+    """Return a multi-tier source quality score derived from the source URL."""
+    if not url:
+        return 0.85
+    u = url.lower()
+    if "github.com" in u or "gitlab.com" in u:
+        if "/readme" in u or "/blob/" in u or "/tree/" in u:
+            return 0.55
+        if "/issues/" in u or "/pull/" in u or "/merge_requests/" in u:
+            return 0.68
+        return 0.62
+    if "rss" in u or "/feed" in u or "feed" in u:
+        return 0.8
+    if "paste" in u or "pastebin" in u:
+        return 0.96
+    if "forum" in u or "board" in u or "thread" in u:
+        return 0.92
+    if "blog" in u or "news" in u or "security" in u:
+        return 0.88
+    if ".onion" in u:
+        return 0.98
+    return 0.84
+
+
+def _method_multiplier(method: str) -> float:
+    method = (method or "").lower()
+    if method == "regex":
+        return 1.0
+    if method == "ner":
+        return 0.96
+    if method == "llm":
+        return 0.92
+    return 0.98
+
+
+def _source_count_multiplier(source_count: int) -> float:
+    if source_count <= 1:
+        return 1.0
+    return min(1.0 + min(source_count - 1, 8) * 0.025, 1.2)
 
 
 class _AwaitableStr(str):
@@ -493,17 +535,52 @@ def get_entities(
     entity_types: Optional[list[str]] = None,
     limit: int = 1000,
 ) -> list[dict[str, Any]]:
-    from db.models import Entity
+    from db.models import Entity, InvestigationEntityLink
     from db.session import get_session
 
     full = resolve_investigation_id(investigation_id) or investigation_id
     inv_uuid = uuid.UUID(full)
     with get_session() as session:
-        q = session.query(Entity).filter(Entity.investigation_id == inv_uuid)
+        q = (
+            session.query(Entity)
+            .outerjoin(
+                InvestigationEntityLink,
+                InvestigationEntityLink.entity_id == Entity.id,
+            )
+            .filter(
+                (Entity.investigation_id == inv_uuid)
+                | (InvestigationEntityLink.investigation_id == inv_uuid)
+            )
+        )
         if entity_types:
             q = q.filter(Entity.entity_type.in_(entity_types))
         rows = q.limit(limit).all()
-        return [_entity_row(r) for r in rows]
+        row_dicts = [_entity_row(r) for r in rows]
+        try:
+            from extractor.normalizer import resolve_entity_type_conflicts
+
+            temp_entities = [
+                SimpleNamespace(
+                    entity_type=d.get("entity_type") or "",
+                    value=d.get("canonical_value") or d.get("value") or "",
+                    confidence=float(d.get("confidence") or 0.0),
+                )
+                for d in row_dicts
+            ]
+            resolved = resolve_entity_type_conflicts(temp_entities)
+            keep = {
+                ((getattr(e, "entity_type", "") or "").upper(), (getattr(e, "value", "") or "").lower())
+                for e in resolved
+            }
+            return [
+                d for d in row_dicts
+                if (
+                    (d.get("entity_type") or "").upper(),
+                    (d.get("canonical_value") or d.get("value") or "").lower(),
+                ) in keep
+            ]
+        except Exception:
+            return row_dicts
 
 
 def _entity_row(e) -> dict[str, Any]:
@@ -513,16 +590,30 @@ def _entity_row(e) -> dict[str, Any]:
     # the EntityType enum in db.models maps to lowercase values, etc.).
     # Single source of truth for the CLI: always UPPERCASE.
     entity_type = (getattr(e, "entity_type", "") or "").upper()
+    source_url = ""
+    try:
+        source_url = getattr(getattr(e, "page", None), "url", "") or ""
+    except Exception:
+        source_url = ""
+    source_quality = _source_quality_from_url(source_url)
+    method_multiplier = _method_multiplier(e.extraction_method or "")
+    corroboration_multiplier = _source_count_multiplier(int(e.source_count or 1))
+    effective_confidence = min(
+        1.0,
+        float(e.confidence or 0.0) * source_quality * method_multiplier * corroboration_multiplier,
+    )
     return {
         "id": str(e.id),
         "entity_type": entity_type,
         "value": e.value,
         "canonical_value": e.canonical_value,
-        "confidence": float(e.confidence) if e.confidence is not None else None,
+        "confidence": effective_confidence,
         "context_snippet": e.context_snippet,
         "extraction_method": e.extraction_method,
         "source_count": e.source_count,
         "corroborating_sources": e.corroborating_sources,
+        "source_url": source_url,
+        "source_quality": source_quality,
         "first_seen": _serialize_dt(e.first_seen),
         "last_seen": _serialize_dt(e.last_seen),
     }

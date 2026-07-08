@@ -11,7 +11,7 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from api.auth import CurrentUser, get_current_user
 
@@ -24,10 +24,8 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-class SemanticSearchRequest(BaseModel):
-    query: str
-    n_results: int = 10
-    offset: int = 0
+def _search_payload(results: list[dict], warnings: list[str] | None = None) -> dict:
+    return {"results": results, "warnings": warnings or []}
 
 
 class EntitySearchRequest(BaseModel):
@@ -42,70 +40,94 @@ class EntitySearchRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/semantic")
+@router.get("/semantic")
 async def semantic_search(
-    body: SemanticSearchRequest,
+    q: str = Query(..., min_length=1),
+    n: int = Query(10, ge=1, le=100),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """
-    Return semantically similar pages from the vector store.
-    Uses ChromaDB + sentence-transformers embeddings.
-    Supports pagination via offset/n_results.
-    """
+    warnings: list[str] = []
     try:
-        from vector.search import find_related_pages
-        from vector.store import count_pages
+        from vector import search_similar
 
-        results = find_related_pages(body.query, n_results=body.n_results)
-        total = count_pages()
-        
-        if not isinstance(results, list):
-            results = []
-
-        user_inv_ids: set[str] = set()
-        if os.getenv("DATABASE_URL"):
-            try:
-                from db.session import get_session  # noqa: PLC0415
-                from db.models import Investigation  # noqa: PLC0415
-
-                with get_session() as session:
-                    rows = (
-                        session.query(Investigation.id)
-                        .filter(Investigation.user_id == current_user.user.id)
-                        .all()
-                    )
-                    user_inv_ids = {str(r[0]) for r in rows}
-            except Exception as exc:
-                logger.warning("semantic_search: failed to load user inv IDs: %s", exc)
-
-        results = [
-            r for r in results
-            if str(r.get("metadata", {}).get("investigation_id", "")) in user_inv_ids
-        ]
-
-        return {
-            "items": results,
-            "total": total,
-            "offset": body.offset,
-            "n_results": body.n_results,
-        }
+        results = search_similar(q, n_results=n)
+        return _search_payload(results, warnings)
     except Exception as exc:
         logger.warning("semantic_search failed: %s", exc)
-        return {"items": [], "total": 0, "offset": 0, "n_results": 10}
+        warnings.append(str(exc))
+        return _search_payload([], warnings)
+
+
+@router.get("/similar-to")
+async def similar_to(
+    url: str = Query(..., min_length=1),
+    n: int = Query(10, ge=1, le=100),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    warnings: list[str] = []
+    """
+    Return pages similar to a reference URL from the vector store.
+    """
+    try:
+        from vector import find_pages_similar_to
+
+        return _search_payload(find_pages_similar_to(url, n_results=n), warnings)
+    except Exception as exc:
+        logger.warning("similar_to failed: %s", exc)
+        warnings.append(str(exc))
+        return _search_payload([], warnings)
+
+
+@router.get("/cross-investigation")
+async def cross_investigation(
+    q: str = Query(..., min_length=1),
+    exclude_investigation: str | None = None,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    warnings: list[str] = []
+    try:
+        from vector import cross_investigation_recall
+
+        return _search_payload(
+            cross_investigation_recall(q, exclude_investigation_id=exclude_investigation),
+            warnings,
+        )
+    except Exception as exc:
+        logger.warning("cross_investigation failed: %s", exc)
+        warnings.append(str(exc))
+        return _search_payload([], warnings)
+
+
+@router.get("/stats")
+async def stats(current_user: CurrentUser = Depends(get_current_user)) -> dict:
+    warnings: list[str] = []
+    total_documents = 0
+    persist_directory = ""
+    chromadb_available = False
+    try:
+        from vector import get_collection, get_collection_stats, count_pages
+
+        chromadb_available = get_collection() is not None
+        total_documents = count_pages()
+        stats = get_collection_stats()
+        persist_directory = str(stats.get("persist_directory", ""))
+    except Exception as exc:
+        warnings.append(str(exc))
+    return {
+        "total_documents": total_documents,
+        "persist_directory": persist_directory,
+        "chromadb_available": chromadb_available,
+        "warnings": warnings,
+    }
 
 
 @router.post("/entities")
 async def search_entities(
     body: EntitySearchRequest,
     current_user: CurrentUser = Depends(get_current_user),
-) -> list[dict]:
-    """
-    Full-text search across entity values in DB.
-    Optionally filter by entity_types list.
-    Supports pagination via offset/limit.
-    """
+) -> dict:
     if not os.getenv("DATABASE_URL"):
-        return []
+        return {"items": [], "total": 0, "offset": 0, "limit": 50}
     try:
         from db.session import get_session  # noqa: PLC0415
         from db.models import Entity, Investigation, InvestigationEntityLink  # noqa: PLC0415

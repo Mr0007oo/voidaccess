@@ -12,6 +12,7 @@ import graph
 import scraper.scrape as scrape
 import search.search as search
 import vector
+from db.queries import create_investigation, get_investigation_by_query
 from extractor import extract_entities_from_page, extract_entities_from_pages
 from monitor import _db
 from monitor.diff import compute_diff
@@ -40,6 +41,18 @@ async def run_keyword_watch(watch: dict, llm=None) -> dict[str, Any]:
     errors: list[str] = []
     new_pages: list[dict] = []
     duplicate_pages_skipped = 0
+    investigation_id = None
+
+    try:
+        from db.session import get_session
+
+        with get_session() as session:
+            inv = get_investigation_by_query(session, name)
+            if inv is None:
+                inv = create_investigation(session, query=name)
+            investigation_id = inv.id
+    except Exception as exc:
+        logger.warning("keyword watch investigation lookup/create failed for %s: %s", name, exc)
 
     try:
         raw_results = search.get_search_results(query)
@@ -75,7 +88,24 @@ async def run_keyword_watch(watch: dict, llm=None) -> dict[str, Any]:
             "timestamp": _utc_iso(),
         }
 
-    for url, text in scraped.items():
+    pending_urls = list(scraped.keys())
+    cached_hits: list[dict] = []
+    uncached_urls = pending_urls
+    try:
+        cached_hits, uncached_urls = vector.bulk_check_cache(pending_urls)
+    except Exception as exc:
+        logger.warning("bulk_check_cache failed for keyword watch %s: %s", name, exc)
+    for cached in cached_hits:
+        try:
+            vector.upsert_page(
+                cached.get("link", ""),
+                cached.get("content", ""),
+                metadata={"watch_name": name, "watch_type": "keyword", "cached": True},
+            )
+        except Exception as exc:
+            logger.warning("upsert_page failed for cached %s: %s", cached.get("link", ""), exc)
+    for url in uncached_urls:
+        text = scraped.get(url, "")
         try:
             if vector.is_duplicate(text):
                 duplicate_pages_skipped += 1
@@ -97,7 +127,7 @@ async def run_keyword_watch(watch: dict, llm=None) -> dict[str, Any]:
         try:
             results = await extract_entities_from_pages(
                 new_pages,
-                investigation_id=None,
+                investigation_id=investigation_id,
                 llm=llm,
                 run_llm_extraction=llm is not None,
             )
@@ -108,11 +138,27 @@ async def run_keyword_watch(watch: dict, llm=None) -> dict[str, Any]:
             logger.error("extract_entities_from_pages failed: %s", exc)
             errors.append(str(exc))
 
-    try:
-        graph.build_graph_from_db()
-    except Exception as exc:
-        logger.warning("build_graph_from_db: %s", exc)
-        errors.append(f"graph: {exc}")
+    if investigation_id is not None:
+        try:
+            graph_obj = graph.build_graph_from_db(investigation_id=investigation_id)
+            graph_obj = graph.infer_relationships(graph_obj)
+            persist = getattr(graph, "persist_graph_edges", None)
+            if callable(persist):
+                persist(graph_obj, investigation_id)
+            try:
+                from db.session import get_session
+                from db.models import Investigation
+
+                with get_session() as session:
+                    inv = session.get(Investigation, investigation_id)
+                    if inv is not None:
+                        inv.graph_status = "complete"
+                        session.commit()
+            except Exception as exc:
+                logger.warning("failed to mark graph complete for %s: %s", investigation_id, exc)
+        except Exception as exc:
+            logger.warning("build_graph_from_db: %s", exc)
+            errors.append(f"graph: {exc}")
 
     return {
         "name": name,
@@ -125,10 +171,21 @@ async def run_keyword_watch(watch: dict, llm=None) -> dict[str, Any]:
     }
 
 
-async def run_url_watch(watch: dict) -> dict[str, Any]:
+async def run_url_watch(watch: dict, llm=None) -> dict[str, Any]:
     """Scrape one URL, diff against DB-backed previous content, extract if changed."""
     name = watch.get("name", "")
     url = watch.get("url", "")
+    investigation_id = None
+    try:
+        from db.session import get_session
+
+        with get_session() as session:
+            inv = get_investigation_by_query(session, name)
+            if inv is None:
+                inv = create_investigation(session, query=name)
+            investigation_id = inv.id
+    except Exception as exc:
+        logger.warning("url watch investigation lookup/create failed for %s: %s", name, exc)
     old_content = _db.get_last_cleaned_text_for_url(url)
 
     try:
@@ -165,9 +222,9 @@ async def run_url_watch(watch: dict) -> dict[str, Any]:
                 new_content,
                 url,
                 page_id=None,
-                investigation_id=None,
-                llm=None,
-                run_llm_extraction=False,
+                investigation_id=investigation_id,
+                llm=llm if watch.get("use_llm", False) else None,
+                run_llm_extraction=bool(llm) and bool(watch.get("use_llm", False)),
             )
             new_entities = int(er.entity_count)
         except Exception as exc:

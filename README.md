@@ -19,7 +19,15 @@ Commercial threat intelligence platforms often charge prohibitive annual fees fo
 
 ---
 
-## What's New in v1.7.0
+## What's New in v1.7.1
+- STIX export now produces real bundles with entities and relationships again.
+- Entity extraction on CVE/financial queries now returns the expected entity mix instead of collapsing to organization-name noise.
+- Confidence scores now show multi-value spread that reflects source quality, extraction method, and corroboration.
+- Entity readback now includes rows linked through `InvestigationEntityLink` and dedupes canonical collisions correctly.
+
+---
+
+## What's New in the Previous Release
 
 - **Dependency optional-extras split** — `sentence-transformers`, `torch`, `transformers`, `telethon`, and `playwright` are now optional extras: `voidaccess[nlp]`, `voidaccess[telegram]`, `voidaccess[js]`, and `voidaccess[all]`.
 - **Optional clearnet ScrapingAnt integration** — paste sites and RSS feeds can now be routed through ScrapingAnt. Affects clearnet scraping only; Tor, `.onion`, GitHub, and GitLab traffic are never affected.
@@ -225,7 +233,7 @@ Export formats:
 
 ## Actor Intelligence
 
-VoidAccess v1.7.0 persists actor profiles across investigations in `actor_profiles`, with linked aliases and infrastructure in `actor_aliases` and `actor_infrastructure`. Profiles are populated from threat actor, ransomware group, and handle entities, then enriched with co-occurring infrastructure and timeline events.
+VoidAccess v1.7.1 persists actor profiles across investigations in `actor_profiles`, with linked aliases and infrastructure in `actor_aliases` and `actor_infrastructure`. Profiles are populated from threat actor, ransomware group, and handle entities, then enriched with co-occurring infrastructure and timeline events.
 
 Cross-alias resolution scores five signals: shared infrastructure, shared PGP, string similarity, temporal co-activity, and co-investigation. Use `voidaccess actors` to list profiles, `voidaccess actor <handle>` for the full profile, `voidaccess actor <handle> --timeline` for chronology, and `voidaccess actor <handle> --note "text"` for analyst notes.
 
@@ -491,7 +499,5 @@ To report a security vulnerability, see [docs/SECURITY.md](docs/SECURITY.md).
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
-
-
 
 

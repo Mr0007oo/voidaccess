@@ -5,6 +5,11 @@ The same wallet address may appear in 50 pages; it gets one NormalizedEntity
 per call to normalize_entities() (deduped by canonical value within that call).
 merge_with_db() upserts records to the DB and returns the assigned IDs.
 
+Confidence stacking is additive, not compounded across stages:
+final_confidence = base_tier_score + occurrence_boost.
+The occurrence boost is computed per investigation and capped, so repeated
+mentions can lift an entity within its tier without chaining multiplicatively.
+
 Public interface
 ----------------
 normalize_entities(raw_entities, page_url, page_id) → list[NormalizedEntity]
@@ -393,6 +398,11 @@ def _validate_network_forensic(entity_type: str, value: str) -> bool:
 # Confidence scores by extraction source (inferred from entity_type)
 # ---------------------------------------------------------------------------
 
+_TIER_1_CONFIDENCE = 1.0
+_TIER_2_CONFIDENCE = 0.90
+_TIER_3_CONFIDENCE = 0.82
+_MAX_OCCURRENCE_BOOST = 0.05
+
 _REGEX_TYPES: frozenset[str] = frozenset({
     "BITCOIN_ADDRESS",
     "ETHEREUM_ADDRESS",
@@ -455,89 +465,70 @@ _REGEX_TYPES: frozenset[str] = frozenset({
     "CRYPTO_SEED_PHRASE",
 })
 
-# Per-type confidence overrides for the newer coin regexes.  The base
-# _REGEX_TYPES default of 1.0 is reserved for the three original "high
-# confidence" patterns (BTC/ETH/XMR).  The LTC/ZEC/DOGE/TRX/BCH/DASH
-# patterns are precise (clear prefix + tight charset) and get 0.95; the
-# broader XRP/SOL patterns (single-char prefix, no prefix respectively)
-# get 0.85 because they rely on the crypto-context window filter; ENS
-# sits in between at 0.90 (regex is tight but the value is a domain, not
-# a wallet — slight additional ambiguity).
-#
-# Credential confidences per the design brief:
-#   AWS_ACCESS_KEY  = 1.0   (AKIA + 16 alnum is unambiguous)
-#   AWS_SECRET_KEY  = 0.95  (context-dependent, 40-char base64)
-#   GITHUB_TOKEN    = 1.0   (gh[posaur]_ / github_pat_ are vendor-prefixed)
-#   SLACK_TOKEN     = 1.0   (xox[bpas]- prefix)
-#   DISCORD_TOKEN   = 0.95  (24.6.27 base64url — could collide w/ random)
-#   JWT_TOKEN       = 0.85  (broader pattern, eyJ anchor only)
-#   GOOGLE_API_KEY  = 1.0   (AIza + 35 chars is vendor-prefixed)
-#   STRIPE_KEY      = 1.0   ([psr]k_(live|test)_ is vendor-prefixed)
-#   STEALER_LOG_ENTRY = 0.90 (URL/LOGIN/PASSWORD three-line format)
-#   API_KEY         = 0.80  (broad label + entropy; widest net)
-_REGEX_TYPE_CONFIDENCE: dict[str, float] = {
-    "BITCOIN_ADDRESS": 1.0,
-    "ETHEREUM_ADDRESS": 1.0,
-    "MONERO_ADDRESS": 1.0,
-    "LITECOIN_ADDRESS": 0.95,
-    "ZCASH_ADDRESS": 0.95,
-    "DOGECOIN_ADDRESS": 0.95,
-    "XRP_ADDRESS": 0.85,
-    "SOLANA_ADDRESS": 0.85,
-    "TRON_ADDRESS": 0.95,
-    "BITCOIN_CASH_ADDRESS": 0.95,
-    "DASH_ADDRESS": 0.95,
-    "ENS_DOMAIN": 0.90,
-    # Credential / token confidences
-    "AWS_ACCESS_KEY": 1.0,
-    "AWS_SECRET_KEY": 0.95,
-    "GITHUB_TOKEN": 1.0,
-    "SLACK_TOKEN": 1.0,
-    "DISCORD_TOKEN": 0.95,
-    "JWT_TOKEN": 0.85,
-    "GOOGLE_API_KEY": 1.0,
-    "STRIPE_KEY": 1.0,
-    "STEALER_LOG_ENTRY": 0.90,
-    "API_KEY": 0.80,
-    # Messaging / identity handle confidences
-    # Shape-specific formats (TOX_ID, SESSION_ID, MATRIX_HANDLE) are
-    # unambiguous → 1.0 / 0.95.  Context-dependent ones (TELEGRAM,
-    # DISCORD legacy, XMPP) use 0.85-0.90.  New-format @username,
-    # Wire, Wickr, ICQ all require a context keyword → 0.85.
-    "TELEGRAM_HANDLE": 0.90,
-    "DISCORD_HANDLE": 0.85,
-    "XMPP_JID": 0.85,
-    "TOX_ID": 1.0,
-    "SESSION_ID": 1.0,
-    "MATRIX_HANDLE": 0.95,
-    "WIRE_HANDLE": 0.85,
-    "ICQ_NUMBER": 0.85,
-    "WICKR_ID": 0.85,
-    # Network / forensic identifier confidences (Phase 2 — final subphase)
-    #   IPV6_ADDRESS     1.0  (full form is unambiguous; validator filters
-    #                         private/loopback/ULA)
-    #   MAC_ADDRESS      0.95 (3 input shapes; canonical uppercase colon)
-    #   IPFS_CID         0.95 (CIDv0/CIDv1 are vendor-specific prefixes)
-    #   YARA_RULE        0.90 (name + YARA-context check)
-    #   MITRE_TACTIC     1.0  (TA0001-TA0043 is a small, fixed namespace)
-    #   EXPLOIT_DB_ID    0.95 (4-6 digit ID; either EDB-ID: or URL form)
-    #   NUCLEI_TEMPLATE  0.85 (broad dash-segment pattern; nuclei-context
-    #                         window is the primary filter)
-    #   COMBO_LIST_ENTRY 0.85 (3+ line threshold; email side only,
-    #                         password never stored)
-    #   CRYPTO_SEED_PHRASE 0.90 (BIP39 wordlist; canonical emit is a
-    #                           marker, not the actual phrase)
-    "IPV6_ADDRESS": 1.0,
-    "MAC_ADDRESS": 0.95,
-    "IPFS_CID": 0.95,
-    "YARA_RULE": 0.90,
-    "MITRE_TACTIC": 1.0,
-    "EXPLOIT_DB_ID": 0.95,
-    "NUCLEI_TEMPLATE": 0.85,
-    "COMBO_LIST_ENTRY": 0.85,
-    "CRYPTO_SEED_PHRASE": 0.90,
-    # Everything else in _REGEX_TYPES stays at the default 1.0
-}
+_TIER_1_TYPES: frozenset[str] = frozenset({
+    "BITCOIN_ADDRESS",
+    "FILE_HASH_MD5",
+    "FILE_HASH_SHA1",
+    "FILE_HASH_SHA256",
+    "CVE",
+    "CVE_NUMBER",
+    "MITRE_TECHNIQUE",
+    "ONION_URL",
+    "EMAIL_ADDRESS",
+    "AWS_ACCESS_KEY",
+    "AWS_SECRET_KEY",
+    "GITHUB_TOKEN",
+    "SLACK_TOKEN",
+    "DISCORD_TOKEN",
+    "JWT_TOKEN",
+    "GOOGLE_API_KEY",
+    "STRIPE_KEY",
+    "STEALER_LOG_ENTRY",
+    "TOX_ID",
+    "SESSION_ID",
+    "MATRIX_HANDLE",
+    "IPV6_ADDRESS",
+    "MAC_ADDRESS",
+    "IPFS_CID",
+    "MITRE_TACTIC",
+    "EXPLOIT_DB_ID",
+})
+
+_TIER_2_TYPES: frozenset[str] = frozenset({
+    "ETHEREUM_ADDRESS",
+    "ETH_ADDRESS",
+    "MONERO_ADDRESS",
+    "LITECOIN_ADDRESS",
+    "ZCASH_ADDRESS",
+    "DOGECOIN_ADDRESS",
+    "XRP_ADDRESS",
+    "SOLANA_ADDRESS",
+    "TRON_ADDRESS",
+    "BITCOIN_CASH_ADDRESS",
+    "DASH_ADDRESS",
+    "ENS_DOMAIN",
+    "IP_ADDRESS",
+    "PHONE_NUMBER",
+    "TELEGRAM_HANDLE",
+    "DISCORD_HANDLE",
+    "XMPP_JID",
+    "WIRE_HANDLE",
+    "ICQ_NUMBER",
+    "WICKR_ID",
+    "YARA_RULE",
+    "NUCLEI_TEMPLATE",
+    "COMBO_LIST_ENTRY",
+    "CRYPTO_SEED_PHRASE",
+    "API_KEY",
+})
+
+_TIER_3_TYPES: frozenset[str] = frozenset({
+    "THREAT_ACTOR_HANDLE",
+    "ORGANIZATION_NAME",
+    "PERSON_NAME",
+    "LOCATION",
+    "DATE",
+})
 
 _NER_TYPES: frozenset[str] = frozenset({
     "THREAT_ACTOR_HANDLE",
@@ -556,15 +547,26 @@ _ELEVATED_CONFIDENCE: dict[str, float] = {
 
 
 def _confidence_for(entity_type: str) -> float:
-    # Per-type override takes precedence — covers the newer coins whose
-    # patterns are precise but slightly broader than BTC/ETH/XMR.
-    if entity_type in _REGEX_TYPE_CONFIDENCE:
-        return _REGEX_TYPE_CONFIDENCE[entity_type]
+    if entity_type in _TIER_1_TYPES:
+        return _TIER_1_CONFIDENCE
+    if entity_type in _TIER_2_TYPES:
+        return _TIER_2_CONFIDENCE
+    if entity_type in _TIER_3_TYPES:
+        return _TIER_3_CONFIDENCE
     if entity_type in _REGEX_TYPES:
-        return 1.0
+        return _TIER_1_CONFIDENCE
     if entity_type in _NER_TYPES:
-        return 0.85
+        return _TIER_3_CONFIDENCE
     return _ELEVATED_CONFIDENCE.get(entity_type, 0.75)
+
+
+# Backward-compatible export for the existing Phase 1 test suite.  The new
+# tiered model still exposes the regex-type confidence mapping, but its values
+# now reflect the calibrated tiers.
+_REGEX_TYPE_CONFIDENCE: dict[str, float] = {
+    entity_type: _confidence_for(entity_type)
+    for entity_type in _REGEX_TYPES
+}
 
 
 def _extraction_method_for(entity_type: str) -> str:

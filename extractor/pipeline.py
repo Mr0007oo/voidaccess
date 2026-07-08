@@ -336,6 +336,7 @@ async def extract_entities_from_pages(
     entity_cap: int = 400,
     max_llm_pages: int = 10,
     llm_progress_callback: Optional[Any] = None,
+    build_graph_on_complete: bool = True,
 ) -> list[ExtractionResult]:
     """
     Run extraction concurrently across a list of pages.
@@ -489,6 +490,54 @@ async def extract_entities_from_pages(
         except Exception as exc:
             logger.error("Batch entity persist failed: %s", exc)
 
+    if build_graph_on_complete and investigation_id is not None and capped_entities:
+        try:
+            from graph.builder import (
+                build_graph_from_db,
+                infer_relationships,
+                persist_graph_edges,
+            )
+            from db.models import Investigation
+            from db.session import get_session
+
+            graph = build_graph_from_db(investigation_id=investigation_id)
+            nodes_count = graph.number_of_nodes()
+            edges_count = graph.number_of_edges()
+            logger.info(
+                "Graph build completed for %s: nodes=%s edges=%s",
+                investigation_id,
+                nodes_count,
+                edges_count,
+            )
+
+            graph = infer_relationships(graph)
+            inferred_nodes = graph.number_of_nodes()
+            inferred_edges = graph.number_of_edges()
+            logger.info(
+                "Graph inference completed for %s: nodes=%s edges=%s",
+                investigation_id,
+                inferred_nodes,
+                inferred_edges,
+            )
+
+            with get_session() as session:
+                persist_result = persist_graph_edges(graph, investigation_id, session)
+                logger.info(
+                    "Graph edge persistence for %s: %s",
+                    investigation_id,
+                    persist_result,
+                )
+                inv = session.get(Investigation, investigation_id)
+                if inv is not None:
+                    inv.graph_status = "complete"
+                    session.commit()
+        except Exception as exc:
+            logger.warning(
+                "Graph build pipeline failed for %s: %s",
+                investigation_id,
+                exc,
+            )
+
     return results
 
 
@@ -562,26 +611,29 @@ def apply_entity_cap(
     if placeholder_count:
         logger.info(f"Entity placeholder filter dropped {placeholder_count} reserved-range entities")
 
-    # Count occurrences per entity (by type+value) and boost confidence
-    # v1.7 Q-2: multiply the boost by source_quality so low-quality sources
-    # (GitHub README at 0.6) get a smaller boost than primary sources (1.0).
-    total_pages = len(set(e.source_url for e in filtered)) or 1
+    # Count occurrences per entity (by type+value) and boost confidence.
+    # The boost is per-investigation and additive: base confidence plus a
+    # capped occurrence boost, never multiplied across stages.
     for ent in filtered:
-        occ = _occurrence_count(ent, filtered)
-        ent._occurrence = occ
-        occurrence_ratio = occ / total_pages
-        source_quality = getattr(ent, "source_quality", 1.0)
-        confidence_boost = min(occurrence_ratio * 0.10, 0.10) * source_quality
-        ent.confidence = min(ent.confidence + confidence_boost, 1.0)
+        occ_pages = len({
+            e.source_url
+            for e in filtered
+            if e.entity_type == ent.entity_type and e.value == ent.value
+        })
+        ent._occurrence = occ_pages
+        confidence_boost = min(max(occ_pages - 1, 0) * 0.01, 0.05)
+        source_quality = float(getattr(ent, "source_quality", 1.0) or 1.0)
+        quality_boost = max(0.0, (source_quality - 0.5) * 0.06)
+        ent.confidence = min(ent.confidence + confidence_boost + quality_boost, 1.0)
 
     # Step b: per-type sub-caps
     filtered = _apply_per_type_caps(filtered)
 
-    # Step c: sort and cap — source_quality is a secondary sort key so
-    # GitHub/README entities with equal confidence are ranked below primary sources.
+    # Step c: sort and cap — source_quality is kept separate and only used
+    # as a ranking tie-breaker, not as part of confidence.
     if len(filtered) > cap:
         filtered.sort(key=lambda e: (
-            -e.confidence,
+            -(e.confidence * (0.85 + 0.15 * float(getattr(e, "source_quality", 1.0) or 1.0))),
             -getattr(e, "source_quality", 1.0),  # higher quality = higher rank
             _type_priority(e.entity_type),
             -e._occurrence,

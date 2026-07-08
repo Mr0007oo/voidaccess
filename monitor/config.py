@@ -61,6 +61,9 @@ def _validate_and_normalize(raw: dict) -> dict | None:
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         enabled = bool(enabled)
+    use_llm = raw.get("use_llm", False)
+    if not isinstance(use_llm, bool):
+        use_llm = bool(use_llm)
 
     out: dict[str, Any] = {
         "name": name.strip(),
@@ -71,6 +74,7 @@ def _validate_and_normalize(raw: dict) -> dict | None:
         "webhook_url": raw.get("webhook_url"),
         "telegram_chat_id": raw.get("telegram_chat_id"),
         "email": raw.get("email"),
+        "use_llm": use_llm,
     }
     if wtype == "keyword":
         out["query"] = str(raw["query"]).strip()

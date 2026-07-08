@@ -115,6 +115,18 @@ def get_investigation_by_run_id(
     return session.query(Investigation).filter_by(run_id=run_id).first()
 
 
+def get_investigation_by_query(
+    session: Session,
+    query: str,
+    user_id: Optional[int] = None,
+) -> Optional[Investigation]:
+    """Return the newest Investigation with an exact query match."""
+    q = session.query(Investigation).filter(Investigation.query == query)
+    if user_id is not None:
+        q = q.filter(Investigation.user_id == user_id)
+    return q.order_by(Investigation.created_at.desc()).first()
+
+
 def get_recent_investigations(
     session: Session, limit: int = 20
 ) -> List[Investigation]:
@@ -382,7 +394,7 @@ def cross_reference_with_seeds(session: Session, investigation_id: uuid.UUID) ->
 
     inv_entities = session.query(Entity).join(Investigation, Entity.investigation_id == Investigation.id).filter(
         Entity.investigation_id == investigation_id,
-        Investigation.is_seed == False
+        ~Investigation.is_seed
     ).all()
 
     if not inv_entities:
@@ -401,7 +413,7 @@ def cross_reference_with_seeds(session: Session, investigation_id: uuid.UUID) ->
         .filter(
             Entity.entity_type.in_(entity_types),
             Entity.canonical_value.in_(canonical_values),
-            Investigation.is_seed == True
+            Investigation.is_seed
         )
         .all()
     )
@@ -414,8 +426,6 @@ def cross_reference_with_seeds(session: Session, investigation_id: uuid.UUID) ->
 
     entity_ids = [ent.id for ent in inv_entities]
     seed_ids = [seed.id for seed in seed_entities]
-    all_ids = list(set(entity_ids + seed_ids))
-
     existing_rels = (
         session.query(EntityRelationship)
         .filter(

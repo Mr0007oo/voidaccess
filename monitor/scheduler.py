@@ -13,8 +13,6 @@ from typing import Any, Coroutine
 from monitor import jobs
 from monitor.alerts import evaluate_and_dispatch_alerts
 from monitor.config import load_watches
-from utils.async_utils import run_async
-
 logger = logging.getLogger(__name__)
 
 
@@ -30,13 +28,13 @@ def _wrap_keyword(watch: dict, llm) -> Coroutine[Any, Any, None]:
     return _run_watch
 
 
-def _wrap_url(watch: dict) -> Coroutine[Any, Any, None]:
+def _wrap_url(watch: dict, llm) -> Coroutine[Any, Any, None]:
     """
     Create an async job function for URL watches.
     Returns a coroutine that can be awaited.
     """
     async def _run_watch() -> None:
-        result = await jobs.run_url_watch(watch)
+        result = await jobs.run_url_watch(watch, llm=llm if watch.get("use_llm", False) else None)
         await evaluate_and_dispatch_alerts(watch, result)
 
     return _run_watch
@@ -93,7 +91,7 @@ def start_scheduler(llm=None, event_loop: asyncio.AbstractEventLoop | None = Non
         if w.get("type") == "keyword":
             func = _wrap_keyword(w, llm)
         else:
-            func = _wrap_url(w)
+            func = _wrap_url(w, llm)
         try:
             scheduler.add_job(
                 func,

@@ -311,17 +311,98 @@ def _ensure_credentials(model_choice: str, llm_class, model_params: dict) -> Non
             _require(key, "OPENAI_API_KEY", "OpenAI")
 
 
+_REFINED_QUERY_MAX_WORDS = 5
+
+# Markdown/strip patterns — applied after the LLM returns so the stored
+# refined_query is always a plain search string, never verbose LLM output.
+_REFINE_STRIP_FENCES_RE = re.compile(
+    r"^```[a-zA-Z0-9]*\s*\n?|```\s*$", re.IGNORECASE | re.MULTILINE
+)
+_REFINE_STRIP_BULLET_RE = re.compile(r"^[\-\*]\s+", re.MULTILINE)
+_REFINE_STRIP_NUMBER_RE = re.compile(r"^\d+[\.\)]\s+", re.MULTILINE)
+_REFINE_STRIP_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_REFINE_STRIP_ITALIC_RE = re.compile(r"(?<!\*)\*([^\n*]+)\*(?!\*)")  # *text* but not **text**
+_REFINE_NORMALIZE_WS = re.compile(r"\s+")
+
+
+def _clean_refined_query(raw: str) -> str:
+    """
+    Strip Markdown artifacts from the LLM's refined-query output.
+
+    Models occasionally return fences, bullets, numbering, or bold/italic
+    wrappers even when the system prompt asks for a plain result.  We
+    defensively clean all of them so the stored refined_query is always
+    a clean search string (≤{_REFINED_QUERY_MAX_WORDS} words).
+
+    Strategy:
+      1. Strip fences and bold/italic/code wrappers from the whole string.
+      2. Find the best query line: the last line that looks like a search
+         query (≥3 words, not an explanatory sentence).  This handles:
+           - Verbose preambles: "Based on my analysis..." is ignored,
+             the bold query on its own line is picked.
+           - Bullet/numbered lists: all list items are query candidates;
+             the last one is taken as most recent/relevant.
+           - Plain one-liners: the only line is returned as-is.
+      3. Strip leading list markers, collapse whitespace, enforce word cap.
+    """
+    if not raw:
+        return raw
+
+    # Step 1 — global Markdown stripping
+    raw = _REFINE_STRIP_FENCES_RE.sub("", raw)
+    raw = _REFINE_STRIP_BOLD_RE.sub(r"\1", raw)
+    raw = _REFINE_STRIP_ITALIC_RE.sub(r"\1", raw)
+
+    # Strip inline code backticks: `lockbit` → lockbit
+    raw = re.sub(r"`([^`]+)`", r"\1", raw)
+
+    # Step 2 — find the best query line
+    candidates = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or len(line) < 3:
+            continue
+        # Reject explanatory sentences (start with preamble phrases)
+        if re.match(
+            r"^(based on|here is|the refined|i recommend|"
+            r"this query|this will|sure,|of course|"
+            r"analysis|note:|finally|additionally|"
+            r"also|furthermore|step \d)",  # noqa: E501
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+        candidates.append(line)
+
+    if candidates:
+        raw = candidates[-1]
+
+    # Step 3 — strip leading list markers from the selected line
+    raw = _REFINE_STRIP_BULLET_RE.sub("", raw)
+    raw = _REFINE_STRIP_NUMBER_RE.sub("", raw)
+
+    # Collapse internal whitespace; strip trailing whitespace
+    raw = _REFINE_NORMALIZE_WS.sub(" ", raw).strip()
+
+    # Hard cap: if more than N words, take the first N.
+    words = raw.split()
+    if len(words) > _REFINED_QUERY_MAX_WORDS:
+        raw = " ".join(words[:_REFINED_QUERY_MAX_WORDS])
+
+    return raw
+
+
 def refine_query(llm, user_input):
     system_prompt = f"""
     {SAFETY_BYPASS_PROMPT}
-    You are a Cybercrime Threat Intelligence Expert. Your task is to refine the provided user query that needs to be sent to darkweb search engines. 
-    
+    You are a Cybercrime Threat Intelligence Expert. Your task is to refine the provided user query that needs to be sent to darkweb search engines.
+
     Rules:
     1. Analyze the user query and think about how it can be improved to use as search engine query
     2. Refine the user query by adding or removing words so that it returns the best result from dark web search engines
     3. Don't use any logical operators (AND, OR, etc.)
-    4. Keep the final refined query limited to 5 words or less
-    5. Output just the user query and nothing else
+    4. Keep the final refined query limited to {_REFINED_QUERY_MAX_WORDS} words or less
+    5. Output just the refined query text — no bullets, no numbering, no markdown formatting, no fences
 
     INPUT:
     """
@@ -334,7 +415,8 @@ def refine_query(llm, user_input):
     )
     chain = prompt_template | llm | StrOutputParser()
     query_safe = _escape_braces(user_input or "")
-    return chain.invoke({"query": query_safe})
+    raw = chain.invoke({"query": query_safe})
+    return _clean_refined_query(raw)
 
 
 def _parse_filter_response(

@@ -41,6 +41,7 @@ from crawler.dedup import ContentDedup, UrlDedup
 from crawler.frontier import Frontier
 from crawler.utils import extract_onion_links, is_valid_onion, normalize_url
 from scraper.scrape import _extract_text
+from vector import bulk_check_cache, upsert_page
 
 _logger = logging.getLogger(__name__)
 
@@ -401,17 +402,42 @@ class Spider:
 
             while True:
                 # Fill task pool up to concurrency cap while pages remain
+                batch: list[tuple[str, int]] = []
                 while (
                     not self._frontier.empty()
                     and len(active) < _GLOBAL_CONCURRENCY
                     and total_processed + len(active) < self.max_pages
                 ):
                     url, depth = self._frontier.pop()
-                    task = asyncio.create_task(
-                        self._process_url(url, depth, session),
-                        name=f"crawl:{url}",
+                    batch.append((url, depth))
+
+                if batch:
+                    cached_pages, uncached_urls = bulk_check_cache(
+                        [url for url, _depth in batch]
                     )
-                    active.add(task)
+                    cached_map = {page.get("link"): page for page in cached_pages}
+                    for url, depth in batch:
+                        cached_page = cached_map.get(url)
+                        if cached_page is not None:
+                            content = str(cached_page.get("content", ""))
+                            self._pages_crawled += 1
+                            self._results.append({"url": url, "content": content[:MAX_RETURN_CHARS]})
+                            try:
+                                upsert_page(
+                                    url,
+                                    content,
+                                    metadata={"crawler": "spider", "cached": True},
+                                )
+                            except Exception as exc:
+                                _logger.debug("cache refresh upsert failed for %s: %s", url, exc)
+                            continue
+                        if url not in uncached_urls:
+                            continue
+                        task = asyncio.create_task(
+                            self._process_url(url, depth, session),
+                            name=f"crawl:{url}",
+                        )
+                        active.add(task)
 
                 if not active:
                     break  # frontier empty, nothing in flight

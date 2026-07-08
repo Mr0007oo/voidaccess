@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -99,7 +100,7 @@ def _user_owned_investigation_ids_subq(session, user_id: int):
 
 def _profile_accessible(session, profile_id: str, user_id: int) -> bool:
     """True when at least one investigation linked to the profile is owned by the user."""
-    from db.models import ActorAlias, ActorInfrastructure, Investigation
+    from db.models import ActorAlias, ActorInfrastructure
 
     inv_ids_subq = _user_owned_investigation_ids_subq(session, user_id)
     alias_match = (
@@ -151,7 +152,6 @@ async def list_actors(
         ActorProfile,
         ActorAlias,
         ActorInfrastructure,
-        Investigation,
     )
 
     try:
@@ -255,6 +255,35 @@ async def get_actor(
     except HTTPException:
         raise
 
+    return profile
+
+
+@router.get("/{node_id}/profile")
+async def get_actor_profile_by_node(
+    node_id: str,
+    investigation_id: str = Query(..., description="Investigation ID"),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Return the graph actor profile for a node inside one investigation."""
+    _db_required()
+    try:
+        inv_uuid = uuid.UUID(investigation_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid investigation ID format")
+    from db.queries import get_investigation_by_id_or_run
+    from graph import build_graph_from_db_cached, get_actor_profile
+
+    with _session() as session:
+        inv = get_investigation_by_id_or_run(session, inv_uuid)
+        if inv is None:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        if str(inv.user_id) != str(current_user.user.id):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        graph = build_graph_from_db_cached(investigation_id=inv.id)
+
+    profile = get_actor_profile(graph, node_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Graph node not found")
     return profile
 
 

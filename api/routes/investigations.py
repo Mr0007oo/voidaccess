@@ -352,14 +352,19 @@ async def _run_enrichment_phase(
 async def _build_graph_phase(
     extraction_results, inv_uuid, investigation_id
 ):
-    """Phase 6.2 wrapper around STEP 7 (graph building).
+    """Build the relationship graph for an investigation.
+
+    Flow:
+      1. Load entities from DB → build co-occurrence graph (CO_APPEARED_ON edges)
+      2. Run inference passes: PGP key reuse + handle similarity across forums
+      3. Persist all edges to DB
 
     Capped by the caller via ``_run_with_timeout`` with
     ``PHASE_TIMEOUTS["graph_build"]``.  Returns ``None`` on internal error
     so the caller can decide to fall back gracefully.
     """
     try:
-        from graph.builder import build_graph_from_db, persist_graph_edges
+        from graph.builder import build_graph_from_db, infer_relationships
         from db.session import get_session
         from db.models import Investigation
 
@@ -369,8 +374,18 @@ async def _build_graph_phase(
         node_count = len(graph_obj.nodes())
         edge_count = len(graph_obj.edges())
         logger.info(
-            "[%s] Graph: %s nodes, %s edges",
+            "[%s] Graph: %s nodes, %s intra-page edges",
             inv_uuid, node_count, edge_count,
+        )
+
+        # Run inference passes before persisting so derived edges are saved.
+        # PGP key reuse → CONFIRMED_SAME_ACTOR (0.95).
+        # Handle similarity across forums → LIKELY_SAME_ACTOR (0.6).
+        graph_obj = infer_relationships(graph_obj)
+        inferred_edges = len(graph_obj.edges()) - edge_count
+        logger.info(
+            "[%s] Graph inference: %s derived edges added (total edges now %s)",
+            inv_uuid, inferred_edges, len(graph_obj.edges()),
         )
 
         try:
@@ -379,9 +394,10 @@ async def _build_graph_phase(
             )
             graph_status = persist_result.get("status", "written")
             edges_written = persist_result.get("edges_written", 0)
+            total_edges = len(graph_obj.edges())
             logger.info(
-                "[%s] Graph edges persisted: %s (%s)",
-                inv_uuid, edges_written, graph_status,
+                "[%s] Graph edges persisted: %s/%s (%s)",
+                inv_uuid, edges_written, total_edges, graph_status,
             )
             new_graph_status = (
                 "skipped_overflow" if graph_status == "skipped_overflow" else "built"
@@ -2899,473 +2915,132 @@ def _rebuild_networkx_graph(nodes: list, edges: list) -> "nx.DiGraph":
 @router.get("/{investigation_id}/graph")
 async def get_investigation_graph(
     investigation_id: str,
+    include_viz: bool = Query(default=False),
     force_rebuild: bool = False,
-    max_nodes: int = Query(default=MAX_GRAPH_NODES, ge=1, le=MAX_GRAPH_NODES),
-    min_confidence: float = Query(default=0.75, ge=0.0, le=1.0),
 ) -> dict:
-    """
-    Return graph JSON for the investigation.
-
-    Requires investigation_id (now enforced - no more global graph).
-    Uses persisted edges from the DB with O(1) lookup.
-
-    Use ?force_rebuild=true to recompute from scratch.
-    Use ?max_nodes=N to limit node count (default 500, max 500).
-    Use ?min_confidence=N to filter nodes/edges by confidence (default 0.75).
-    Returns 400 if node count exceeds max_nodes - filter by entity type first.
-    Returns 200 with {"graph_status": "skipped_overflow", ...} if graph was skipped due to size.
-
-    Response now includes ``communities`` (node_id → community_id) and
-    ``community_count``.  Community detection is computed server-side via
-    ``graph.builder.detect_communities`` (greedy modularity, deterministic)
-    so every render produces the same partitioning.
-    """
+    """Return graph JSON for the investigation."""
     try:
         inv_uuid = uuid.UUID(investigation_id)
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid investigation ID format")
 
     try:
-        from db.session import get_session
         from db.queries import get_investigation_by_id_or_run
-        from graph.builder import (
-            build_graph_from_db,
-            build_graph_from_db_cached,
-            detect_communities,
-        )
-        from graph.export import to_json
-        from db.models import EntityRelationship, Entity
-        from sqlalchemy import func
+        from db.session import get_session
+        from graph import build_graph_from_db, build_graph_from_db_cached, build_pyvis_network, get_html_string
+        from graph.export import summary_stats, to_json
 
         with get_session() as session:
             inv = get_investigation_by_id_or_run(session, inv_uuid)
             if inv is None:
                 raise HTTPException(status_code=404, detail="Investigation not found")
-            internal_id = inv.id
             graph_status = getattr(inv, "graph_status", "pending")
+            if graph_status not in ("built", "complete", "skipped_overflow", "no_data"):
+                return {"status": "pending"}
+            internal_id = inv.id
 
-            if graph_status == "skipped_overflow":
-                entity_count = (
-                    session.query(func.count(Entity.id))
-                    .filter(Entity.investigation_id == internal_id)
-                    .scalar() or 0
-                )
-                return {
-                    "graph_status": "skipped_overflow",
-                    "message": "Graph too large to render. Use the entity list or download the CSV export instead.",
-                    "total_entities": entity_count,
-                    "nodes": [],
-                    "edges": [],
-                    "communities": {},
-                    "community_count": 0,
-                }
-
-            persisted_edge_count = (
-                session.query(func.count(EntityRelationship.id))
-                .filter(EntityRelationship.investigation_id == internal_id)
-                .scalar() or 0
-            )
-
-            total_entity_count = (
-                session.query(func.count(Entity.id))
-                .filter(Entity.investigation_id == internal_id)
-                .scalar() or 0
-            )
-
-        if persisted_edge_count > 0 and not force_rebuild:
-            logger.debug(
-                "Graph cache hit: %s edges from DB for investigation %s",
-                persisted_edge_count,
-                investigation_id,
-            )
-            graph = build_graph_from_db_cached(investigation_id=internal_id)
-        else:
-            graph = build_graph_from_db(investigation_id=internal_id)
-
-        node_count = len(graph.nodes)
-        if node_count > max_nodes:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Graph has {node_count} nodes, exceeds max_nodes={max_nodes}. "
-                    "Filter by entity type first using the /entities endpoint "
-                    "with entity_type filter, then rebuild the graph."
-                ),
-            )
-
+        graph = build_graph_from_db_cached(investigation_id=internal_id) if not force_rebuild else build_graph_from_db(investigation_id=internal_id)
         graph_data = to_json(graph)
-
-        nodes_to_keep = set()
-        total_entities = len(graph_data["nodes"])
-        for node in graph_data["nodes"]:
-            node_confidence = node.get("confidence", 0.0)
-            if node_confidence >= min_confidence:
-                nodes_to_keep.add(node["id"])
-
-        filtered_nodes = [n for n in graph_data["nodes"] if n["id"] in nodes_to_keep]
-        filtered_edges = [
-            e for e in graph_data["edges"]
-            if e["source"] in nodes_to_keep and e["target"] in nodes_to_keep
-        ]
-
-        # Server-side community detection (deterministic; one Louvain/Clauset-Newman
-        # run per graph load instead of one per browser render).  Built on top of
-        # the *filtered* graph so colours line up with what's actually displayed.
-        community_graph = _rebuild_networkx_graph(filtered_nodes, filtered_edges)
-        communities = detect_communities(community_graph)
-
+        nodes = sorted(graph_data["nodes"], key=lambda n: graph.degree(n["id"]), reverse=True)[:20]
+        edges = sorted(graph_data["edges"], key=lambda e: e.get("confidence", 0.0), reverse=True)[:50]
+        viz_html = None
+        if include_viz:
+            viz_html = get_html_string(build_pyvis_network(graph)) or None
         return {
-            "graph_status": graph_status,
-            "total_entities": total_entities,
-            "filtered_entities": len(filtered_nodes),
-            "min_confidence": min_confidence,
-            "nodes": filtered_nodes,
-            "edges": filtered_edges,
-            "communities": communities,
-            "community_count": len(set(communities.values())) if communities else 0,
+            "status": "complete",
+            "summary_stats": summary_stats(graph),
+            "nodes": nodes,
+            "edges": edges,
+            "visualization_html": viz_html,
         }
     except HTTPException:
         raise
     except Exception as exc:
         logger.warning("get_investigation_graph failed: %s", exc)
-        return {
-            "nodes": [],
-            "edges": [],
-            "communities": {},
-            "community_count": 0,
-        }
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
-# ---------------------------------------------------------------------------
-# Shortest path between two entities
-# ---------------------------------------------------------------------------
-
-
-async def _find_entity_in_investigation(
-    investigation_id: "uuid.UUID | str",
-    value_or_id: str,
-    session,
-) -> "Any | None":
-    """
-    Resolve an endpoint's ``from`` / ``to`` parameter to an Entity row.
-
-    Accepts either:
-        * a UUID string (looked up directly via Entity.id, scoped to the
-          investigation through InvestigationEntityLink or
-          Entity.investigation_id)
-        * a canonical_value string (case-insensitive match)
-
-    Returns the Entity, or ``None`` if nothing in this investigation matches.
-    """
-    from db.models import Entity, InvestigationEntityLink
-
-    if not value_or_id:
-        return None
-
-    # Try UUID first
+@router.get("/{investigation_id}/graph/stats")
+async def get_investigation_graph_stats(investigation_id: str) -> dict:
     try:
-        ent_uuid = uuid.UUID(str(value_or_id))
-        entity = (
-            session.query(Entity)
-            .join(
-                InvestigationEntityLink,
-                InvestigationEntityLink.entity_id == Entity.id,
-            )
-            .filter(
-                InvestigationEntityLink.investigation_id == investigation_id,
-                Entity.id == ent_uuid,
-            )
-            .first()
-        )
-        if entity is not None:
-            return entity
-    except (ValueError, TypeError):
-        pass
+        inv_uuid = uuid.UUID(investigation_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid investigation ID format")
+    from db.queries import get_investigation_by_id_or_run
+    from db.session import get_session
+    from graph import build_graph_from_db_cached
+    from graph.export import summary_stats
 
-    # Try canonical_value (case-insensitive) — scoped via the link table or
-    # direct investigation_id, because the same canonical value can exist in
-    # multiple investigations.
-    return (
-        session.query(Entity)
-        .outerjoin(
-            InvestigationEntityLink,
-            InvestigationEntityLink.entity_id == Entity.id,
-        )
-        .filter(
-            (
-                (Entity.investigation_id == investigation_id)
-                | (InvestigationEntityLink.investigation_id == investigation_id)
-            ),
-            func.lower(Entity.canonical_value) == str(value_or_id).lower(),
-        )
-        .first()
-    )
+    with get_session() as session:
+        inv = get_investigation_by_id_or_run(session, inv_uuid)
+        if inv is None:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        if getattr(inv, "graph_status", "pending") != "complete":
+            return {"status": "pending"}
+        graph = build_graph_from_db_cached(investigation_id=inv.id)
+    return {"status": "complete", "summary_stats": summary_stats(graph)}
+
+
+@router.get("/{investigation_id}/graph/actor/{node_id}")
+async def get_investigation_graph_actor(investigation_id: str, node_id: str) -> dict:
+    try:
+        inv_uuid = uuid.UUID(investigation_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid investigation ID format")
+    from db.queries import get_investigation_by_id_or_run
+    from db.session import get_session
+    from graph import build_graph_from_db_cached, get_actor_profile
+
+    with get_session() as session:
+        inv = get_investigation_by_id_or_run(session, inv_uuid)
+        if inv is None:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        if getattr(inv, "graph_status", "pending") != "complete":
+            return {"status": "pending"}
+        graph = build_graph_from_db_cached(investigation_id=inv.id)
+    profile = get_actor_profile(graph, node_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Graph node not found")
+    return profile
 
 
 @router.get("/{investigation_id}/graph/path")
 async def get_investigation_graph_path(
     investigation_id: str,
-    from_: str = Query(..., alias="from", description="Source entity: canonical_value or UUID"),
-    to: str = Query(..., description="Target entity: canonical_value or UUID"),
-    max_hops: int = Query(default=6, ge=1, le=20, description="Maximum hops allowed (default 6)"),
-    current_user: CurrentUser = Depends(get_current_user),
+    source: Optional[str] = Query(default=None),
+    target: Optional[str] = Query(default=None),
 ) -> dict:
-    """
-    Shortest path between two entities in the investigation's relationship graph.
-
-    Returns:
-        {
-            "found": bool,
-            "path_length": int | null,   # number of hops
-            "hops": [                    # ordered list, source -> target
-                {
-                    "entity_id": str,    # UUID (may be null when the source/target
-                                         # was matched by canonical_value but the
-                                         # node has no DB row in the investigation)
-                    "node_id": str,      # graph node id (canonical_value or value)
-                    "entity_type": str,
-                    "canonical_value": str,
-                    "confidence": float,
-                    "relationship_to_previous": {  # only present on hops[1:]
-                        "type": str,
-                        "confidence": float,
-                    },
-                },
-                ...
-            ],
-            "from_entity": {...},        # canonical_value + entity_type
-            "to_entity":   {...},
-            "message": str | null,       # populated when found=false
-            "directed": bool,            # true if directed path; false if undirected fallback
-        }
-
-    Auth: requires ownership of the investigation (same pattern as the rest of
-    the investigation endpoints).
-    """
-    if not os.getenv("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="Database not configured")
-
+    if not source or not target:
+        raise HTTPException(status_code=400, detail="source and target are required")
     try:
         inv_uuid = uuid.UUID(investigation_id)
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid investigation ID format")
+    from db.queries import get_investigation_by_id_or_run
+    from db.session import get_session
+    from graph import build_graph_from_db_cached
+    from graph.queries import get_shortest_path
 
-    empty_path_response: dict = {
-        "found": False,
-        "path_length": None,
-        "hops": [],
-        "from_entity": None,
-        "to_entity": None,
-        "message": None,
-        "directed": False,
+    with get_session() as session:
+        inv = get_investigation_by_id_or_run(session, inv_uuid)
+        if inv is None:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        if getattr(inv, "graph_status", "pending") != "complete":
+            return {"status": "pending"}
+        graph = build_graph_from_db_cached(investigation_id=inv.id)
+
+    path = get_shortest_path(graph, source, target)
+    if path is None:
+        return {"status": "complete", "path": None}
+    return {
+        "status": "complete",
+        "path": [n.model_dump() if hasattr(n, "model_dump") else getattr(n, "__dict__", n) for n in path],
     }
 
-    try:
-        import networkx as nx
-        from graph.builder import find_shortest_path, _make_node_id
-        from db.models import (
-            Entity,
-            EntityRelationship,
-            InvestigationEntityLink,
-            Investigation,
-        )
-        from db.session import get_session
-        from db.queries import get_investigation_by_id_or_run
 
-        with get_session() as session:
-            inv = get_investigation_by_id_or_run(session, inv_uuid)
-            if inv is None:
-                raise HTTPException(status_code=404, detail="Investigation not found")
-            if str(inv.user_id) != str(current_user.user.id):
-                raise HTTPException(status_code=403, detail="Forbidden")
-            internal_id = inv.id
-
-            # Resolve both endpoints to Entity rows
-            from_ent = await _find_entity_in_investigation(
-                internal_id, from_, session
-            )
-            to_ent = await _find_entity_in_investigation(
-                internal_id, to, session
-            )
-
-            if from_ent is None:
-                empty_path_response["message"] = f"Source entity not found: {from_!r}"
-                empty_path_response["from_entity"] = {"value": from_}
-                return empty_path_response
-            if to_ent is None:
-                empty_path_response["message"] = f"Target entity not found: {to!r}"
-                empty_path_response["to_entity"] = {"value": to}
-                return empty_path_response
-
-            # Build graph by hand from persisted entities + relationships
-            # (cheaper than re-running the full builder, and matches the
-            # shape ``find_shortest_path`` expects — MultiDiGraph).
-            linked_ids_subq = (
-                session.query(InvestigationEntityLink.entity_id)
-                .filter(InvestigationEntityLink.investigation_id == internal_id)
-                .subquery()
-            )
-            entities = (
-                session.query(Entity)
-                .filter(
-                    (Entity.investigation_id == internal_id)
-                    | Entity.id.in_(linked_ids_subq)
-                )
-                .all()
-            )
-
-            entity_by_id: dict[str, Entity] = {str(e.id): e for e in entities}
-            # node_id (graph) → uuid of the DB entity row
-            node_to_entity_uuid: dict[str, str] = {}
-
-            G = nx.MultiDiGraph()
-            for ent in entities:
-                # Pick the most useful node id: prefer canonical_value, fall back to value.
-                # The graph builder uses the same convention for non-actor entities.
-                page_url = ent.page.url if ent.page else ""
-                nid = _make_node_id(ent.entity_type, ent.value, page_url)
-                G.add_node(
-                    nid,
-                    entity_id=str(ent.id),
-                    entity_type=ent.entity_type,
-                    canonical_value=ent.canonical_value or ent.value,
-                    confidence=float(ent.confidence or 0.0),
-                )
-                node_to_entity_uuid[nid] = str(ent.id)
-
-            # Add persisted relationships
-            relationships = (
-                session.query(EntityRelationship)
-                .filter(EntityRelationship.investigation_id == internal_id)
-                .all()
-            )
-            for rel in relationships:
-                src_uuid = str(rel.entity_a_id)
-                tgt_uuid = str(rel.entity_b_id)
-                if src_uuid not in entity_by_id or tgt_uuid not in entity_by_id:
-                    continue
-                src_node = node_to_entity_uuid.get(src_uuid)
-                tgt_node = node_to_entity_uuid.get(tgt_uuid)
-                if not src_node or not tgt_node or not G.has_node(src_node) or not G.has_node(tgt_node):
-                    continue
-                G.add_edge(
-                    src_node,
-                    tgt_node,
-                    edge_type=rel.relationship_type,
-                    confidence=float(rel.confidence or 0.0),
-                )
-
-            # Determine node ids for source and target. Prefer the node id
-            # matching their canonical_value; fall back to value; finally the
-            # UUID (rare — happens when node_id != canonical_value).
-            def _resolve_node_id(ent: Entity) -> "str | None":
-                # Try the graph builder's exact convention first
-                page_url = ent.page.url if ent.page else ""
-                nid = _make_node_id(ent.entity_type, ent.value, page_url)
-                if G.has_node(nid):
-                    return nid
-                # Then canonical_value as-is
-                cv = ent.canonical_value or ent.value
-                if G.has_node(cv):
-                    return cv
-                # Last resort — UUID itself
-                if G.has_node(str(ent.id)):
-                    return str(ent.id)
-                return None
-
-            source_node = _resolve_node_id(from_ent)
-            target_node = _resolve_node_id(to_ent)
-
-            if source_node is None or target_node is None:
-                empty_path_response["message"] = (
-                    "Endpoint entity is not part of this investigation's graph"
-                )
-                empty_path_response["from_entity"] = {
-                    "entity_id": str(from_ent.id),
-                    "entity_type": from_ent.entity_type,
-                    "canonical_value": from_ent.canonical_value or from_ent.value,
-                }
-                empty_path_response["to_entity"] = {
-                    "entity_id": str(to_ent.id),
-                    "entity_type": to_ent.entity_type,
-                    "canonical_value": to_ent.canonical_value or to_ent.value,
-                }
-                return empty_path_response
-
-            # Try directed first; if it fails, fall back to undirected.
-            directed = True
-            node_path = find_shortest_path(G, source_node, target_node, max_hops)
-            if node_path is None:
-                # try undirected explicitly so we can report which one found it
-                try:
-                    candidate = nx.shortest_path(
-                        G.to_undirected(), source_node, target_node
-                    )
-                    if len(candidate) - 1 <= max_hops:
-                        node_path = candidate
-                        directed = False
-                except (nx.NetworkXNoPath, nx.NodeNotFound):
-                    pass
-
-            if node_path is None:
-                empty_path_response["message"] = (
-                    f"No path found within {max_hops} hops"
-                )
-                empty_path_response["from_entity"] = {
-                    "entity_id": str(from_ent.id),
-                    "entity_type": from_ent.entity_type,
-                    "canonical_value": from_ent.canonical_value or from_ent.value,
-                }
-                empty_path_response["to_entity"] = {
-                    "entity_id": str(to_ent.id),
-                    "entity_type": to_ent.entity_type,
-                    "canonical_value": to_ent.canonical_value or to_ent.value,
-                }
-                return empty_path_response
-
-            # Build the per-hop response with relationship details between
-            # each consecutive pair. For undirected paths we still pick the
-            # highest-confidence edge between each pair (in either direction).
-            hops_out: list[dict] = []
-            for idx, nid in enumerate(node_path):
-                node_data = G.nodes[nid]
-                hop: dict = {
-                    "entity_id": node_data.get("entity_id"),
-                    "node_id": nid,
-                    "entity_type": node_data.get("entity_type", ""),
-                    "canonical_value": node_data.get("canonical_value", nid),
-                    "confidence": float(node_data.get("confidence") or 0.0),
-                }
-                if idx > 0:
-                    prev = node_path[idx - 1]
-                    edge_info = _best_edge_between(G, prev, nid, directed)
-                    hop["relationship_to_previous"] = edge_info
-                hops_out.append(hop)
-
-            return {
-                "found": True,
-                "path_length": len(node_path) - 1,
-                "hops": hops_out,
-                "from_entity": {
-                    "entity_id": str(from_ent.id),
-                    "entity_type": from_ent.entity_type,
-                    "canonical_value": from_ent.canonical_value or from_ent.value,
-                },
-                "to_entity": {
-                    "entity_id": str(to_ent.id),
-                    "entity_type": to_ent.entity_type,
-                    "canonical_value": to_ent.canonical_value or to_ent.value,
-                },
-                "directed": directed,
-                "message": None,
-            }
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("get_investigation_graph_path failed: %s", exc)
-        empty_path_response["message"] = f"Internal error: {exc!s}"[:200]
-        return empty_path_response
+# ---------------------------------------------------------------------------
+# Shortest path between two entities
+# ---------------------------------------------------------------------------
 
 
 def _best_edge_between(
