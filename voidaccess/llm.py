@@ -358,9 +358,17 @@ def _clean_refined_query(raw: str) -> str:
 
     # Step 2 — find the best query line
     candidates = []
+    labelled_query_re = re.compile(
+        r"^(?:refined\s+query|query|search\s+query|final\s+query)\s*[:\-]\s*(.+)$",
+        re.IGNORECASE,
+    )
     for line in raw.splitlines():
         line = line.strip()
         if not line or len(line) < 3:
+            continue
+        labelled = labelled_query_re.match(line)
+        if labelled:
+            candidates.append(labelled.group(1).strip().strip("\"'"))
             continue
         # Reject explanatory sentences (start with preamble phrases)
         if re.match(
@@ -371,6 +379,8 @@ def _clean_refined_query(raw: str) -> str:
             line,
             re.IGNORECASE,
         ):
+            continue
+        if line.endswith(".") and len(line.split()) > _REFINED_QUERY_MAX_WORDS:
             continue
         candidates.append(line)
 

@@ -22,7 +22,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import or_
+from sqlalchemy import or_, select
 
 from api.auth import CurrentUser, get_current_user
 
@@ -88,26 +88,22 @@ def _db_required() -> None:
         raise HTTPException(status_code=503, detail="Database not configured")
 
 
-def _user_owned_investigation_ids_subq(session, user_id: int):
+def _user_owned_investigation_ids_select(user_id: int):
     from db.models import Investigation
 
-    return (
-        session.query(Investigation.id)
-        .filter(Investigation.user_id == user_id)
-        .subquery()
-    )
+    return select(Investigation.id).where(Investigation.user_id == user_id)
 
 
 def _profile_accessible(session, profile_id: str, user_id: int) -> bool:
     """True when at least one investigation linked to the profile is owned by the user."""
     from db.models import ActorAlias, ActorInfrastructure
 
-    inv_ids_subq = _user_owned_investigation_ids_subq(session, user_id)
+    inv_ids_select = _user_owned_investigation_ids_select(user_id)
     alias_match = (
         session.query(ActorAlias.id)
         .filter(
             ActorAlias.actor_id == profile_id,
-            ActorAlias.source_investigation_id.in_(inv_ids_subq),
+            ActorAlias.source_investigation_id.in_(inv_ids_select),
         )
         .first()
     )
@@ -117,7 +113,7 @@ def _profile_accessible(session, profile_id: str, user_id: int) -> bool:
         session.query(ActorInfrastructure.id)
         .filter(
             ActorInfrastructure.actor_id == profile_id,
-            ActorInfrastructure.source_investigation_id.in_(inv_ids_subq),
+            ActorInfrastructure.source_investigation_id.in_(inv_ids_select),
         )
         .first()
     )
@@ -146,8 +142,6 @@ async def list_actors(
     users since the seed is public data.
     """
     _db_required()
-    from sqlalchemy import select
-
     from db.models import (
         ActorProfile,
         ActorAlias,
@@ -156,9 +150,7 @@ async def list_actors(
 
     try:
         with _session() as session:
-            user_inv_ids = _user_owned_investigation_ids_subq(
-                session, current_user.user.id
-            )
+            user_inv_ids = _user_owned_investigation_ids_select(current_user.user.id)
 
             # Subquery of profile IDs visible to this user
             visible_alias = select(ActorAlias.actor_id).where(
@@ -176,13 +168,13 @@ async def list_actors(
             )
             if search:
                 pattern = f"%{search.lower()}%"
-                alias_subq = select(ActorAlias.actor_id).where(
+                alias_select = select(ActorAlias.actor_id).where(
                     ActorAlias.alias_value.ilike(pattern)
                 )
                 q = q.filter(
                     or_(
                         ActorProfile.canonical_handle.ilike(pattern),
-                        ActorProfile.id.in_(alias_subq),
+                        ActorProfile.id.in_(alias_select),
                     )
                 )
 
@@ -313,9 +305,7 @@ async def get_actor_investigations(
 
     try:
         with _session() as session:
-            user_inv_ids = _user_owned_investigation_ids_subq(
-                session, current_user.user.id
-            )
+            user_inv_ids = _user_owned_investigation_ids_select(current_user.user.id)
             all_ids = [
                 uuid_value(s)
                 for s in profile.get("investigation_ids", [])

@@ -34,6 +34,41 @@ from graph.model import EDGE_TYPES, NODE_TYPES
 
 logger = logging.getLogger(__name__)
 
+_CO_OCCURRENCE_MAX_ENTITIES_PER_PAGE = 40
+_CO_OCCURRENCE_MAX_EDGES_PER_PAGE = 120
+_CO_OCCURRENCE_HUB_TYPES = frozenset({
+    "THREAT_ACTOR_HANDLE",
+    "RANSOMWARE_GROUP",
+    "MALWARE_FAMILY",
+    "CVE_NUMBER",
+    "CVE",
+})
+_CO_OCCURRENCE_IOC_TYPES = frozenset({
+    "IP_ADDRESS",
+    "IPV6_ADDRESS",
+    "DOMAIN",
+    "ONION_URL",
+    "EMAIL_ADDRESS",
+    "BITCOIN_ADDRESS",
+    "ETHEREUM_ADDRESS",
+    "MONERO_ADDRESS",
+    "LITECOIN_ADDRESS",
+    "ZCASH_ADDRESS",
+    "DOGECOIN_ADDRESS",
+    "XRP_ADDRESS",
+    "SOLANA_ADDRESS",
+    "TRON_ADDRESS",
+    "BITCOIN_CASH_ADDRESS",
+    "DASH_ADDRESS",
+    "FILE_HASH_MD5",
+    "FILE_HASH_SHA1",
+    "FILE_HASH_SHA256",
+    "MITRE_TECHNIQUE",
+    "EXPLOIT_DB_ID",
+    "YARA_RULE",
+    "NUCLEI_TEMPLATE",
+})
+
 # ---------------------------------------------------------------------------
 # Mapping: extractor entity_type → graph node_type
 # ---------------------------------------------------------------------------
@@ -141,6 +176,80 @@ def _make_node_id(entity_type: str, value: str, source_url: str) -> str:
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _cooccurrence_entity_rank(ent) -> tuple[int, float, str]:
+    etype = (getattr(ent, "entity_type", "") or "").upper()
+    confidence = float(getattr(ent, "confidence", 0.0) or 0.0)
+    if etype in _CO_OCCURRENCE_HUB_TYPES:
+        priority = 0
+    elif etype in _CO_OCCURRENCE_IOC_TYPES:
+        priority = 1
+    else:
+        priority = 2
+    return (priority, -confidence, str(getattr(ent, "id", "")))
+
+
+def _iter_semantic_cooccurrence_pairs(page_entities: list) -> list[tuple]:
+    """
+    Return bounded, analyst-useful co-occurrence pairs for one page.
+
+    We avoid the old all-pairs cartesian behavior. Edges are only emitted
+    between high-signal actor/malware/CVE hubs and technical IOCs; if a page
+    has no hub, we keep a small set of high-confidence technical IOC pairs.
+    """
+    unique: dict[tuple[str, str], object] = {}
+    for ent in page_entities:
+        etype = (getattr(ent, "entity_type", "") or "").upper()
+        value = str(getattr(ent, "value", "") or "").strip().lower()
+        if not etype or not value:
+            continue
+        key = (etype, value)
+        existing = unique.get(key)
+        if existing is None or _cooccurrence_entity_rank(ent) < _cooccurrence_entity_rank(existing):
+            unique[key] = ent
+
+    ranked = sorted(unique.values(), key=_cooccurrence_entity_rank)[:_CO_OCCURRENCE_MAX_ENTITIES_PER_PAGE]
+    hubs = [e for e in ranked if (getattr(e, "entity_type", "") or "").upper() in _CO_OCCURRENCE_HUB_TYPES]
+    iocs = [e for e in ranked if (getattr(e, "entity_type", "") or "").upper() in _CO_OCCURRENCE_IOC_TYPES]
+
+    pairs: list[tuple] = []
+    if hubs:
+        for hub in hubs[:12]:
+            for ioc in iocs[:25]:
+                if getattr(hub, "id", None) == getattr(ioc, "id", None):
+                    continue
+                pairs.append((hub, ioc))
+                if len(pairs) >= _CO_OCCURRENCE_MAX_EDGES_PER_PAGE:
+                    return pairs
+        return pairs
+
+    for ent_a, ent_b in itertools.combinations(iocs[:16], 2):
+        pairs.append((ent_a, ent_b))
+        if len(pairs) >= _CO_OCCURRENCE_MAX_EDGES_PER_PAGE:
+            break
+    return pairs
+
+
+def _is_semantic_cooccurrence_pair(ent_a, ent_b) -> bool:
+    etype_a = (getattr(ent_a, "entity_type", "") or "").upper()
+    etype_b = (getattr(ent_b, "entity_type", "") or "").upper()
+    if not etype_a or not etype_b or getattr(ent_a, "id", None) == getattr(ent_b, "id", None):
+        return False
+    if etype_a in _CO_OCCURRENCE_HUB_TYPES and etype_b in _CO_OCCURRENCE_IOC_TYPES:
+        return True
+    if etype_b in _CO_OCCURRENCE_HUB_TYPES and etype_a in _CO_OCCURRENCE_IOC_TYPES:
+        return True
+    return False
+
+
+def _coerce_uuid_or_none(value) -> uuid.UUID | None:
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -776,10 +885,11 @@ def build_graph_from_db(
                 if ent.page_id:
                     page_entity_map[str(ent.page_id)].append(ent)
 
+            intra_page_edges = 0
             for _page_id, page_entities in page_entity_map.items():
                 if len(page_entities) < 2:
                     continue
-                for ent_a, ent_b in itertools.combinations(page_entities, 2):
+                for ent_a, ent_b in _iter_semantic_cooccurrence_pairs(page_entities):
                     page_url_a = ent_a.page.url if ent_a.page else ""
                     node_id_a = _make_node_id(ent_a.entity_type, ent_a.value, page_url_a)
                     node_id_b = _make_node_id(ent_b.entity_type, ent_b.value, page_url_a)
@@ -796,6 +906,7 @@ def build_graph_from_db(
                         timestamp=_now_utc(),
                         metadata={},
                     )
+                    intra_page_edges += 1
 
             # Second pass: cross-page entity linking
             cross_page_edges = _link_cross_page_entities(graph, all_entities, investigation_id)
@@ -824,20 +935,27 @@ def build_graph_from_db(
                     # Create a map of entity_id -> node_id for easy lookup
                     # Since one entity can appear on multiple pages, we use the first one found or a stable mapping
                     entity_to_node = {}
+                    entity_by_id = {}
                     for ent in all_entities:
                         page_url = ent.page.url if ent.page else ""
                         node_id = _make_node_id(ent.entity_type, ent.value, page_url)
                         if str(ent.id) not in entity_to_node:
                             entity_to_node[str(ent.id)] = node_id
+                            entity_by_id[str(ent.id)] = ent
 
                     all_missing_ids = set()
                     for rel in relationships:
-                        src = str(rel.entity_a_id)
-                        tgt = str(rel.entity_b_id)
+                        src_uuid = _coerce_uuid_or_none(rel.entity_a_id)
+                        tgt_uuid = _coerce_uuid_or_none(rel.entity_b_id)
+                        if src_uuid is None or tgt_uuid is None:
+                            logger.debug("Skipping relationship with non-UUID endpoints: %s", rel.id)
+                            continue
+                        src = str(src_uuid)
+                        tgt = str(tgt_uuid)
                         if src not in entity_to_node:
-                            all_missing_ids.add(rel.entity_a_id)
+                            all_missing_ids.add(src_uuid)
                         if tgt not in entity_to_node:
-                            all_missing_ids.add(rel.entity_b_id)
+                            all_missing_ids.add(tgt_uuid)
 
                     if all_missing_ids:
                         from db.models import Entity as EntityModel
@@ -849,6 +967,7 @@ def build_graph_from_db(
                         )
                         missing_entities = (
                             session.query(EntityModel)
+                            .options(joinedload(EntityModel.page))
                             .filter(EntityModel.id.in_(all_missing_ids))
                             .all()
                         )
@@ -856,6 +975,7 @@ def build_graph_from_db(
                             me_page_url = me.page.url if me.page else ""
                             me_node_id = _make_node_id(me.entity_type, me.value, me_page_url)
                             entity_to_node[str(me.id)] = me_node_id
+                            entity_by_id[str(me.id)] = me
                             if not graph.has_node(me_node_id):
                                 graph.add_node(
                                     me_node_id,
@@ -867,8 +987,20 @@ def build_graph_from_db(
                                 )
 
                     for rel in relationships:
-                        source_node = entity_to_node.get(str(rel.entity_a_id))
-                        target_node = entity_to_node.get(str(rel.entity_b_id))
+                        source_id = _coerce_uuid_or_none(rel.entity_a_id)
+                        target_id = _coerce_uuid_or_none(rel.entity_b_id)
+                        if source_id is None or target_id is None:
+                            continue
+                        rel_type = str(rel.relationship_type or "")
+                        if rel_type == EDGE_TYPES.CO_APPEARED_ON:
+                            ent_a = entity_by_id.get(str(source_id))
+                            ent_b = entity_by_id.get(str(target_id))
+                            if ent_a is None or ent_b is None:
+                                continue
+                            if not _is_semantic_cooccurrence_pair(ent_a, ent_b):
+                                continue
+                        source_node = entity_to_node.get(str(source_id))
+                        target_node = entity_to_node.get(str(target_id))
 
                         if source_node and target_node:
                             # Add the persisted relationship edge
@@ -877,7 +1009,7 @@ def build_graph_from_db(
                                     source_node,
                                     target_node,
                                     key=f"persisted_{rel.id}",
-                                    edge_type=rel.relationship_type,
+                                    edge_type=rel_type,
                                     confidence=rel.confidence,
                                     source_url="",
                                     timestamp=rel.first_seen or _now_utc(),
@@ -897,7 +1029,7 @@ def build_graph_from_db(
                 "skipped_unmapped_entity_types=%s",
                 investigation_id,
                 len(graph.nodes()),
-                len(graph.edges()) - cross_page_edges,
+                intra_page_edges,
                 cross_page_edges,
                 len(graph.edges()),
                 skipped_unmapped,
@@ -939,9 +1071,8 @@ def persist_graph_edges(
     entity_confidence: dict[uuid.UUID, float] = {}
 
     from db.models import InvestigationEntityLink  # noqa: PLC0415
-    # Phase 0 fix: use a JOIN instead of a subquery IN clause to avoid the
-    # SQLAlchemy 2.x ArgumentError that fires when Entity.id.in_(subquery)
-    # receives the subquery's column object rather than a clean scalar list.
+    # Phase 0 fix: use a JOIN for linked entities and avoid ORM coercion
+    # warnings on SQLAlchemy 2.x.
     entities = (
         session.query(Entity)
         .options(joinedload(Entity.page))

@@ -672,27 +672,27 @@ def _get_db_investigation(investigation_id: str) -> Any:
             )
 
             # Entity IDs for this investigation = own entities + junction-table links
-            linked_ids_subq = (
-                session.query(InvestigationEntityLink.entity_id)
-                .filter(InvestigationEntityLink.investigation_id == inv.id)
-                .subquery()
+            linked_ids_select = (
+                sa_select(InvestigationEntityLink.entity_id)
+                .where(InvestigationEntityLink.investigation_id == inv.id)
             )
             entity_subq = (
                 session.query(Entity.id)
                 .filter(
                     (Entity.investigation_id == inv.id)
-                    | Entity.id.in_(linked_ids_subq)
+                    | Entity.id.in_(linked_ids_select)
                 )
                 .subquery()
             )
+            entity_ids_select = sa_select(entity_subq.c.id)
             entity_count = int(
                 session.query(func.count()).select_from(entity_subq).scalar() or 0
             )
             relationship_count = int(
                 session.query(func.count(EntityRelationship.id))
                 .filter(
-                    (EntityRelationship.entity_a_id.in_(entity_subq))
-                    | (EntityRelationship.entity_b_id.in_(entity_subq))
+                    (EntityRelationship.entity_a_id.in_(entity_ids_select))
+                    | (EntityRelationship.entity_b_id.in_(entity_ids_select))
                 )
                 .scalar()
                 or 0
@@ -2673,14 +2673,13 @@ async def get_investigation_entities(
             if str(inv.user_id) != str(current_user.user.id):
                 raise HTTPException(status_code=403, detail="Forbidden")
 
-            linked_ids_subq = (
-                session.query(InvestigationEntityLink.entity_id)
-                .filter(InvestigationEntityLink.investigation_id == inv.id)
-                .subquery()
+            linked_ids_select = (
+                sa_select(InvestigationEntityLink.entity_id)
+                .where(InvestigationEntityLink.investigation_id == inv.id)
             )
             query = session.query(Entity).filter(
                 (Entity.investigation_id == inv.id)
-                | Entity.id.in_(linked_ids_subq)
+                | Entity.id.in_(linked_ids_select)
             )
             if entity_type:
                 query = query.filter(Entity.entity_type == entity_type)
@@ -2800,16 +2799,15 @@ async def export_investigation_entities_csv(
             if str(inv.user_id) != str(current_user.user.id):
                 raise HTTPException(status_code=403, detail="Forbidden")
 
-            linked_ids_subq = (
-                session.query(InvestigationEntityLink.entity_id)
-                .filter(InvestigationEntityLink.investigation_id == inv.id)
-                .subquery()
+            linked_ids_select = (
+                sa_select(InvestigationEntityLink.entity_id)
+                .where(InvestigationEntityLink.investigation_id == inv.id)
             )
             entities = (
                 session.query(Entity)
                 .filter(
                     (Entity.investigation_id == inv.id)
-                    | Entity.id.in_(linked_ids_subq)
+                    | Entity.id.in_(linked_ids_select)
                 )
                 .all()
             )

@@ -623,6 +623,11 @@ ENTITY_BLOCKLIST: frozenset[str] = frozenset({
     "moderator", "administrator", "operator", "staff", "support",
     "customer", "vendor", "buyer", "seller", "trader",
     "dropper", "loader", "stager", "payload", "beacon",
+    # Audit-confirmed NER false positives (1.6.2, 1.7.0, 1.7.1).
+    "asks", "keyword", "sends", "input", "content", "delivery", "into",
+    "submits", "advertising", "attempts", "pass", "consent", "devices",
+    "stdin", "stdout", "detect", "uri_regex:1", "intel", "passive",
+    "commands",
 })
 
 KNOWN_TOOLS: frozenset[str] = frozenset({
@@ -633,7 +638,15 @@ KNOWN_TOOLS: frozenset[str] = frozenset({
     "kali", "parrot", "blackarch", "backtrack",
 })
 
+COMMON_THREAT_TERMS: frozenset[str] = frozenset({
+    "apt41", "apt28", "apt29", "fin7", "fin8", "lockbitsupp",
+    "scatteredspider", "lazarus", "sandworm", "blackcat", "alphv",
+})
+
 LEET_GENERIC = re.compile(r"^h[4a][ck]+[3e]?r?$")
+HANDLE_SHAPE_RE = re.compile(
+    r"^(?:[A-Z]{2,}\d{1,3}|[A-Za-z]+[A-Z][A-Za-z0-9]*|[A-Za-z0-9]+[_\-.][A-Za-z0-9_.-]+|[A-Za-z]+\d+[A-Za-z0-9]*)$"
+)
 
 
 ENTITY_MIN_LENGTH: dict[str, int] = {
@@ -723,6 +736,13 @@ def is_blocked_entity(entity_type: str, entity_value: str) -> bool:
             return True
         if LEET_GENERIC.match(value_lower):
             return True
+        if value_lower in COMMON_THREAT_TERMS:
+            return False
+        if re.fullmatch(r"[a-z]+", value_lower) and not HANDLE_SHAPE_RE.match(entity_value.strip()):
+            return True
+
+    if entity_type == "ORGANIZATION_NAME" and value_lower in ENTITY_BLOCKLIST:
+        return True
 
     min_len = ENTITY_MIN_LENGTH.get(entity_type, 3)
     if len(value_lower) < min_len:
@@ -868,13 +888,87 @@ _ORG_NOISE_RE = re.compile(
     r'|[<>{}\[\]|\\]',
     re.IGNORECASE,
 )
+_HTML_ENTITY_RE = re.compile(r"&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);?", re.IGNORECASE)
+_DECODED_HTML_UI_RE = re.compile(r"[\u2190-\u21ff\u00ae\u00a9\u2122]")
+_ORG_SENTENCE_WORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "how", "cancel", "reply", "post", "posts", "latest",
+    "popular", "tutorial", "tutorials", "guide", "home", "news", "security",
+    "advertisement", "advertising", "speaking", "subscribe", "mailing",
+    "list", "leave", "recent", "author", "actively", "exploited", "analyzing",
+    "targeted", "intrusions", "through", "stay", "upcoming", "seizes",
+    "related", "articles", "dummies", "vulnerability", "date", "added",
+    "expands", "leadership", "approach", "radar", "supply", "chain",
+    "compromise", "commercial", "live", "proxies", "software", "office",
+    "oauth", "os", "application", "server", "protect", "sharepoint",
+    "tv", "stealer", "stack", "protection", "organization", "redacted",
+    "organizations", "are", "building", "achieves", "patches", "moves",
+    "contact", "rule", "addition", "activated", "scale", "automation",
+    "algorithmic", "payload", "decomposition", "third-party", "third",
+    "party", "additional", "resources", "learn", "join", "dll",
+    "sideloading", "factory", "malware", "threat", "research", "tags",
+    "copilot", "next-gen", "xmrig", "authenticode", "updatefactor",
+    "coldfusion", "falcon", "openid", "overwatch", "analysis", "table",
+    "antimalware", "scan", "interface", "bypass", "static", "file-size",
+    "inflation", "loaders", "data", "exe", "getassertion",
+    "getcredentials", "imphash", "cluster", "role", "remote", "desktop",
+    "protocol", "sha-256", "webauthn", "yubikey", "systemagentservice",
+    "chromium", "clientdatahash", "gift", "card", "fraud", "macos",
+    "linux", "tools", "typescript", "webassembly", "webhid",
+    "ai-hallucinated", "hallucinated", "domains", "comparison", "llm",
+    "dataset", "jaccard", "multi-signal", "risk", "classification",
+    "share", "executive", "summary", "temperature", "configuration",
+    "account", "numbers", "balanced", "llm2", "briefs",
+})
+_ORG_ALLOWED_CONNECTORS: frozenset[str] = frozenset({
+    "and", "of", "for", "to", "in", "on", "with",
+})
+_ORG_SUFFIX_HINTS: frozenset[str] = frozenset({
+    "agency", "bank", "bureau", "center", "centre", "committee", "company",
+    "corp", "corporation", "council", "department", "directorate", "division",
+    "foundation", "gmbh", "group", "inc", "institute", "labs", "limited",
+    "llc", "ltd", "networks", "team", "technologies", "university", "union",
+})
 
 
 def _is_valid_org_name(value: str) -> bool:
     v = value.strip()
+    v_lower = v.lower()
+    if v_lower in ENTITY_BLOCKLIST:
+        return False
     if len(v) < 3 or len(v) > 60:
         return False
-    if len(v.split()) > 5:
+    if re.search(r"[:,/()]", v):
+        return False
+    if re.search(r"\.[a-z0-9]{2,5}\b", v_lower):
+        return False
+    if re.search(r"\d{1,2}/\d{1,2}/\d{2,4}", v):
+        return False
+    if _HTML_ENTITY_RE.search(v) or _DECODED_HTML_UI_RE.search(v):
+        return False
+    if re.search(r"\b[a-z]+['\u2019]\w*\b", v_lower):
+        return False
+    tokens = re.findall(r"[a-z0-9]+(?:[-.][a-z0-9]+)*", v_lower)
+    if not tokens:
+        return False
+    if any(token.isdigit() for token in tokens):
+        return False
+    if any(token == "cve" or token.startswith("cve-") for token in tokens):
+        return False
+    if len(tokens) > 4:
+        return False
+    if "-" in v and not any(token in _ORG_SUFFIX_HINTS for token in tokens):
+        return False
+    if any(token in _ORG_SENTENCE_WORDS for token in tokens):
+        return False
+    word_tokens = [token for token in tokens if re.search(r"[a-z]", token)]
+    if len(word_tokens) > 1:
+        generic_words = [
+            token for token in word_tokens
+            if token in ENTITY_BLOCKLIST or token in _ORG_ALLOWED_CONNECTORS
+        ]
+        if len(generic_words) >= len(word_tokens):
+            return False
+    if re.fullmatch(r"[A-Z_]+:?\d*", v) and v_lower not in COMMON_THREAT_TERMS:
         return False
     if _ORG_NOISE_RE.search(v):
         return False

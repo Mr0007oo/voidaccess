@@ -752,7 +752,7 @@ def search_actor_profiles(query: str, limit: int = 20) -> list[dict[str, Any]]:
 
     pattern = f"%{query.lower()}%"
     with get_session() as session:
-        alias_subq = (
+        alias_select = (
             select(ActorAlias.actor_id)
             .where(ActorAlias.alias_value.ilike(pattern))
         )
@@ -760,7 +760,7 @@ def search_actor_profiles(query: str, limit: int = 20) -> list[dict[str, Any]]:
             session.query(ActorProfile)
             .filter(
                 (ActorProfile.canonical_handle.ilike(pattern))
-                | (ActorProfile.id.in_(alias_subq))
+                | (ActorProfile.id.in_(alias_select))
             )
             .order_by(ActorProfile.last_seen_at.desc().nullslast())
             .limit(limit)

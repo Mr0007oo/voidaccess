@@ -2,6 +2,18 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [1.7.2] - 2026-07-08
+### Fixed
+- STIX relationship generation now avoids near-quadratic same-page edge explosions by emitting bounded semantic co-occurrence edges instead of every pair on a page.
+- Persistent relationship loading now skips malformed non-UUID endpoints before graph hydration, preventing UUID coercion crashes during STIX export.
+- THREAT_ACTOR_HANDLE and ORGANIZATION_NAME NER noise from repeated audits is filtered before persistence, including the confirmed generic security/programming vocabulary false positives.
+- MISP, Sigma, API, and shared DB query paths now use explicit SQLAlchemy select constructs instead of passing subquery objects into `.in_()`.
+- Optional configuration warnings are summarized once per process instead of printing a repeated warning wall.
+- Refined query persistence now strips labelled/chatty LLM responses down to the actual short search query.
+
+### Changed
+- Tor result-count variance was reassessed as environmental network/search-engine flakiness for this pass; no code change was made for that item.
+
 ## [1.7.1] - 2026-07-07
 ### Fixed
 - STIX export was silently producing an empty 82-byte bundle (regression from 1.6.3's working fix); now produces real bundles with entities and relationships

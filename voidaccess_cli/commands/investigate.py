@@ -1004,38 +1004,41 @@ def _build_cooccurrence_edges(investigation_id: str) -> int:
     try:
         from db.models import Entity
         from db.session import get_session
+        from sqlalchemy.orm import joinedload
     except Exception:
         return 0
+    from graph.builder import _iter_semantic_cooccurrence_pairs
     from voidaccess_cli.adapters.sqlite import save_relationships
 
     edges: list[dict] = []
     inv_uuid = uuid.UUID(investigation_id)
 
     with get_session() as session:
-        rows = (
-            session.query(Entity.id, Entity.page_id)
+        rows = list(
+            session.query(Entity)
+            .options(joinedload(Entity.page))
             .filter(Entity.investigation_id == inv_uuid)
             .all()
         )
-    by_page: dict[uuid.UUID, list[uuid.UUID]] = {}
-    for ent_id, page_id in rows:
+    by_page: dict[uuid.UUID, list] = {}
+    for ent in rows:
+        page_id = getattr(ent, "page_id", None)
         if page_id is None:
             continue
-        by_page.setdefault(page_id, []).append(ent_id)
+        by_page.setdefault(page_id, []).append(ent)
 
-    for ents in by_page.values():
-        if len(ents) < 2:
+    for page_entities in by_page.values():
+        if len(page_entities) < 2:
             continue
-        for i in range(len(ents)):
-            for j in range(i + 1, len(ents)):
-                edges.append(
-                    {
-                        "entity_a_id": str(ents[i]),
-                        "entity_b_id": str(ents[j]),
-                        "relationship_type": "CO_APPEARED_ON",
-                        "confidence": 0.8,
-                    }
-                )
+        for ent_a, ent_b in _iter_semantic_cooccurrence_pairs(page_entities):
+            edges.append(
+                {
+                    "entity_a_id": str(ent_a.id),
+                    "entity_b_id": str(ent_b.id),
+                    "relationship_type": "CO_APPEARED_ON",
+                    "confidence": 0.8,
+                }
+            )
     return save_relationships(investigation_id, edges)
 
 

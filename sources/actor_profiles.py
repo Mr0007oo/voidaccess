@@ -792,7 +792,7 @@ class ActorProfileManager:
         from db.models import ActorProfile, ActorAlias
 
         with self._session_scope() as session:
-            alias_subq = (
+            alias_select = (
                 select(ActorAlias.actor_id)
                 .where(ActorAlias.alias_value.ilike(pattern))
             )
@@ -800,7 +800,7 @@ class ActorProfileManager:
                 session.query(ActorProfile)
                 .filter(
                     (ActorProfile.canonical_handle.ilike(pattern))
-                    | (ActorProfile.id.in_(alias_subq))
+                    | (ActorProfile.id.in_(alias_select))
                 )
                 .order_by(ActorProfile.last_seen_at.desc().nullslast())
                 .limit(50)

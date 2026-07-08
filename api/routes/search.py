@@ -138,14 +138,12 @@ async def search_entities(
 
         with get_session() as session:
             user_inv_ids = (
-                session.query(Investigation.id)
-                .filter(Investigation.user_id == current_user.user.id)
-                .subquery()
+                sa.select(Investigation.id)
+                .where(Investigation.user_id == current_user.user.id)
             )
             linked_entity_ids = (
-                session.query(InvestigationEntityLink.entity_id)
-                .filter(InvestigationEntityLink.investigation_id.in_(user_inv_ids))
-                .subquery()
+                sa.select(InvestigationEntityLink.entity_id)
+                .where(InvestigationEntityLink.investigation_id.in_(user_inv_ids))
             )
             q = session.query(Entity).filter(
                 sa.or_(

@@ -19,6 +19,7 @@ ExtractionResult is a dataclass exported through extractor/__init__.py.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -175,6 +176,13 @@ def _type_priority(entity_type: str) -> int:
             return priority
     return 99
 
+
+def _clean_text_for_extraction(text: str) -> str:
+    """Decode HTML entities before regex/NER/LLM extraction sees page text."""
+    if not text:
+        return ""
+    return html.unescape(text)
+
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
@@ -231,6 +239,7 @@ async def extract_entities_from_page(
     by regex, or below the top-N priority cut).
     """
     errors: list[str] = []
+    page_text = _clean_text_for_extraction(page_text or "")
 
     # -----------------------------------------------------------------------
     # Stage 1 — Regex

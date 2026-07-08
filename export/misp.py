@@ -192,16 +192,15 @@ def _load_investigation_and_entities(
             if investigation is None:
                 return None, []
 
-            linked_ids_subq = (
+            linked_ids_select = (
                 session.query(InvestigationEntityLink.entity_id)
                 .filter(InvestigationEntityLink.investigation_id == investigation.id)
-                .subquery()
             )
             db_entities = (
                 session.query(Entity)
                 .filter(
                     (Entity.investigation_id == investigation.id)
-                    | Entity.id.in_(linked_ids_subq)
+                    | Entity.id.in_(linked_ids_select)
                 )
                 .all()
             )

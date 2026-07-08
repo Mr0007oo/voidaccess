@@ -63,6 +63,9 @@ _STIX_PATTERNS: dict[str, str] = {
     "ETHEREUM_ADDRESS":  "[cryptocurrency-wallet:address = '{value}']",
     "MONERO_ADDRESS":    "[cryptocurrency-wallet:address = '{value}']",
     "EMAIL_ADDRESS":     "[email-message:from_ref.value = '{value}']",
+    "FILE_HASH_MD5":     "[file:hashes.MD5 = '{value}']",
+    "FILE_HASH_SHA1":    "[file:hashes.'SHA-1' = '{value}']",
+    "FILE_HASH_SHA256":  "[file:hashes.'SHA-256' = '{value}']",
     "ONION_URL":         "[url:value = '{value}']",
     "IP_ADDRESS":        "[ipv4-addr:value = '{value}']",
     "CVE_NUMBER":        "[vulnerability:name = '{value}']",
@@ -110,6 +113,8 @@ def entity_to_stix_indicator(entity: Any) -> Optional[Any]:
     if etype in ("MALWARE_FAMILY", "RANSOMWARE_GROUP"):
         indicator_types = ["malicious-activity"]
     elif etype in ("BITCOIN_ADDRESS", "ETHEREUM_ADDRESS", "MONERO_ADDRESS"):
+        indicator_types = ["malicious-activity"]
+    elif etype in ("FILE_HASH_MD5", "FILE_HASH_SHA1", "FILE_HASH_SHA256"):
         indicator_types = ["malicious-activity"]
     elif etype in ("IP_ADDRESS", "ONION_URL"):
         indicator_types = ["malicious-activity"]
@@ -424,6 +429,7 @@ def _build_stix_relationships(
         graph = build_graph_from_db(investigation_id=inv_uuid)
 
         relationships: list[Any] = []
+        seen_relationships: set[tuple[str, str, str]] = set()
         for source_node, target_node, data in graph.edges(data=True):
             src_stix_id = stix_id_map.get(source_node)
             tgt_stix_id = stix_id_map.get(target_node)
@@ -432,6 +438,10 @@ def _build_stix_relationships(
             edge_type = data.get("edge_type", "related-to")
             # Map VoidAccess edge types to STIX relationship types
             rel_type = _edge_type_to_stix(edge_type)
+            relationship_key = (rel_type, src_stix_id, tgt_stix_id)
+            if relationship_key in seen_relationships:
+                continue
+            seen_relationships.add(relationship_key)
             try:
                 rel = stix2.Relationship(
                     relationship_type=rel_type,

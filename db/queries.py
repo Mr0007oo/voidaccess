@@ -69,16 +69,15 @@ def count_distinct_pages_for_investigation(
     junction table (deduped entities from previous investigations re-linked here).
     """
     from db.models import InvestigationEntityLink  # noqa: PLC0415
-    linked_ids_subq = (
-        session.query(InvestigationEntityLink.entity_id)
-        .filter(InvestigationEntityLink.investigation_id == investigation_id)
-        .subquery()
+    linked_ids_select = (
+        sa.select(InvestigationEntityLink.entity_id)
+        .where(InvestigationEntityLink.investigation_id == investigation_id)
     )
     n = (
         session.query(sa.func.count(sa.distinct(Entity.page_id)))
         .filter(
             (Entity.investigation_id == investigation_id)
-            | Entity.id.in_(linked_ids_subq)
+            | Entity.id.in_(linked_ids_select)
         )
         .scalar()
     )

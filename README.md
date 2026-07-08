@@ -19,11 +19,12 @@ Commercial threat intelligence platforms often charge prohibitive annual fees fo
 
 ---
 
-## What's New in v1.7.1
-- STIX export now produces real bundles with entities and relationships again.
-- Entity extraction on CVE/financial queries now returns the expected entity mix instead of collapsing to organization-name noise.
-- Confidence scores now show multi-value spread that reflects source quality, extraction method, and corroboration.
-- Entity readback now includes rows linked through `InvestigationEntityLink` and dedupes canonical collisions correctly.
+## What's New in v1.7.2
+- STIX export relationship generation is bounded and semantic, avoiding page-level cartesian edge explosions at larger entity counts.
+- Repeated NER false positives for threat actor handles and organization names are filtered before persistence.
+- MISP/Sigma/API query paths no longer use the SQLAlchemy subquery-in-`IN()` pattern that produced warnings.
+- Optional configuration warnings are summarized once per process.
+- Refined LLM query output is persisted as a short search string, not explanatory Markdown.
 
 ---
 
@@ -499,5 +500,4 @@ To report a security vulnerability, see [docs/SECURITY.md](docs/SECURITY.md).
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
-
 

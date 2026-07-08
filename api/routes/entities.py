@@ -57,14 +57,12 @@ async def list_entities(
 
         with get_session() as session:
             user_inv_ids = (
-                session.query(Investigation.id)
-                .filter(Investigation.user_id == current_user.user.id)
-                .subquery()
+                sa.select(Investigation.id)
+                .where(Investigation.user_id == current_user.user.id)
             )
             linked_entity_ids = (
-                session.query(InvestigationEntityLink.entity_id)
-                .filter(InvestigationEntityLink.investigation_id.in_(user_inv_ids))
-                .subquery()
+                sa.select(InvestigationEntityLink.entity_id)
+                .where(InvestigationEntityLink.investigation_id.in_(user_inv_ids))
             )
             q = session.query(Entity).filter(
                 sa.or_(
@@ -749,14 +747,12 @@ def _assert_entity_accessible(session, entity_id: uuid.UUID, user_id: int) -> No
     from db.models import Entity, Investigation, InvestigationEntityLink  # noqa: PLC0415
 
     user_inv_ids = (
-        session.query(Investigation.id)
-        .filter(Investigation.user_id == user_id)
-        .subquery()
+        sa.select(Investigation.id)
+        .where(Investigation.user_id == user_id)
     )
     linked_entity_ids = (
-        session.query(InvestigationEntityLink.entity_id)
-        .filter(InvestigationEntityLink.investigation_id.in_(user_inv_ids))
-        .subquery()
+        sa.select(InvestigationEntityLink.entity_id)
+        .where(InvestigationEntityLink.investigation_id.in_(user_inv_ids))
     )
     accessible = (
         session.query(Entity.id)

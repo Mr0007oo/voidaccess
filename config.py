@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+_OPTIONAL_CONFIG_WARNING_SHOWN = False
 
 
 def _clean_env(name, default=None):
@@ -183,19 +184,24 @@ OPTIONAL_KEYS = [
 
 
 def validate_config():
+    global _OPTIONAL_CONFIG_WARNING_SHOWN
     missing_required = []
     for key in REQUIRED_KEYS:
         if _clean_env(key) is None:
             missing_required.append(key)
     if missing_required:
         raise RuntimeError(f"Missing required configuration keys: {', '.join(missing_required)}")
-    for key in OPTIONAL_KEYS:
-        val = _clean_env(key)
-        if val is None or val == "":
-            logger.warning(
-                "Optional configuration key '%s' is not set - related features will be disabled",
-                key,
-            )
+    missing_optional = [
+        key for key in OPTIONAL_KEYS
+        if (_clean_env(key) is None or _clean_env(key) == "")
+    ]
+    if missing_optional and not _OPTIONAL_CONFIG_WARNING_SHOWN:
+        logger.warning(
+            "Optional configuration keys not set (%d): %s - related features will be disabled",
+            len(missing_optional),
+            ", ".join(missing_optional),
+        )
+        _OPTIONAL_CONFIG_WARNING_SHOWN = True
 
 
 validate_config()
