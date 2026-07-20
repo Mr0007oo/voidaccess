@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 # Colors
 RED=$'\033[0;31m'
@@ -16,7 +17,7 @@ NC=$'\033[0m'
 if ! docker info > /dev/null 2>&1; then
     if sudo docker info > /dev/null 2>&1; then
         printf "\n  ${YELLOW}⚠${NC}  Docker needs sudo.\n"
-        printf "  ${DIM}→${NC}  Run: ${BOLD}sudo bash start.sh${NC}\n\n"
+        printf "  ${DIM}→${NC}  Run: ${BOLD}sudo bash scripts/start.sh${NC}\n\n"
         exit 1
     else
         printf "\n  ${RED}✗${NC}  Docker not running.\n"
@@ -25,7 +26,7 @@ if ! docker info > /dev/null 2>&1; then
 fi
 
 # .env check
-if [ ! -f "$SCRIPT_DIR/.env" ]; then
+if [ ! -f "$REPO_ROOT/.env" ]; then
     printf "\n  ${RED}✗${NC}  No .env found.\n"
     printf "  ${DIM}→${NC}  Run setup first: "
     printf "${BOLD}bash setup.sh${NC}\n\n"
@@ -34,10 +35,8 @@ fi
 
 # Auto-detect compose file (absolute path so docker compose finds it
 # regardless of where the user invoked the script from)
-if [ -f "$SCRIPT_DIR/infra/docker-compose.yml" ]; then
-    COMPOSE_FILE="$SCRIPT_DIR/infra/docker-compose.yml"
-elif [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
-    COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+if [ -f "$REPO_ROOT/docker-compose.yml" ]; then
+    COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
 else
     printf "\n  ${RED}✗${NC}  docker-compose.yml not found\n\n"
     exit 1
@@ -48,8 +47,8 @@ fi
 # the variables (POSTGRES_PASSWORD, JWT_SECRET, etc.) always reach containers
 # even if the user invokes start.sh from outside the repo root.
 COMPOSE_CMD="docker compose -f $COMPOSE_FILE \
-    --project-directory $SCRIPT_DIR \
-    --env-file $SCRIPT_DIR/.env"
+    --project-directory $REPO_ROOT \
+    --env-file $REPO_ROOT/.env"
 
 # Banner
 printf "\n"

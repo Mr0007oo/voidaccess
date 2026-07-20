@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # VoidAccess — stop the full stack.
-# Usage: ./stop.sh
+# Usage: ./scripts/stop.sh
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
@@ -25,7 +26,7 @@ printf "${NC}\n"
 if ! docker info > /dev/null 2>&1; then
     if sudo docker info > /dev/null 2>&1; then
         printf "\n  ${YELLOW}⚠${NC}  Docker requires sudo on this system.\n"
-        printf "  ${DIM}→${NC}  Re-run with: ${BOLD}sudo bash stop.sh${NC}\n\n"
+        printf "  ${DIM}→${NC}  Re-run with: ${BOLD}sudo bash scripts/stop.sh${NC}\n\n"
         exit 1
     else
         printf "\n  ${RED}✗${NC}  Docker not found or not running.\n"
@@ -36,11 +37,11 @@ fi
 
 printf "  ${DIM}→${NC}  Stopping containers...\n"
 ENV_ARG=""
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    ENV_ARG="--env-file $SCRIPT_DIR/.env"
+if [ -f "$REPO_ROOT/.env" ]; then
+    ENV_ARG="--env-file $REPO_ROOT/.env"
 fi
-docker compose -f "$SCRIPT_DIR/infra/docker-compose.yml" \
-    --project-directory "$SCRIPT_DIR" \
+docker compose -f "$REPO_ROOT/docker-compose.yml" \
+    --project-directory "$REPO_ROOT" \
     $ENV_ARG \
     down > /dev/null 2>&1
 printf "  ${GREEN}✓${NC}  All services stopped\n"
