@@ -1,0 +1,149 @@
+name: Mirror KatrielMoses voidaccess
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: aimap-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout your repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Clone upstream repository
+        run: |
+          git clone https://github.com/KatrielMoses/voidaccess.git /tmp/upstream
+
+      - name: Backup local workflows
+        run: |
+          mkdir -p /tmp/workflows
+
+          if [ -d ".github/workflows" ]; then
+            cp -r .github/workflows /tmp/workflows/
+          fi
+
+          if [ -f ".github/FUNDING.yml" ]; then
+            cp .github/FUNDING.yml /tmp/FUNDING.yml
+          fi
+
+          if [ -f ".github/CODEOWNERS" ]; then
+            cp .github/CODEOWNERS /tmp/CODEOWNERS
+          fi
+
+          if [ -f ".github/dependabot.yml" ]; then
+            cp .github/dependabot.yml /tmp/dependabot.yml
+          fi
+
+      - name: Sync repository
+        run: |
+          rsync -a --delete \
+            --exclude=".git" \
+            --exclude=".github/workflows" \
+            --exclude=".github/FUNDING.yml" \
+            --exclude=".github/CODEOWNERS" \
+            --exclude=".github/dependabot.yml" \
+            /tmp/upstream/ .
+
+      - name: Restore preserved files
+        run: |
+
+          mkdir -p .github
+
+          if [ -d "/tmp/workflows/workflows" ]; then
+            rm -rf .github/workflows
+            cp -r /tmp/workflows/workflows .github/
+          fi
+
+          if [ -f "/tmp/FUNDING.yml" ]; then
+            cp /tmp/FUNDING.yml .github/FUNDING.yml
+          fi
+
+          if [ -f "/tmp/CODEOWNERS" ]; then
+            cp /tmp/CODEOWNERS .github/CODEOWNERS
+          fi
+
+          if [ -f "/tmp/dependabot.yml" ]; then
+            cp /tmp/dependabot.yml .github/dependabot.yml
+          fi
+
+      - name: Mirror Tags
+        run: |
+          cd /tmp/upstream
+          git fetch --tags
+
+          cd "$GITHUB_WORKSPACE"
+
+          git remote remove upstream || true
+          git remote add upstream https://github.com/KatrielMoses/voidaccess.git
+
+          git fetch upstream --tags
+
+          for tag in $(git tag); do
+            git tag -f "$tag" "refs/tags/$tag" || true
+          done
+
+      - name: Detect changes
+        id: changes
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit changes
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+
+          git add .
+
+          git add -A
+
+          git commit -m "Mirror KatrielMoses/voidaccess ($(date -u +"%Y-%m-%d %H:%M UTC"))"
+
+      - name: Push mirror
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git push origin main
+
+          git push origin --tags
+
+      - name: Trigger Docker workflow
+        if: steps.changes.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "docker.yml",
+              ref: "main"
+            })
+
+      - name: Done
+        run: |
+          echo "Mirror Complete."
+          echo "Changed: ${{ steps.changes.outputs.changed }}"
