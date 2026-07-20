@@ -1,4 +1,4 @@
-# VoidAccess Technical Reference
+# VoidAccess Architecture and Technical Reference
 
 This document describes the current state of the VoidAccess codebase. It is intended for community contributors, security researchers integrating VoidAccess into existing workflows, and developers building on top of the platform.
 
@@ -27,7 +27,7 @@ This document describes the current state of the VoidAccess codebase. It is inte
 
 ### 1.1 Docker Services
 
-Four services compose the stack (`infra/docker-compose.yml`):
+Four services compose the stack ([`docker-compose.yml`](../docker-compose.yml)):
 
 | Service | Image / Build | Host Port | Role |
 |---|---|---|---|

@@ -290,3 +290,14 @@ chroma_db/
 coverage/
 *.pytest_tmp
 cti_data/enterprise-attack.json
+
+# Generated investigation/export artifacts
+/stix-*.json
+/misp-*.json
+/package-*.zip
+/test_out.txt
+/_check_entities*.py
+/.tmp/
+/.test_venv/
+/.venv-verify-*/
+/pip/

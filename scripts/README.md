@@ -7,7 +7,7 @@ Utility scripts for managing the VoidAccess stack. These are not required for no
 ### `import_seed.py`
 Populates the database with seed threat intelligence data on first run. Called automatically by `docker-entrypoint.sh` when the database is empty. Run manually inside the container if you need to re-seed:
 ```bash
-docker compose -f infra/docker-compose.yml exec fastapi python scripts/import_seed.py
+docker compose exec fastapi python scripts/import_seed.py
 ```
 
 ### `download_seed.py`
@@ -16,7 +16,7 @@ Downloads the seed dataset from the configured source before importing. Run this
 ### `reset_password.py`
 Admin CLI to reset a user's password directly in the database. Run inside the container:
 ```bash
-docker compose -f infra/docker-compose.yml exec fastapi python scripts/reset_password.py <email> <new_password>
+docker compose exec fastapi python scripts/reset_password.py <email> <new_password>
 ```
 
 ### `health_check.py`

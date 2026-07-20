@@ -72,7 +72,7 @@ echo.
 echo   %BOLD%What would you like to do?%NC%
 echo.
 echo   %CYAN%[1]%NC% %BOLD%Start VoidAccess%NC%  %DIM%-- use existing config%NC%
-echo       Skips configuration and runs %BOLD%start.bat%NC%.
+echo       Skips configuration and runs %BOLD%scripts\start.bat%NC%.
 echo       %DIM%Choose this if your setup was working before.%NC%
 echo.
 echo   %CYAN%[2]%NC% %BOLD%Reset and reconfigure%NC%  %DIM%-- clean slate%NC%
@@ -95,9 +95,9 @@ goto PREFLIGHT_PROMPT
 
 :PREFLIGHT_START
 echo.
-echo %DIM%   -^>%NC%  Handing off to start.bat...
+echo %DIM%   -^>%NC%  Handing off to scripts\start.bat...
 echo.
-call "%~dp0start.bat"
+call "%~dp0scripts\start.bat"
 exit /b !errorlevel!
 
 :PREFLIGHT_RESET
@@ -114,7 +114,7 @@ if /i not "!RESET_CONFIRM!"=="y" (
     goto PREFLIGHT_PROMPT
 )
 echo %DIM%   -^>%NC%  Resetting...
-docker compose -f "%~dp0infra\docker-compose.yml" --project-directory "%~dp0" down -v >nul 2>&1
+docker compose -f "%~dp0docker-compose.yml" --project-directory "%~dp0" down -v >nul 2>&1
 docker rm -f voidaccess-postgres voidaccess-tor voidaccess-fastapi voidaccess-nextjs >nul 2>&1
 docker volume rm -f voidaccess_postgres_data voidaccess_chroma_data voidaccess_monitors_data voidaccess_tor_data >nul 2>&1
 if exist "%~dp0.env" del /q "%~dp0.env"
@@ -127,7 +127,7 @@ goto SKIP_PREFLIGHT
 
 :PREFLIGHT_CANCEL
 echo.
-echo %DIM%   -^>%NC%  Cancelled. To start manually: %BOLD%start.bat%NC%
+echo %DIM%   -^>%NC%  Cancelled. To start manually: %BOLD%scripts\start.bat%NC%
 exit /b 0
 
 :SKIP_PREFLIGHT
@@ -210,7 +210,7 @@ for /f "delims=" %%i in ('!PYTHON! -c "import secrets; print(secrets.token_hex(1
 docker volume ls --format "{{.Name}}" 2>nul | findstr /r "^voidaccess_postgres_data$" >nul 2>&1
 if not errorlevel 1 (
     echo %YELLOW%  [^!^!]%NC%  Stale postgres volume detected after pre-flight -- wiping
-    docker compose -f "%~dp0infra\docker-compose.yml" --project-directory "%~dp0" down -v >nul 2>&1
+    docker compose -f "%~dp0docker-compose.yml" --project-directory "%~dp0" down -v >nul 2>&1
     docker rm -f voidaccess-postgres voidaccess-tor voidaccess-fastapi voidaccess-nextjs >nul 2>&1
     docker volume rm -f voidaccess_postgres_data voidaccess_chroma_data voidaccess_monitors_data voidaccess_tor_data >nul 2>&1
 )
@@ -305,14 +305,14 @@ echo %DIM%   -^>%NC%  First run takes 3-5 minutes.
 echo.
 set /p START_NOW=  Start now? [Y/n]:
 if /i "!START_NOW!"=="n" (
-    echo %DIM%   -^>%NC%  Start manually with: start.bat
+    echo %DIM%   -^>%NC%  Start manually with: scripts\start.bat
     goto DONE
 )
 
 echo.
 echo %DIM%   -^>%NC%  Building containers...
 set DOCKER_BUILDKIT=1
-docker compose -f infra/docker-compose.yml --project-directory "%~dp0" --env-file "%~dp0.env" up --build -d > "%TEMP%\va_setup.log" 2>&1
+docker compose -f docker-compose.yml --project-directory "%~dp0" --env-file "%~dp0.env" up --build -d > "%TEMP%\va_setup.log" 2>&1
 if errorlevel 1 (
     echo %RED%  [^!^!]%NC%  Build failed -- check %TEMP%\va_setup.log
     pause
@@ -366,9 +366,9 @@ if "!ADMIN_PASS!" neq "!ADMIN_CONFIRM!" (
     goto PWD_LOOP
 )
 
-for /f "delims=" %%i in ('docker compose -f infra/docker-compose.yml exec -T fastapi !PYTHON! -c "from passlib.context import CryptContext; ctx=CryptContext(schemes=[\"bcrypt\"]); print(ctx.hash(\"!ADMIN_PASS!\"))" 2^>nul') do set HASH=%%i
+for /f "delims=" %%i in ('docker compose -f docker-compose.yml exec -T fastapi !PYTHON! -c "from passlib.context import CryptContext; ctx=CryptContext(schemes=[\"bcrypt\"]); print(ctx.hash(\"!ADMIN_PASS!\"))" 2^>nul') do set HASH=%%i
 if defined HASH (
-    docker compose -f infra/docker-compose.yml exec -T postgres psql -U voidaccess -d voidaccess -c "UPDATE users SET hashed_password='!HASH!', must_reset_password=false, email='!ADMIN_EMAIL!' WHERE email='admin@voidaccess.tech' OR email='!ADMIN_EMAIL!';" >nul 2>&1
+    docker compose -f docker-compose.yml exec -T postgres psql -U voidaccess -d voidaccess -c "UPDATE users SET hashed_password='!HASH!', must_reset_password=false, email='!ADMIN_EMAIL!' WHERE email='admin@voidaccess.tech' OR email='!ADMIN_EMAIL!';" >nul 2>&1
     echo %GREEN%  [OK]%NC%  Admin password set.
 ) else (
     echo %YELLOW%  [^!^!]%NC%  Could not set password automatically. Log in and change it via Settings.

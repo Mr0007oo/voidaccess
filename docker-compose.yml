@@ -23,7 +23,7 @@ services:
   tor:
     build:
       context: .
-      dockerfile: infra/Dockerfile.tor
+      dockerfile: docker/Dockerfile.tor
     container_name: voidaccess-tor
     ports:
       - "9050:9050"
@@ -42,7 +42,7 @@ services:
   fastapi:
     build:
       context: .
-      dockerfile: infra/Dockerfile.fastapi
+      dockerfile: docker/Dockerfile.fastapi
       args:
         OTX_API_KEY: ${OTX_API_KEY}
         ABUSECH_API_KEY: ${ABUSECH_API_KEY}
@@ -85,7 +85,7 @@ services:
       - voidaccess-net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      # Seed import runs in the background (see infra/docker-entrypoint.sh),
+      # Seed import runs in the background (see docker/docker-entrypoint.sh),
       # so uvicorn typically boots in ~30s. The generous start_period accounts
       # for slow VMs / disks / first-time pip cache misses on restart.
       interval: 10s
@@ -97,7 +97,7 @@ services:
   nextjs:
     build:
       context: .
-      dockerfile: infra/Dockerfile.nextjs
+      dockerfile: docker/Dockerfile.nextjs
     container_name: voidaccess-nextjs
     depends_on:
       # Only needed during runtime, NOT for build

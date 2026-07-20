@@ -1,5 +1,5 @@
 # Docker Compose Override Example
-# Copy this file to docker-compose.override.yml (not committed) for local development.
+# Copy this file to the repository root as docker-compose.override.yml for local development.
 # WARNING: This file contains placeholder credentials for LOCAL DEV ONLY.
 # Do NOT commit this file to version control.
 

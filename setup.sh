@@ -15,9 +15,7 @@ DIM=$'\033[2m'
 NC=$'\033[0m'
 
 find_compose() {
-    if [ -f "$SCRIPT_DIR/infra/docker-compose.yml" ]; then
-        echo "$SCRIPT_DIR/infra/docker-compose.yml"
-    elif [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
+    if [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
         echo "$SCRIPT_DIR/docker-compose.yml"
     else
         printf "  ${RED}✗${NC}  docker-compose.yml not found\n" >&2
@@ -241,7 +239,7 @@ if [ "$HAS_ENV" = "true" ] || [ "$HAS_VOLUMES" = "true" ] || [ "$HAS_CONTAINERS"
                 printf "\n"
                 print_info "Handing off to start.sh..."
                 printf "\n"
-                exec bash "$SCRIPT_DIR/start.sh"
+                exec bash "$SCRIPT_DIR/scripts/start.sh"
                 ;;
             2)
                 printf "\n"
@@ -275,7 +273,7 @@ if [ "$HAS_ENV" = "true" ] || [ "$HAS_VOLUMES" = "true" ] || [ "$HAS_CONTAINERS"
                 ;;
             3)
                 printf "\n"
-                print_info "Cancelled. To start manually: ${BOLD}bash start.sh${NC}"
+                print_info "Cancelled. To start manually: ${BOLD}bash scripts/start.sh${NC}"
                 exit 0
                 ;;
             *)
@@ -1036,7 +1034,7 @@ start_ans="${start_ans:-y}"
 
 if [[ "${start_ans,,}" == "n" ]]; then
     printf "  ${DIM}→${NC}  Start later with: "
-    printf "${BOLD}sudo bash start.sh${NC}\n"
+    printf "${BOLD}sudo bash scripts/start.sh${NC}\n"
 else
     printf "\n  ${DIM}→${NC}  Building and starting "
     printf "(first run: 3-5 min)...\n\n"
