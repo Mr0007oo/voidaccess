@@ -348,6 +348,9 @@ async def _run_investigation(
         status="running",
     )
     inv_uuid = uuid.UUID(investigation_id)
+    from utils.investigation_metrics import InvestigationMetrics, persist as persist_metrics, set_current
+    pipeline_metrics = InvestigationMetrics(inv_uuid)
+    set_current(pipeline_metrics)
 
     sources_used: dict[str, dict[str, Any]] = {}
     page_count_by_url: dict[str, dict[str, Any]] = {}
@@ -598,9 +601,17 @@ async def _run_investigation(
         entity_dicts = sqlite_adapter.get_entities(investigation_id)
         enrichment_pages = await _enrich_inv(refined, otx_api_key=otx_key, entities=entity_dicts)
         sources_used["enrichment"] = {"status": "ok", "count": len(enrichment_pages)}
+        for _source_name in ("nvd", "ransomlook"):
+            _count = sum(
+                1 for _page in enrichment_pages
+                if (_page.get("source") or _page.get("source_type")) == _source_name
+            )
+            sources_used[_source_name] = {"status": "ok", "count": _count}
         display.update_step("Enriching intelligence", "ok", f"{len(enrichment_pages)} pages added")
     except Exception as exc:
         sources_used["enrichment"] = {"status": "fail", "error": str(exc)}
+        sources_used["nvd"] = {"status": "error"}
+        sources_used["ransomlook"] = {"status": "error"}
         display.update_step("Enriching intelligence", "fail", str(exc))
 
     try:
@@ -667,31 +678,49 @@ async def _run_investigation(
     display.update_step("Breach exposure lookup", "active")
     try:
         from sources.breach_lookup import enrich_breach_entities
-        extraction_results, _ = await asyncio.wait_for(
+        extraction_results, _breach_stats = await asyncio.wait_for(
             enrich_breach_entities(extraction_results, inv_uuid),
             timeout=60,
         )
+        sources_used["xposedornot"] = {
+            "status": "ok",
+            "count": _breach_stats.get("xon_breached", 0),
+        }
+        sources_used["leakcheck"] = {
+            "status": "ok",
+            "count": _breach_stats.get("leakcheck_breached", 0),
+        }
         display.update_step("Breach exposure lookup", "ok")
     except asyncio.TimeoutError:
         logger.warning("[%s] Breach lookup timed out after 60s", inv_uuid)
+        sources_used["xposedornot"] = {"status": "timed_out"}
+        sources_used["leakcheck"] = {"status": "timed_out"}
         display.update_step("Breach exposure lookup", "fail", "timeout")
     except Exception as exc:
         logger.debug("Breach lookup: %s", exc)
+        sources_used["xposedornot"] = {"status": "error"}
+        sources_used["leakcheck"] = {"status": "error"}
         display.update_step("Breach exposure lookup", "fail", str(exc))
 
     display.update_step("Infostealer intel", "active")
     try:
         from sources.infostealer import enrich_infostealer_entities
-        extraction_results, _ = await asyncio.wait_for(
+        extraction_results, _infostealer_stats = await asyncio.wait_for(
             enrich_infostealer_entities(extraction_results, inv_uuid),
             timeout=60,
         )
+        sources_used["hudsonrock"] = {
+            "status": "ok",
+            "count": _infostealer_stats.get("emails_infected", 0),
+        }
         display.update_step("Infostealer intel", "ok")
     except asyncio.TimeoutError:
         logger.warning("[%s] Infostealer enrichment timed out after 60s", inv_uuid)
+        sources_used["hudsonrock"] = {"status": "timed_out"}
         display.update_step("Infostealer intel", "fail", "timeout")
     except Exception as exc:
         logger.debug("Infostealer enrichment: %s", exc)
+        sources_used["hudsonrock"] = {"status": "error"}
         display.update_step("Infostealer intel", "fail", str(exc))
 
     if enrichment_pages:
@@ -872,6 +901,9 @@ async def _run_investigation(
             logger.debug(
                 "Background tasks did not finish in 30s — letting them cancel"
             )
+
+    persist_metrics(pipeline_metrics)
+    set_current(None)
 
     c2_count = sum(
         1 for e in final_entities
@@ -1260,4 +1292,3 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- {glyph} {name}{detail}")
 
     return "\n".join(lines) + "\n"
-
