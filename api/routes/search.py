@@ -14,6 +14,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from api.auth import CurrentUser, get_current_user
+from api.errors import log_exception, safe_detail
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,8 +54,12 @@ async def semantic_search(
         results = search_similar(q, n_results=n)
         return _search_payload(results, warnings)
     except Exception as exc:
-        logger.warning("semantic_search failed: %s", exc)
-        warnings.append(str(exc))
+        warnings.append(
+            safe_detail(
+                log_exception(exc, context="semantic_search"),
+                "Search backend unavailable",
+            )
+        )
         return _search_payload([], warnings)
 
 
@@ -73,8 +78,12 @@ async def similar_to(
 
         return _search_payload(find_pages_similar_to(url, n_results=n), warnings)
     except Exception as exc:
-        logger.warning("similar_to failed: %s", exc)
-        warnings.append(str(exc))
+        warnings.append(
+            safe_detail(
+                log_exception(exc, context="similar_to"),
+                "Search backend unavailable",
+            )
+        )
         return _search_payload([], warnings)
 
 
@@ -93,8 +102,12 @@ async def cross_investigation(
             warnings,
         )
     except Exception as exc:
-        logger.warning("cross_investigation failed: %s", exc)
-        warnings.append(str(exc))
+        warnings.append(
+            safe_detail(
+                log_exception(exc, context="cross_investigation"),
+                "Search backend unavailable",
+            )
+        )
         return _search_payload([], warnings)
 
 
@@ -112,7 +125,12 @@ async def stats(current_user: CurrentUser = Depends(get_current_user)) -> dict:
         stats = get_collection_stats()
         persist_directory = str(stats.get("persist_directory", ""))
     except Exception as exc:
-        warnings.append(str(exc))
+        warnings.append(
+            safe_detail(
+                log_exception(exc, context="search stats"),
+                "Vector store stats unavailable",
+            )
+        )
     return {
         "total_documents": total_documents,
         "persist_directory": persist_directory,

@@ -84,6 +84,7 @@ async def _gather_with_partial_results(awaitables, timeout: float) -> list:
         await asyncio.gather(*pending, return_exceptions=True)
     return results
 from api.auth import CurrentUser, get_current_user, require_password_not_reset_pending
+from api.errors import GENERIC_ERROR_MESSAGE, internal_http_exception, log_exception
 import json
 
 logger = logging.getLogger(__name__)
@@ -701,11 +702,7 @@ def _get_db_investigation(investigation_id: str) -> Any:
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid investigation ID format")
     except Exception as exc:
-        logger.exception("_get_db_investigation failed: %s", exc)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal error: {exc!s}"[:500],
-        )
+        raise internal_http_exception(exc, context="_get_db_investigation")
 
 
 async def _update_investigation_status(
@@ -2367,10 +2364,8 @@ async def create_investigation(
                 session.commit()
                 investigation_id = str(inv.id)
         except Exception as exc:
-            logger.exception("Failed to create investigation record: %s", exc)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Could not persist investigation: {exc!s}"[:300],
+            raise internal_http_exception(
+                exc, context="create investigation record"
             )
     else:
         investigation_id = str(uuid.uuid4())
@@ -2478,8 +2473,7 @@ async def cancel_investigation(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("cancel_investigation failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Internal error: {exc!s}"[:300])
+        raise internal_http_exception(exc, context="cancel_investigation")
 
     return _get_db_investigation(investigation_id)
 
@@ -2702,8 +2696,12 @@ async def get_temporal_analysis(investigation_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("get_temporal_analysis failed: %s", exc)
-        return {"error": "analysis_failed", "message": str(exc)[:300]}
+        correlation_id = log_exception(exc, context="get_temporal_analysis")
+        return {
+            "error": "analysis_failed",
+            "message": GENERIC_ERROR_MESSAGE,
+            "correlation_id": correlation_id,
+        }
 
 
 @router.get("/{investigation_id}")
@@ -2848,11 +2846,7 @@ async def get_investigation_entities(
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid investigation ID format")
     except Exception as exc:
-        logger.exception("get_investigation_entities failed: %s", exc)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal error: {exc!s}"[:500],
-        )
+        raise internal_http_exception(exc, context="get_investigation_entities")
 
 @router.get("/{investigation_id}/entities/export/csv")
 async def export_investigation_entities_csv(
@@ -2942,10 +2936,8 @@ async def export_investigation_entities_csv(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("export_investigation_entities_csv failed: %s", exc)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal error: {exc!s}"[:500],
+        raise internal_http_exception(
+            exc, context="export_investigation_entities_csv"
         )
 
 
@@ -3040,8 +3032,7 @@ async def get_investigation_graph(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("get_investigation_graph failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_http_exception(exc, context="get_investigation_graph")
 
 
 @router.get("/{investigation_id}/graph/stats")

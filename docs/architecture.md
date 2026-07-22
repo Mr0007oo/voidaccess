@@ -219,7 +219,7 @@ Unique constraint: `(user_id, key_name)`
 
 Redis is optional (`REDIS_URL`). When present it stores:
 
-- **JWT blacklist**: revoked tokens from `POST /auth/logout`. On Redis failure the blacklist check silently passes (fail-open).
+- **JWT blacklist**: revoked tokens from `POST /auth/logout`. Behaviour on Redis availability is a deliberate decision: when `REDIS_URL` is unset the blacklist is disabled by design (fail-open); when `REDIS_URL` is set but Redis is unreachable the revocation check **fails closed** (authenticated requests get `503` with an operator warning) rather than silently passing. See §"JWT Blacklist" below.
 - **Rate-limit counters**: `slowapi` uses Redis for distributed rate limiting. Falls back to in-memory counting when Redis is unavailable.
 
 In-process Python dicts (`_infra_cluster_cache`, `_sources_used_cache`, `_cancel_flags`) are used for per-investigation state that does not need to survive restarts.
@@ -1333,7 +1333,7 @@ At least one LLM provider key is needed for query refinement, result filtering, 
 
 | Variable | Default | Notes |
 |---|---|---|
-| `REDIS_URL` | — | Redis connection string. Optional. When absent, JWT blacklist fails open and rate-limit counters are in-memory |
+| `REDIS_URL` | — | Redis connection string. Optional. When absent, JWT blacklist is disabled by design (tokens valid to expiry) and rate-limit counters are in-memory. When **set** but Redis is unreachable, authenticated requests fail closed with `503` until Redis recovers (see "JWT Blacklist" in Known Behaviors) |
 | `ENRICHMENT_REDIS_URL` | — | Optional Redis override used by the enrichment cache when `REDIS_URL` is not set |
 | `DISABLE_RATE_LIMIT` | `false` | Set `true` to bypass all rate limiting (development only) |
 
@@ -1452,9 +1452,15 @@ Concurrent investigations share the same Tor SOCKS5 proxy. Performance degrades 
 
 Free-tier models on OpenRouter enforce per-minute rate limits. The pipeline has exponential backoff with up to 4 retries per LLM call, parsing the `X-RateLimit-Reset` header to determine wait time. Investigations involving many LLM calls (refinement + filter + summary) can stall for several minutes under rate limiting.
 
-### JWT Blacklist Fails Open When Redis is Down
+### JWT Blacklist: Fail-Open by Design, Fail-Closed on Outage
 
-`POST /auth/logout` writes revoked tokens to Redis. If Redis is unavailable, the logout call silently succeeds but the token remains valid until its JWT expiry time. This is the intended fallback to avoid blocking all auth on a Redis outage, but it means logout is best-effort without Redis.
+`POST /auth/logout` writes revoked tokens to Redis. Behaviour depends on whether revocation was opted into (a deliberate decision, not an accident of implementation):
+
+- **`REDIS_URL` unset** — the blacklist is disabled by design. `POST /auth/logout` returns success but is a no-op; tokens remain valid until their 8-hour expiry. Fail-open, for operators who choose not to run Redis.
+- **`REDIS_URL` set, Redis reachable** — revocation is enforced. `POST /auth/logout` blacklists the token; a failed write returns `503`.
+- **`REDIS_URL` set, Redis unreachable** — revocation was opted into, so it is a required control. `is_token_revoked()` raises `BlacklistUnavailableError` and `get_current_user` **fails closed**, rejecting every authenticated request with `503 Service Unavailable` plus an operator warning log, rather than silently honouring a possibly-revoked token. Enforcement resumes automatically once Redis recovers (per-request retry, no restart).
+
+Rationale: single-operator self-hosted tool with 8-hour (not short-lived) tokens — silently accepting revoked tokens during an outage would make logout/session-invalidation unreliable when it matters most, and an attacker could induce an outage to bypass revocation. Operators who prefer availability over revocation can unset `REDIS_URL`.
 
 ### Temporal Analysis Uses Scrape Time, Not Content Time
 

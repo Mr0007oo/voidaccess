@@ -21,6 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from api.auth import CurrentUser, get_current_user
+from api.errors import GENERIC_ERROR_MESSAGE, log_exception
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -435,8 +436,12 @@ async def get_stylometry_analysis(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("get_stylometry_analysis failed: %s", exc)
-        return {"error": "analysis_failed", "message": str(exc)[:300]}
+        correlation_id = log_exception(exc, context="get_stylometry_analysis")
+        return {
+            "error": "analysis_failed",
+            "message": GENERIC_ERROR_MESSAGE,
+            "correlation_id": correlation_id,
+        }
 
 
 @router.get("/{entity_id}/analysis/opsec")
@@ -553,8 +558,12 @@ async def get_opsec_analysis(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("get_opsec_analysis failed: %s", exc)
-        return {"error": "analysis_failed", "message": str(exc)[:300]}
+        correlation_id = log_exception(exc, context="get_opsec_analysis")
+        return {
+            "error": "analysis_failed",
+            "message": GENERIC_ERROR_MESSAGE,
+            "correlation_id": correlation_id,
+        }
 
 
 @router.get("/{entity_id}")
