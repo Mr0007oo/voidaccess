@@ -21,9 +21,11 @@ Configuration
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
+from contextlib import redirect_stdout
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -458,7 +460,12 @@ async def _extract_chunk(chunk: str, llm) -> str:
             silent_llm = llm.bind(streaming=False, callbacks=[])
         from utils.investigation_metrics import record_llm_call
         record_llm_call()
-        response = await silent_llm.ainvoke(prompt)
+        # Some provider adapters retain constructor callbacks even when
+        # ``with_config`` supplies an empty callback list.  Capture that
+        # legacy handler's stdout as a final guard so partial JSON tokens can
+        # never corrupt the CLI's progress/output stream.
+        with redirect_stdout(io.StringIO()):
+            response = await silent_llm.ainvoke(prompt)
         content = response.content if hasattr(response, "content") else str(response)
         return content.strip()
     except Exception as exc:
