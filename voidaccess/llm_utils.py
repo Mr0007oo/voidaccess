@@ -33,14 +33,12 @@ class BufferedStreamingHandler(BaseCallbackHandler):
     def on_llm_new_token(self, token: str, **kwargs) -> None:
         self.buffer += token
         if "\n" in token or len(self.buffer) >= self.buffer_limit:
-            print(self.buffer, end="", flush=True)
             if self.ui_callback:
                 self.ui_callback(self.buffer)
             self.buffer = ""
 
     def on_llm_end(self, response, **kwargs) -> None:
         if self.buffer:
-            print(self.buffer, end="", flush=True)
             if self.ui_callback:
                 self.ui_callback(self.buffer)
             self.buffer = ""
