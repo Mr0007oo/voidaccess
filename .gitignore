@@ -309,3 +309,4 @@ cti_data/enterprise-attack.json
 /.test_venv/
 /.venv-verify-*/
 /pip/
+/.pytest-tmp/
