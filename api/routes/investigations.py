@@ -1451,7 +1451,6 @@ async def _run_investigation_task(
                 "(marked timed_out); continuing with %d completed source(s)",
                 inv_uuid, _parallel_deadline, len(_pending),
                 len(_parallel_tasks) - len(_pending),
->>>>>>> 47bde6ad (fix: improve extraction confidence and timeout handling)
             )
             for _t in _pending:
                 _t.cancel()
@@ -1637,7 +1636,6 @@ async def _run_investigation_task(
             sources_used["telegram"] = _src_status(len(telegram_pages))
 
         # DNS, domain, hash, and email reputation placeholders — updated after those steps complete
-=======
         # DNS, domain, hash, email, breach, and infostealer reputation placeholders
         # — updated after those post-extraction steps complete.
         sources_used["circl_pdns"] = "pending"
