@@ -616,7 +616,9 @@ async def _run_investigation(
     # whole cluster further down.
     display.update_step("Enriching domains", "active")
     try:
-        extraction_results = await asyncio.wait_for(
+        # enrich_*_entities return (extraction_results, stats) — unpack so the
+        # threaded list isn't clobbered into a tuple for the next step.
+        extraction_results, _ = await asyncio.wait_for(
             enrich_domain_entities(extraction_results, inv_uuid),
             timeout=60,
         )
@@ -636,7 +638,7 @@ async def _run_investigation(
 
     display.update_step("Enriching hashes", "active")
     try:
-        extraction_results = await asyncio.wait_for(
+        extraction_results, _ = await asyncio.wait_for(
             enrich_hash_entities(extraction_results, inv_uuid),
             timeout=45,
         )
@@ -650,7 +652,7 @@ async def _run_investigation(
 
     display.update_step("Enriching emails", "active")
     try:
-        extraction_results = await asyncio.wait_for(
+        extraction_results, _ = await asyncio.wait_for(
             enrich_email_entities(extraction_results, inv_uuid),
             timeout=30,
         )
@@ -661,6 +663,36 @@ async def _run_investigation(
     except Exception as exc:
         logger.debug("Email enrichment: %s", exc)
         display.update_step("Enriching emails", "fail", str(exc))
+
+    display.update_step("Breach exposure lookup", "active")
+    try:
+        from sources.breach_lookup import enrich_breach_entities
+        extraction_results, _ = await asyncio.wait_for(
+            enrich_breach_entities(extraction_results, inv_uuid),
+            timeout=60,
+        )
+        display.update_step("Breach exposure lookup", "ok")
+    except asyncio.TimeoutError:
+        logger.warning("[%s] Breach lookup timed out after 60s", inv_uuid)
+        display.update_step("Breach exposure lookup", "fail", "timeout")
+    except Exception as exc:
+        logger.debug("Breach lookup: %s", exc)
+        display.update_step("Breach exposure lookup", "fail", str(exc))
+
+    display.update_step("Infostealer intel", "active")
+    try:
+        from sources.infostealer import enrich_infostealer_entities
+        extraction_results, _ = await asyncio.wait_for(
+            enrich_infostealer_entities(extraction_results, inv_uuid),
+            timeout=60,
+        )
+        display.update_step("Infostealer intel", "ok")
+    except asyncio.TimeoutError:
+        logger.warning("[%s] Infostealer enrichment timed out after 60s", inv_uuid)
+        display.update_step("Infostealer intel", "fail", "timeout")
+    except Exception as exc:
+        logger.debug("Infostealer enrichment: %s", exc)
+        display.update_step("Infostealer intel", "fail", str(exc))
 
     if enrichment_pages:
         try:

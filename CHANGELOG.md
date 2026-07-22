@@ -2,6 +2,20 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [Unreleased]
+### Added
+- Five new free (key-optional) intelligence sources, each reporting honestly into `sources_used`:
+  - **XposedOrNot** (`sources/breach_lookup.py`) — email breach-exposure lookup, complements HIBP with a different corpus; free tier includes stealer-log exposure.
+  - **LeakCheck** public tier (`sources/breach_lookup.py`) — breach-source corroboration; an email surfacing in both XposedOrNot and LeakCheck is tagged `breach_corroborated`.
+  - **Hudson Rock Cavalier** (`sources/infostealer.py`) — infostealer intelligence (30M+ malware-infected machines) queried by email AND domain; one of the few sources giving domain-level infostealer exposure.
+  - **NVD 2.0** (`sources/nvd.py`) — full CVE metadata (CVSS, CWE, description, dates) for any extracted CVE, complementing CISA KEV's actively-exploited subset. Optional `NVD_API_KEY` raises the rate limit.
+  - **ransomlook.io** (`sources/enrichment.py`) — second ransomware-group tracker that cross-validates ransomware.live; shared leak-site `.onion` seeds are URL-normalised to dedup across the two trackers.
+- First pytest test suite (`tests/`), covering the parsers for the five new sources with mocked HTTP (`aioresponses`).
+
+### Fixed
+- Phase-A threat-intel enrichment now preserves the results of sources that finished before the deadline instead of discarding the entire batch when the 59s/55s cap is hit (`_gather_with_partial_results`).
+- CLI `investigate` reputation steps (domain/hash/email) no longer clobber the threaded `extraction_results` list into a `(results, stats)` tuple, which had silently starved subsequent steps and actor-profile aggregation of entities.
+
 ## [1.7.2] - 2026-07-08
 ### Fixed
 - STIX relationship generation now avoids near-quadratic same-page edge explosions by emitting bounded semantic co-occurrence edges instead of every pair on a page.

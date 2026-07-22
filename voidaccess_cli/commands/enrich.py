@@ -7,6 +7,8 @@ domains move. This refreshes:
     - Domain reputation (URLScan, SecurityTrails — when keys present)
     - Hash reputation (VirusTotal, Hybrid Analysis)
     - Email reputation (HIBP, EmailRep)
+    - Breach exposure (XposedOrNot, LeakCheck)
+    - Infostealer intelligence (Hudson Rock Cavalier — emails + domains)
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ def run(
     skip_domains: bool = typer.Option(False, "--skip-domains"),
     skip_hashes: bool = typer.Option(False, "--skip-hashes"),
     skip_emails: bool = typer.Option(False, "--skip-emails"),
+    skip_breach: bool = typer.Option(False, "--skip-breach"),
+    skip_infostealer: bool = typer.Option(False, "--skip-infostealer"),
 ) -> None:
     """Re-enrich entities for an existing investigation."""
     from voidaccess_cli import config as cli_config
@@ -38,7 +42,10 @@ def run(
         console.print(f"[red]Cannot resolve investigation:[/red] {target}")
         raise typer.Exit(code=1)
 
-    asyncio.run(_run(inv_id, skip_ips, skip_domains, skip_hashes, skip_emails))
+    asyncio.run(_run(
+        inv_id, skip_ips, skip_domains, skip_hashes, skip_emails,
+        skip_breach, skip_infostealer,
+    ))
 
 
 def _resolve_investigation_id(target: str) -> Optional[str]:
@@ -111,6 +118,8 @@ async def _run(
     skip_domains: bool,
     skip_hashes: bool,
     skip_emails: bool,
+    skip_breach: bool = False,
+    skip_infostealer: bool = False,
 ) -> None:
     inv_uuid = uuid.UUID(investigation_id)
     extraction_results = _load_extraction_results(investigation_id)
@@ -148,6 +157,31 @@ async def _run(
             console.print("• Email reputation…")
             await enrich_email_entities(extraction_results, inv_uuid)
             console.print("  [green]done[/green]")
+        except Exception as exc:
+            console.print(f"  [red]failed:[/red] {exc}")
+
+    if not skip_breach:
+        try:
+            from sources.breach_lookup import enrich_breach_entities
+            console.print("• Breach exposure (XposedOrNot + LeakCheck)…")
+            _, _breach_stats = await enrich_breach_entities(extraction_results, inv_uuid)
+            console.print(
+                f"  [green]done[/green] — xposedornot: {_breach_stats.get('xposedornot')}, "
+                f"leakcheck: {_breach_stats.get('leakcheck')}"
+            )
+        except Exception as exc:
+            console.print(f"  [red]failed:[/red] {exc}")
+
+    if not skip_infostealer:
+        try:
+            from sources.infostealer import enrich_infostealer_entities
+            console.print("• Infostealer intel (Hudson Rock)…")
+            _, _is_stats = await enrich_infostealer_entities(extraction_results, inv_uuid)
+            console.print(
+                f"  [green]done[/green] — hudsonrock: {_is_stats.get('hudsonrock')} "
+                f"({_is_stats.get('emails_infected', 0)} emails, "
+                f"{_is_stats.get('domains_exposed', 0)} domains exposed)"
+            )
         except Exception as exc:
             console.print(f"  [red]failed:[/red] {exc}")
 

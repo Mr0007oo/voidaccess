@@ -100,6 +100,16 @@ HYBRID_ANALYSIS_API_KEY = _clean_env("HYBRID_ANALYSIS_API_KEY", "")
 HIBP_API_KEY      = _clean_env("HIBP_API_KEY", "")
 EMAILREP_API_KEY  = _clean_env("EMAILREP_API_KEY", "")
 
+# Breach-exposure lookup (complements HIBP; all optional / free-tier — no key required)
+# XposedOrNot: free breach lookup incl. stealer-log exposure. Optional key = richer results.
+XPOSEDORNOT_API_KEY = _clean_env("XPOSEDORNOT_API_KEY", "")
+# LeakCheck public tier and Hudson Rock Cavalier (infostealer) need NO key — no config var.
+
+# NVD 2.0 full CVE database (complements CISA KEV). Works without a key; an
+# optional free key raises the rate limit (5→50 requests / 30s).
+NVD_API_KEY = _clean_env("NVD_API_KEY", "")
+# ransomlook.io (2nd ransomware tracker, cross-validates ransomware.live) needs NO key.
+
 # Phase 1.6 — optional clearnet proxy.  Read directly by
 # sources/proxy_client.py via os.getenv; the module-level constant is
 # exposed for code that wants to introspect the value (the same way

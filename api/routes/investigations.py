@@ -284,6 +284,66 @@ async def _run_enrichment_phase(
             sources_used[name] = stats.get(status_key, fallback)
 
     _set_sources_used(investigation_id, sources_used)
+
+    # ===== STEP 6.5: Breach-exposure lookup (XposedOrNot + LeakCheck) =====
+    try:
+        from sources.breach_lookup import enrich_breach_entities as _enrich_breach
+
+        extraction_results, _breach_stats = await asyncio.wait_for(
+            _enrich_breach(extraction_results, inv_uuid),
+            timeout=90,
+        )
+        sources_used["xposedornot"] = _breach_stats.get("xposedornot", "ok_0_results")
+        sources_used["leakcheck"] = _breach_stats.get("leakcheck", "ok_0_results")
+        _set_sources_used(investigation_id, sources_used)
+        logger.info(
+            "[%s] Breach lookup: %d checked, XposedOrNot %d breached (%d stealer-log), "
+            "LeakCheck %d breached, %d corroborated",
+            inv_uuid,
+            _breach_stats.get("emails_checked", 0),
+            _breach_stats.get("xon_breached", 0),
+            _breach_stats.get("stealer_log_exposed", 0),
+            _breach_stats.get("leakcheck_breached", 0),
+            _breach_stats.get("corroborated", 0),
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[%s] Breach-exposure lookup timed out after 90s", inv_uuid)
+        sources_used["xposedornot"] = "error_timeout"
+        sources_used["leakcheck"] = "error_timeout"
+        _set_sources_used(investigation_id, sources_used)
+    except Exception as _breach_exc:
+        logger.info("[%s] Breach-exposure lookup failed (non-fatal): %s", inv_uuid, _breach_exc)
+        sources_used["xposedornot"] = "error"
+        sources_used["leakcheck"] = "error"
+        _set_sources_used(investigation_id, sources_used)
+
+    # ===== STEP 6.6: Infostealer intelligence (Hudson Rock Cavalier) =====
+    try:
+        from sources.infostealer import enrich_infostealer_entities as _enrich_infostealer
+
+        extraction_results, _is_stats = await asyncio.wait_for(
+            _enrich_infostealer(extraction_results, inv_uuid),
+            timeout=90,
+        )
+        sources_used["hudsonrock"] = _is_stats.get("hudsonrock", "ok_0_results")
+        _set_sources_used(investigation_id, sources_used)
+        logger.info(
+            "[%s] Infostealer (Hudson Rock): %d emails infected, %d domains exposed, "
+            "%d machines total",
+            inv_uuid,
+            _is_stats.get("emails_infected", 0),
+            _is_stats.get("domains_exposed", 0),
+            _is_stats.get("total_machines", 0),
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[%s] Infostealer enrichment timed out after 90s", inv_uuid)
+        sources_used["hudsonrock"] = "error_timeout"
+        _set_sources_used(investigation_id, sources_used)
+    except Exception as _is_exc:
+        logger.info("[%s] Infostealer enrichment failed (non-fatal): %s", inv_uuid, _is_exc)
+        sources_used["hudsonrock"] = "error"
+        _set_sources_used(investigation_id, sources_used)
+
     return extraction_results, sources_used
 
 
@@ -1498,8 +1558,19 @@ async def _run_investigation_task(
         )
         sources_used["ransomware_live"] = _src_status(_rl_n, "enrichment")
 
+        # ransomlook.io — second ransomware tracker (excludes .onion scrape seeds)
+        _rlook_n = sum(
+            1 for p in enrichment_pages
+            if p.get("source") == "ransomlook" and not p.get("_scrape_seed")
+        )
+        sources_used["ransomlook"] = _src_status(_rlook_n, "enrichment")
+
         _cisa_n = sum(1 for p in enrichment_pages if p.get("source") in ("cisa_kev", "cisa_advisory"))
         sources_used["cisa"] = _src_status(_cisa_n, "enrichment")
+
+        # NVD 2.0 — full CVE metadata (no key required; complements CISA KEV)
+        _nvd_n = sum(1 for p in enrichment_pages if p.get("source") == "nvd")
+        sources_used["nvd"] = _src_status(_nvd_n, "enrichment")
 
         _shodan_n = sum(1 for p in enrichment_pages if p.get("source") == "shodan_internetdb")
         sources_used["shodan"] = _src_status(_shodan_n, "enrichment")
@@ -1554,10 +1625,16 @@ async def _run_investigation_task(
             sources_used["telegram"] = _src_status(len(telegram_pages))
 
         # DNS, domain, hash, and email reputation placeholders — updated after those steps complete
+=======
+        # DNS, domain, hash, email, breach, and infostealer reputation placeholders
+        # — updated after those post-extraction steps complete.
         sources_used["circl_pdns"] = "pending"
         sources_used["domain_reputation"] = "pending"
         sources_used["hash_reputation"] = "pending"
         sources_used["email_reputation"] = "pending"
+        sources_used["xposedornot"] = "pending"
+        sources_used["leakcheck"] = "pending"
+        sources_used["hudsonrock"] = "pending"
         _sources_used_cache[investigation_id] = sources_used
         _update_investigation_metadata(
             investigation_id,

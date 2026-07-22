@@ -677,14 +677,18 @@ All six sources below run concurrently via a single `asyncio.gather()` inside `s
 | **ThreatFox** | IOCs by search term or last 24h feed; ioc_type, ioc_value, malware, confidence | `ABUSECH_API_KEY` — optional | Yes |
 | **URLhaus** | Malicious URLs by tag; url_status, threat, reporter | `ABUSECH_API_KEY` — optional | Yes |
 | **ransomware.live** | Group profiles, leak-site `.onion` addresses, recent victim claims; also injects `.onion` seeds into the scrape queue | None | Yes (public API) |
-| **Secondary enrichment** (`_enrich_new_sources`) | Calls CISA, Shodan, VirusTotal, and historical intel concurrently (55s cap) | Varies — see below | Varies |
+| **ransomlook.io** | Second ransomware-group tracker (different corpus) — group profiles, leak-site `.onion` addresses, recent victim posts; cross-validates ransomware.live. Onion seeds are URL-normalised to match ransomware.live so shared leak sites dedup to a single scrape seed | None | Yes (public API) |
+| **Secondary enrichment** (`_enrich_new_sources`) | Calls CISA, NVD, Shodan, VirusTotal, and historical intel concurrently (55s cap) | Varies — see below | Varies |
+
+The Phase-A fan-out preserves partial results: if the 59s (outer) or 55s (nested) deadline hits while some sources are still running, the results of sources that already finished are kept rather than discarding the whole batch (`_gather_with_partial_results`).
 
 #### Secondary enrichment sources (nested, 55-second cap)
 
 | Source | What it enriches | Key required |
 |---|---|---|
-| **CISA KEV** | CVE entities: vendor, product, exploitation date, description | None |
+| **CISA KEV** | CVE entities: vendor, product, exploitation date, description (only actively-exploited CVEs) | None |
 | **CISA Advisories** | Advisory titles, URLs, dates correlated to the query | None |
+| **NVD 2.0** | CVE entities: CVSS base score/severity/vector, CWE weaknesses, description, published/modified dates — for ANY CVE, not just KEV. Capped at 15 CVEs with a soft 45s budget | `NVD_API_KEY` — optional; raises rate limit 5→50 req/30s |
 | **Shodan InternetDB** | IP entities: open ports, hostnames, tags, known CVEs | None (free public API) |
 | **VirusTotal** | File hash entities: detection ratio, threat label, first/last seen | `VT_API_KEY` — skipped if absent; free tier: 4 req/min; max 20 hashes |
 | **MITRE ATT&CK overlay** | Technique IDs (T-codes) for actors identified from OTX/ransomware.live | None (local lookup via `historical_intel.py`) |
@@ -754,6 +758,25 @@ Cache TTL: 48 h (hashes are immutable). Up to 50 hashes per investigation; SHA-2
 
 Custom-domain email addresses (non-disposable, non-freemail) also produce new `DOMAIN` entities for downstream domain reputation enrichment.
 
+### 5.7a Breach-Exposure Lookup (Step 6.5)
+
+Complements HIBP (Step 6.4) with two additional breach corpora. HIBP, XposedOrNot, and LeakCheck draw from different corpora, so all three run and each surfaces things the others miss. Each reports its own `sources_used` status (`xposedornot`, `leakcheck`).
+
+| Source | What it enriches | Key required | Free tier | Cache TTL |
+|---|---|---|---|---|
+| **XposedOrNot** | Breach names for an email, including stealer-log exposure (`stealer_log_exposure` tag) | `XPOSEDORNOT_API_KEY` — optional; free tier fully functional | Yes | 48 h |
+| **LeakCheck** (public) | Breach-source names + exposed-data categories; lightweight corroboration signal | None (unauthenticated) | Yes | 48 h |
+
+When an email appears in BOTH corpora the entity is tagged `breach_corroborated` (stronger signal than either alone). Pacing: XposedOrNot ≲2 req/s, LeakCheck gentle — both bound by a concurrency semaphore + per-request sleep. Up to 30 emails per investigation.
+
+### 5.7b Infostealer Intelligence (Step 6.6)
+
+| Source | What it enriches | Key required | Free tier | Cache TTL |
+|---|---|---|---|---|
+| **Hudson Rock Cavalier** | `EMAIL_ADDRESS`: whether the email appears in stealer logs and on how many compromised machines (`hudsonrock_infostealer` tag). `DOMAIN`: employee/user counts in stealer logs — org-level infostealer exposure | None | Yes (public API) | 24 h |
+
+Higher-signal than breach dumps: reports machines actively infected by infostealer malware, not just old breach appearances. Runs for both `EMAIL_ADDRESS` (up to 30) and `DOMAIN` (up to 20, freemail domains skipped). Reports under `hudsonrock`.
+
 ### 5.8 Entity Enrichment Pipeline Summary
 
 The following table maps all post-extraction enrichment steps to their pipeline position, entity types, and source modules.
@@ -764,6 +787,8 @@ The following table maps all post-extraction enrichment steps to their pipeline 
 | **6.2** Domain reputation | `DOMAIN`, `DOMAIN_NAME` (up to 30) | crt.sh, URLScan.io, Wayback Machine | `URLSCAN_API_KEY`, `URLSCAN_SUBMIT` |
 | **6.3** Hash reputation | `FILE_HASH_MD5/SHA1/SHA256` (up to 50) | Hybrid Analysis, MalwareBazaar, ThreatFox, VirusTotal | `HYBRID_ANALYSIS_API_KEY`, `VT_API_KEY`, `ABUSECH_API_KEY` |
 | **6.4** Email reputation | `EMAIL_ADDRESS` (up to 30) | HIBP, EmailRep, disposable blocklist | `HIBP_API_KEY`, `EMAILREP_API_KEY` |
+| **6.5** Breach exposure | `EMAIL_ADDRESS` (up to 30) | XposedOrNot, LeakCheck | `XPOSEDORNOT_API_KEY` (optional) |
+| **6.6** Infostealer | `EMAIL_ADDRESS` (up to 30), `DOMAIN` (up to 20) | Hudson Rock Cavalier | None |
 | **6.7** Blockchain | `BITCOIN_ADDRESS`, `ETHEREUM_ADDRESS` (up to 10) | BlockCypher, Etherscan | `BLOCKCYPHER_TOKEN`, `ETHERSCAN_API_KEY` |
 | **6.8** DNS/WHOIS | `IP_ADDRESS`, `DOMAIN` (up to 20 each) | CIRCL PDNS, CIRCL PSSL, RDAP, SecurityTrails | `SECURITYTRAILS_API_KEY`, `DNS_ENRICHMENT_ENABLED` |
 

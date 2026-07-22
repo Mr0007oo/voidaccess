@@ -791,41 +791,304 @@ def ransomwarelive_to_pages(groups: list[dict]) -> list[dict]:
     return pages
 
 
+async def _gather_with_partial_results(
+    named_coros: list[tuple[str, Any]],
+    timeout: float,
+    phase_label: str,
+) -> dict[str, Any]:
+    """
+    Run named coroutines concurrently with a deadline, PRESERVING the results
+    of any that finished before the deadline hit.
+
+    Unlike ``asyncio.wait_for(asyncio.gather(...))`` — which cancels the whole
+    group on timeout and loses everything — this schedules each coroutine as a
+    task, waits up to *timeout*, then returns whatever completed. Sources still
+    running at the deadline are cancelled and reported as ``[]`` (an unfinished
+    source contributes nothing, but a *finished* sibling's results survive).
+
+    Returns a dict mapping name → result. On a per-task exception the value is
+    the Exception instance (callers already guard with ``isinstance(x, Exception)``).
+    Names whose task did not finish map to ``[]``.
+    """
+    tasks: dict[str, asyncio.Task] = {
+        name: asyncio.ensure_future(coro) for name, coro in named_coros
+    }
+    done, pending = await asyncio.wait(tasks.values(), timeout=timeout)
+
+    if pending:
+        unfinished = [name for name, t in tasks.items() if t in pending]
+        logger.warning(
+            "%s: deadline (%.0fs) hit — preserving %d finished source(s), "
+            "dropping unfinished: %s",
+            phase_label, timeout, len(done), ", ".join(unfinished),
+        )
+        for t in pending:
+            t.cancel()
+        # Let cancellations settle so no "Task was destroyed but pending" warnings.
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    results: dict[str, Any] = {}
+    for name, t in tasks.items():
+        if t in done and not t.cancelled():
+            exc = t.exception()
+            results[name] = exc if exc is not None else t.result()
+        else:
+            results[name] = []
+    return results
+
+
+# ---------------------------------------------------------------------------
+# ransomlook.io — second ransomware-group tracker for cross-validation
+# ---------------------------------------------------------------------------
+# Draws from a different aggregation pipeline than ransomware.live (different
+# upstream scrapers / community contributions), so the two have partial but not
+# complete overlap. Runs ALONGSIDE ransomware.live — the value is corroboration
+# when the same group/victim appears in both, and genuinely new coverage when
+# only one has it. Leak-site .onion seed URLs are formatted IDENTICALLY to
+# ``ransomwarelive_to_pages`` (``http://{fqdn}``) so the enrichment page URL
+# dedup collapses a leak site discovered by both trackers into a single scrape
+# seed; the summary pages stay distinct (that is the corroboration signal). If
+# the same leak site is nonetheless reached twice, the scrape-layer
+# ``raw_content_hash`` dedup is the backstop. Free, no key required.
+
+_RANSOMLOOK_BASE = "https://www.ransomlook.io/api"
+_RANSOMLOOK_HEADERS = {"User-Agent": "VoidAccess-OSINT/1.1 (security research)", "Accept": "application/json"}
+
+
+def _ransomlook_onion_from_locations(locations: list) -> list[str]:
+    """Extract .onion leak-site URLs from a ransomlook group's locations list.
+
+    Available sites first. Formatted as ``http://{fqdn}`` to match
+    ``_rl_extract_onion_urls`` (ransomware.live) so cross-source dedup works.
+    """
+    if not isinstance(locations, list):
+        return []
+    ordered = sorted(locations, key=lambda l: not (isinstance(l, dict) and l.get("available", False)))
+    urls: list[str] = []
+    seen: set[str] = set()
+    for loc in ordered:
+        if not isinstance(loc, dict):
+            continue
+        fqdn = (loc.get("fqdn") or "").strip().lower()
+        # Normalize to bare host (strip scheme + trailing slash), then re-add http://
+        fqdn = fqdn.replace("https://", "").replace("http://", "").rstrip("/")
+        if fqdn and ".onion" in fqdn:
+            url = f"http://{fqdn}"
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
+async def fetch_ransomlook(query: str) -> list[dict]:
+    """
+    Search ransomlook.io for ransomware-group profiles, leak-site .onion
+    addresses, and recent victim posts. Free public API — no key required.
+
+    Cross-validates the existing ransomware.live source (different corpus).
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+
+    results: list[dict] = []
+    timeout = aiohttp.ClientTimeout(total=25)
+
+    try:
+        async with aiohttp.ClientSession(headers=_RANSOMLOOK_HEADERS, timeout=timeout) as session:
+            # ── 1. Match groups from the full group name index ─────────────────
+            async with session.get(f"{_RANSOMLOOK_BASE}/groups") as resp:
+                if resp.status != 200:
+                    logger.warning("ransomlook.io /groups HTTP %s", resp.status)
+                    return []
+                all_groups = await resp.json(content_type=None)
+
+            group_names = [g for g in all_groups if isinstance(g, str)] if isinstance(all_groups, list) else []
+            matched = [name for name in group_names if q in name.lower()]
+
+            if not matched:
+                logger.info("ransomlook.io: no groups matched %r", query)
+                return []
+
+            matched = matched[:5]
+            logger.info("ransomlook.io: %d group(s) matched %r", len(matched), query)
+
+            # ── 2. Fetch detail for each matched group ─────────────────────────
+            async def _fetch_group_detail(gname: str) -> tuple[str, Optional[dict]]:
+                try:
+                    async with session.get(f"{_RANSOMLOOK_BASE}/group/{gname}") as r:
+                        if r.status == 200:
+                            data = await r.json(content_type=None)
+                            if isinstance(data, list) and data and isinstance(data[0], dict):
+                                return gname, data[0]
+                            if isinstance(data, dict):
+                                return gname, data
+                except Exception:
+                    pass
+                return gname, None
+
+            detail_pairs = await asyncio.gather(
+                *[_fetch_group_detail(g) for g in matched],
+                return_exceptions=True,
+            )
+            group_details: dict[str, dict] = {}
+            for pair in detail_pairs:
+                if isinstance(pair, Exception):
+                    continue
+                gname, detail = pair
+                group_details[gname] = detail if isinstance(detail, dict) else {}
+
+            # ── 3. Pull recent posts and filter by matched group names ─────────
+            recent_by_group: dict[str, list[dict]] = {name.lower(): [] for name in matched}
+            try:
+                async with session.get(f"{_RANSOMLOOK_BASE}/recent") as r:
+                    if r.status == 200:
+                        recent = await r.json(content_type=None)
+                        for post in (recent if isinstance(recent, list) else []):
+                            if not isinstance(post, dict):
+                                continue
+                            gname = (post.get("group_name") or "").lower()
+                            if gname in recent_by_group:
+                                recent_by_group[gname].append(post)
+            except Exception:
+                pass
+
+            # ── 4. Assemble results ────────────────────────────────────────────
+            for gname in matched:
+                detail = group_details.get(gname, {})
+                onion_urls = _ransomlook_onion_from_locations(detail.get("locations") or [])
+                profile_refs = detail.get("profile") if isinstance(detail.get("profile"), list) else []
+                meta = detail.get("meta")
+                description = meta if isinstance(meta, str) else ""
+                victims = recent_by_group.get(gname.lower(), [])
+                results.append({
+                    "group": gname,
+                    "description": description,
+                    "onion_urls": onion_urls,
+                    "references": [r for r in (profile_refs or []) if isinstance(r, str)][:20],
+                    "victims": victims[:50],
+                })
+
+    except asyncio.TimeoutError:
+        logger.warning("ransomlook.io: request timed out")
+    except aiohttp.ClientError as exc:
+        logger.warning("ransomlook.io: client error: %s", exc)
+    except Exception as exc:
+        logger.warning("ransomlook.io: unexpected error: %s", exc)
+
+    return results
+
+
+def ransomlook_to_pages(groups: list[dict]) -> list[dict]:
+    """Convert ransomlook.io group data into page-shaped dicts.
+
+    Mirrors ``ransomwarelive_to_pages``: a rich text summary page per group
+    (source ``ransomlook``) plus one .onion scrape-seed stub per leak site.
+    Onion URLs match ransomware.live's format so cross-source dedup collapses
+    shared leak sites.
+    """
+    pages: list[dict] = []
+
+    for gd in groups:
+        gname = gd.get("group", "Unknown")
+        lines: list[str] = [f"Ransomware Group Intelligence (ransomlook.io): {gname}"]
+
+        if gd.get("description"):
+            lines.append(f"\nDescription: {gd['description']}")
+
+        onion_urls = gd.get("onion_urls", [])
+        if onion_urls:
+            lines.append(f"\nLeak Site URLs: {', '.join(onion_urls)}")
+
+        refs = gd.get("references", [])
+        if refs:
+            lines.append(f"\nReferences: {', '.join(refs)}")
+
+        victims = gd.get("victims", [])
+        if victims:
+            lines.append(f"\nRecent Victims ({len(victims)} total):")
+            for v in victims[:40]:
+                title = v.get("post_title") or v.get("victim") or ""
+                date = v.get("discovered") or v.get("date") or ""
+                victim_line = f"  - {title}"
+                if date:
+                    victim_line += f" {date}"
+                lines.append(victim_line)
+
+        content = "\n".join(lines)
+        base_link = f"https://www.ransomlook.io/group/{gname}"
+
+        pages.append({
+            "link": base_link,
+            "url": base_link,
+            "content": content,
+            "text": content,
+            "status": 200,
+            "source": "ransomlook",
+            "title": f"ransomlook.io — {gname}",
+            "via": "ransomlook_api",
+        })
+
+        for onion_url in onion_urls:
+            if onion_url and ".onion" in onion_url:
+                stub = f"{gname} ransomware group leak site: {onion_url}"
+                pages.append({
+                    "link": onion_url,
+                    "url": onion_url,
+                    "content": stub,
+                    "text": stub,
+                    "status": 200,
+                    "source": "ransomlook",
+                    "title": f"{gname} leak site",
+                    "via": "ransomlook_onion_seed",
+                    "_scrape_seed": True,
+                })
+
+    return pages
+
+
 async def _enrich_new_sources(query: str, entities: list[dict]) -> list[dict]:
     """
-    Run the 4 new enrichment sources concurrently and return page-shaped dicts.
+    Run the new entity-driven enrichment sources concurrently and return
+    page-shaped dicts.
 
     Sources:
     - CISA KEV + advisories   (cisa.py)
+    - NVD 2.0 full CVE data   (nvd.py)
     - Shodan InternetDB       (shodan.py)
     - VirusTotal              (virustotal.py)
     - Historical intel        (historical_intel.py)
+
+    Partial results from sources that finish before the deadline are preserved.
     """
     from sources.cisa import enrich_cisa
+    from sources.nvd import enrich_nvd
     from sources.shodan import enrich_shodan
     from sources.virustotal import enrich_virustotal
     from sources.historical_intel import enrich_historical
 
-    async def _gather():
-        return await asyncio.gather(
-            enrich_cisa(query, entities),
-            enrich_shodan(entities),
-            enrich_virustotal(entities),
-            return_exceptions=True,
-        )
+    packed = await _gather_with_partial_results(
+        [
+            ("cisa", enrich_cisa(query, entities)),
+            ("nvd", enrich_nvd(entities)),
+            ("shodan", enrich_shodan(entities)),
+            ("virustotal", enrich_virustotal(entities)),
+        ],
+        timeout=55.0,
+        phase_label="_enrich_new_sources",
+    )
 
-    cisa_results, shodan_results, vt_results = [], [], []
-    try:
-        packed = await asyncio.wait_for(_gather(), timeout=55.0)
-    except asyncio.TimeoutError:
-        logger.warning("_enrich_new_sources: deadline exceeded")
-        return []
-
-    cisa_results, shodan_results, vt_results = packed
+    cisa_results = packed["cisa"]
+    nvd_results = packed["nvd"]
+    shodan_results = packed["shodan"]
+    vt_results = packed["virustotal"]
 
     if isinstance(cisa_results, Exception):
         logger.warning("CISA enrichment failed: %s", cisa_results)
         cisa_results = []
+    if isinstance(nvd_results, Exception):
+        logger.warning("NVD enrichment failed: %s", nvd_results)
+        nvd_results = []
     if isinstance(shodan_results, Exception):
         logger.warning("Shodan enrichment failed: %s", shodan_results)
         shodan_results = []
@@ -837,6 +1100,8 @@ async def _enrich_new_sources(query: str, entities: list[dict]) -> list[dict]:
 
     if cisa_results:
         pages.extend(_cisa_results_to_pages(cisa_results, query))
+    if nvd_results:
+        pages.extend(_nvd_results_to_pages(nvd_results))
     if shodan_results:
         pages.extend(_shodan_results_to_pages(shodan_results))
     if vt_results:
@@ -945,6 +1210,42 @@ def _cisa_results_to_pages(results: list[dict], query: str) -> list[dict]:
         })
 
     return pages
+
+
+def _nvd_results_to_pages(results: list[dict]) -> list[dict]:
+    """Convert NVD 2.0 CVE results into page-shaped dicts for entity extraction."""
+    if not results:
+        return []
+    lines = ["NVD 2.0 — National Vulnerability Database\n"]
+    for r in results:
+        lines.append(f"CVE: {r.get('entity_value', '')}")
+        score = r.get("base_score")
+        sev = r.get("base_severity") or ""
+        if score is not None:
+            lines.append(f"  CVSS Base Score: {score} {sev}".rstrip())
+        if r.get("vector"):
+            lines.append(f"  CVSS Vector: {r['vector']}")
+        if r.get("cwes"):
+            lines.append(f"  Weaknesses: {', '.join(r['cwes'])}")
+        if r.get("vuln_status"):
+            lines.append(f"  Status: {r['vuln_status']}")
+        if r.get("published"):
+            lines.append(f"  Published: {r['published']}")
+        if r.get("last_modified"):
+            lines.append(f"  Last Modified: {r['last_modified']}")
+        if r.get("description"):
+            lines.append(f"  Description: {r['description']}")
+        lines.append("")
+    content = "\n".join(lines)
+    return [{
+        "link": "https://nvd.nist.gov/vuln",
+        "url": "https://nvd.nist.gov/vuln",
+        "content": content,
+        "text": content,
+        "status": 200,
+        "source": "nvd",
+        "via": "nvd_api",
+    }]
 
 
 def _shodan_results_to_pages(results: list[dict]) -> list[dict]:
@@ -1138,24 +1439,31 @@ async def enrich_investigation(
 
     _entities = entities if entities is not None else []
 
-    async def _gather():
-        return await asyncio.gather(
-            fetch_otx_pulses(query, otx_api_key or "", limit=20),
-            fetch_malwarebazaar(query, limit=20),
-            fetch_threatfox(query, limit=50),
-            fetch_urlhaus(query, limit=20),
-            fetch_ransomware_live(query),
-            _enrich_new_sources(query, _entities),
-            return_exceptions=True,
-        )
+    # Partial-results-preserving fan-out: if the 59s deadline hits while some
+    # sources are still running, the results of sources that ALREADY finished
+    # are kept (unfinished ones contribute nothing) rather than discarding the
+    # entire batch.
+    packed = await _gather_with_partial_results(
+        [
+            ("otx", fetch_otx_pulses(query, otx_api_key or "", limit=20)),
+            ("malwarebazaar", fetch_malwarebazaar(query, limit=20)),
+            ("threatfox", fetch_threatfox(query, limit=50)),
+            ("urlhaus", fetch_urlhaus(query, limit=20)),
+            ("ransomware_live", fetch_ransomware_live(query)),
+            ("ransomlook", fetch_ransomlook(query)),
+            ("new_sources", _enrich_new_sources(query, _entities)),
+        ],
+        timeout=59.0,
+        phase_label="Enrichment",
+    )
 
-    try:
-        packed = await asyncio.wait_for(_gather(), timeout=59.0)
-    except asyncio.TimeoutError:
-        logger.warning("Enrichment: deadline exceeded (59s), returning empty")
-        return []
-
-    otx_pulses, mb_results, tf_results, uh_results, rl_groups, new_pages = packed
+    otx_pulses = packed["otx"]
+    mb_results = packed["malwarebazaar"]
+    tf_results = packed["threatfox"]
+    uh_results = packed["urlhaus"]
+    rl_groups = packed["ransomware_live"]
+    rlook_groups = packed["ransomlook"]
+    new_pages = packed["new_sources"]
 
     if isinstance(otx_pulses, Exception):
         logger.warning("OTX failed: %s", otx_pulses)
@@ -1172,6 +1480,9 @@ async def enrich_investigation(
     if isinstance(rl_groups, Exception):
         logger.warning("ransomware.live failed: %s", rl_groups)
         rl_groups = []
+    if isinstance(rlook_groups, Exception):
+        logger.warning("ransomlook.io failed: %s", rlook_groups)
+        rlook_groups = []
     if isinstance(new_pages, Exception):
         logger.warning("New enrichment sources failed: %s", new_pages)
         new_pages = []
@@ -1185,6 +1496,7 @@ async def enrich_investigation(
 
     pages.extend(abusech_to_pages(mb_results, tf_results, uh_results))
     pages.extend(ransomwarelive_to_pages(rl_groups))
+    pages.extend(ransomlook_to_pages(rlook_groups))
     pages.extend(new_pages or [])
 
     # Page-scan MITRE overlay: extract actor names from ransomware.live / OTX results
@@ -1260,10 +1572,11 @@ async def enrich_investigation(
     total_onion_seeds = sum(1 for p in pages if p.get("_scrape_seed"))
     logger.info(
         "Enrichment complete: %s OTX pulses, %s MalwareBazaar, "
-        "%s ThreatFox IOCs, %s URLhaus, %s ransomware.live groups "
-        "(%s .onion seeds) → %s enrichment pages total",
+        "%s ThreatFox IOCs, %s URLhaus, %s ransomware.live groups, "
+        "%s ransomlook.io groups (%s .onion seeds) → %s enrichment pages total",
         len(otx_pulses), len(mb_results), len(tf_results),
-        len(uh_results), len(rl_groups), total_onion_seeds, len(pages),
+        len(uh_results), len(rl_groups), len(rlook_groups),
+        total_onion_seeds, len(pages),
     )
 
     return pages
