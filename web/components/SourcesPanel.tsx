@@ -53,10 +53,19 @@ const SOURCE_ORDER = [
   "rss_feeds",
 ];
 
-type DotColor = "green" | "gray" | "yellow" | "red";
+// Where to get the free API key for sources that are skipped when unconfigured.
+const SOURCE_KEY_HINTS: Record<string, string> = {
+  malwarebazaar: "free key at https://auth.abuse.ch",
+  threatfox: "free key at https://auth.abuse.ch",
+  urlhaus: "free key at https://auth.abuse.ch",
+  otx: "free key at https://otx.alienvault.com",
+};
+
+type DotColor = "green" | "gray" | "yellow" | "red" | "orange";
 
 function getDotColor(status: string): DotColor {
   if (!status || status.startsWith("skipped") || status === "pending") return "gray";
+  if (status === "timed_out") return "orange";
   if (status === "error") return "red";
   if (status.includes("_0_")) return "yellow";
   if (status.startsWith("ok")) return "green";
@@ -71,9 +80,15 @@ function getResultCount(status: string): string | null {
 function getTooltip(key: string, status: string): string {
   const label = SOURCE_LABELS[key] ?? key;
   if (!status || status === "pending") return `${label}: pending`;
-  if (status === "skipped_no_key") return `${label}: skipped — no API key configured`;
+  if (status === "skipped_no_key") {
+    const hint = SOURCE_KEY_HINTS[key];
+    return hint
+      ? `${label}: skipped — no API key configured (${hint})`
+      : `${label}: skipped — no API key configured`;
+  }
   if (status === "skipped_disabled") return `${label}: disabled via env var`;
   if (status === "skipped_not_implemented") return `${label}: key present but not yet wired`;
+  if (status === "timed_out") return `${label}: did not finish in time (timed out)`;
   if (status === "error") return `${label}: failed with error`;
   const count = getResultCount(status);
   if (count === "0") return `${label}: ran, no results`;
@@ -89,12 +104,14 @@ const DOT_CLASSES: Record<DotColor, string> = {
   gray: "bg-[var(--text-muted)] opacity-50",
   yellow: "bg-yellow-400",
   red: "bg-red-500",
+  orange: "bg-orange-500",
 };
 
 const LEGEND = [
   { color: "green" as DotColor, label: "Results" },
   { color: "yellow" as DotColor, label: "No results" },
   { color: "gray" as DotColor, label: "Skipped" },
+  { color: "orange" as DotColor, label: "Timed out" },
   { color: "red" as DotColor, label: "Error" },
 ];
 

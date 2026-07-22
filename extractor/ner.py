@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 import re
 
+from extractor import entity_shape as _shape
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -393,148 +395,16 @@ _HANDLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Words that are common English nouns/verbs that may false-positive as handles.
-# Expanded to cover the full noise surface seen in dark web text: calendar
-# months, OS/software names, platform names, and crypto/DeFi nouns that
-# spaCy mis-classifies as handles.
-_COMMON_WORDS: frozenset[str] = frozenset({
-    # Generic identity words
-    "admin", "moderator", "user", "guest", "anon", "anonymous",
-    "unknown", "nobody", "someone", "anyone", "everyone",
-    "the", "and", "not", "for", "with", "that", "this",
-    # Audit-reported false positives
-    "consent", "devices",
-    # Calendar months
-    "january", "february", "march", "april", "june", "july",
-    "august", "september", "october", "november", "december",
-    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug",
-    "sep", "sept", "oct", "nov", "dec",
-    # Operating systems / device types
-    "windows", "macos", "ios", "android", "linux", "ubuntu",
-    "debian", "fedora", "redhat", "centos", "arch", "kali",
-    "parrot", "freebsd", "openbsd", "solaris", "aix",
-    # Web browsers / consumer software
-    "chrome", "firefox", "safari", "edge", "opera", "brave",
-    "vivaldi", "chromium", "torbrowser", "onionbrowser",
-    # Crypto exchanges / wallets (generic mentions, not addresses)
-    "coinbase", "binance", "kraken", "gemini", "bitfinex",
-    "kucoin", "okx", "bybit", "deribit", "bittrex", "poloniex",
-    "huobi", "gateio", "upbit", "bitstamp", "cex", "dex",
-    # Generic crypto / DeFi nouns
-    "bitcoin", "ethereum", "monero", "litecoin", "dogecoin",
-    "ripple", "solana", "tron", "zcash", "dash", "tether",
-    "usdc", "coinbase", "binance", "kraken", "gemini", "bitfinex",
-    "kucoin", "okx", "bybit", "deribit", "bittrex", "poloniex",
-    "huobi", "gate", "upbit", "bitstamp", "cex", "dex",
-    "nft", "defi", "dao", "yield", "farm", "pool", "stake",
-    "bridge", "oracle", "chainlink", "uniswap", "aave",
-    "compound", "maker", "curve", "balancer", "sushi",
-    "pancake", "ape", "bayc", "cryptopunk", "bored",
-    # Platform / community nouns
-    "discord", "telegram", "slack", "signal", "wire",
-    "matrix", "tox", "irc", "xmpp", "jabber",
-    "github", "gitlab", "bitbucket", "sourceforge",
-    "mega", "dropbox", "google", "drive", "onedrive",
-    "twitter", "mastodon", "facebook", "instagram", "tiktok",
-    "reddit", "4chan", "gab", "parler",
-    # Generic tech nouns
-    "server", "client", "host", "network", "proxy", "vpn",
-    "firewall", "router", "endpoint", "workstation", "node",
-    "cdn", "dns", "dhcp", "tcp", "udp", "http", "https",
-    "ftp", "ssh", "rdp", "vnc", "smb", "nfs",
-    # Generic malware/security tool names (as bare nouns, not handles)
-    "mimikatz", "cobaltstrike", "cobalt strike", "metasploit",
-    "empire", "covenant", "sliver", "bruteratel",
-    "resumekit", "lazagne", "koadic", "pupy", "silenttrinity",
-    # Misc. noise
-    "source", "leak", "breach", "paste", "dump", "database",
-    "market", "vendor", "seller", "buyer", "trader",
-    "order", "shop", "store", "cart",
-    "password", "credential", "combo", "base", "list",
-    "release", "update", "patch", "version", "build",
-    "token", "session", "cookie", "header", "payload",
-    "config", "settings", "options", "premium", "basic",
-    "free", "paid", "pro", "lite", "trial", "demo",
-    "app", "tool", "software", "program", "script",
-    "bot", "agent", "service", "daemon", "process",
-    "account", "profile", "key", "seed", "phrase",
-    "wallet", "address", "hash", "signature",
-})
-
-# Threat context words used to filter spaCy ORG entities
+# Threat-context gate for spaCy ORG extraction.  This is a *precision gate*
+# (only look for victim/target orgs on pages that are actually about a breach or
+# attack), NOT a denylist of entity strings — the accept/reject decision for
+# each candidate is made structurally by extractor.entity_shape.
 _THREAT_CONTEXT: frozenset[str] = frozenset({
     "breach", "leak", "attack", "ransom", "victim", "target",
     "compromised", "hacked", "stolen", "exfiltrated", "extorted",
     "encrypted", "infected", "malware", "ransomware", "exploit",
     "vulnerability", "phishing", "credentials", "data",
 })
-
-# spaCy ORG entity denylist — catch phrases and values that spaCy
-# mis-classifies as organisations from dark web text.  Includes:
-#   - Non-organisation proper nouns (stock tickers, tokens, events)
-#   - Generic tech/SaaS nouns spaCy over-recognises as ORG
-#   - Single words that are common nouns, not org names
-#   - Platform / service names that appear everywhere in dark web text
-# Case-insensitive matching; values are lowercased at runtime.
-_ORG_DENYLIST: frozenset[str] = frozenset({
-    # Stock tickers, tokens, and asset names spaCy mis-fires on
-    "bonk", "wamu", "hodl", "sui", "sui区块链",
-    # Conference / event names
-    "webinar", "defcon", "blackhat", "rsac",
-    # Generic platform/service nouns that appear in every dark web page
-    "google", "amazon", "facebook", "twitter", "instagram",
-    "tiktok", "snapchat", "whatsapp", "wechat", "telegram",
-    "discord", "slack", "reddit", "4chan", "gab",
-    "mega", "dropbox", "drive", "onedrive", "icloud",
-    "icloud", "mega", "mediafire", "zippyshare",
-    "pastebin", "rentry", "dpaste", "hastebin", "sourceforge",
-    # VPN / proxy / hosting brands (generic mentions, not actual org IOCs)
-    "nordvpn", "expressvpn", "surfshark", "protonvpn", "mullvad",
-    "express vpn", "nord vpn", "proton vpn",
-    # Domain registrars / hosting
-    "namecheap", "godaddy", "cloudflare", "dynadot", "enom",
-    "hostinger", "bluehost", "siteground", "digitalocean",
-    "vultr", "linode", "aws", "azure", "gcp", "heroku",
-    # Tech / SaaS tools that appear in every dark web page
-    "github", "gitlab", "bitbucket", "stackoverflow",
-    "npm", "pypi", "docker", "kubernetes", "terraform",
-    "ansible", "jenkins", "gitlab ci", "github actions",
-    # Cryptocurrency exchanges and wallets (generic mentions)
-    "coinbase", "binance", "kraken", "gemini", "bitfinex",
-    "kucoin", "okx", "bybit", "deribit", "bittrex", "poloniex",
-    "huobi", "gateio", "upbit", "bitstamp",
-    # Dark web infrastructure — generic terms, not actual org IOCs
-    "tor", "onion", "i2p", "freenet", "zeronet",
-    # Generic security / forensic tool mentions
-    "mimikatz", "cobaltstrike", "cobalt strike", "metasploit",
-    "empire", "covenant", "sliver", "resumekit",
-    # Payment / financial brands that appear in dark web pages
-    "paypal", "venmo", "cashapp", "zelle", "revolut",
-    "wise", "skrill", "neteller", "payeer",
-    # Generic corporate / team nouns spaCy over-recognises
-    "team", "group", "staff", "operations", "support",
-    "community", "forum", "marketplace", "vendor", "seller",
-    "buyer", "trader", "customer", "client", "partner",
-    "product", "service", "platform", "solution",
-    # OS / software names spaCy tags as ORG
-    "windows", "macos", "linux", "ubuntu", "debian",
-    "android", "ios", "chrome", "firefox", "safari",
-    # Misc. noise
-    "api", "sdk", "cli", "gui", "web", "app",
-    "bot", "agent", "node", "server", "client",
-    "release", "update", "patch", "version", "build",
-    "free", "paid", "pro", "basic", "premium",
-    "demo", "trial", "lite",
-})
-
-# spaCy ORG entity denylist — phrases containing these fragments are dropped.
-# Applied as a substring check (value lowercased), so "tor network" matches
-# the fragment "tor".
-_ORG_DENYLIST_FRAGMENTS: tuple[str, ...] = (
-    "tor network", "dark web", "darknet", "deep web",
-    "paste site", "file host", "link short", "url short",
-    "crypto exchange", "抽水", "菠菜", "博彩",  # Chinese spam org noise
-)
 
 # ---------------------------------------------------------------------------
 # spaCy singleton — loaded lazily on first call, never reloaded
@@ -599,10 +469,16 @@ def extract_named_entities(text: str) -> dict[str, list[str]]:
         )
 
         # --- Threat actor handles: heuristic context matching ---
+        # The context regex proposes candidates; entity_shape decides acceptance
+        # (entity shape or known-good gazetteer), replacing the old
+        # common-word denylist so a never-before-seen generic word is rejected
+        # structurally rather than only if someone had listed it.
         handles: list[str] = []
         for m in _HANDLE_RE.finditer(text):
             handle = m.group(1).strip()
-            if handle.lower() not in _COMMON_WORDS and "@" not in handle:
+            if "@" in handle:
+                continue
+            if _shape.evaluate(THREAT_ACTOR_HANDLE, handle).accept:
                 handles.append(handle)
         result[THREAT_ACTOR_HANDLE] = _dedup(handles)
 
@@ -616,14 +492,12 @@ def extract_named_entities(text: str) -> dict[str, list[str]]:
                 orgs: list[str] = []
                 for ent in doc.ents:
                     if ent.label_ == "ORG":
-                        v = ent.text.strip().lower()
-                        # Exact denylist
-                        if v in _ORG_DENYLIST:
-                            continue
-                        # Fragment denylist (substring check)
-                        if any(frag in v for frag in _ORG_DENYLIST_FRAGMENTS):
-                            continue
-                        orgs.append(ent.text.strip())
+                        candidate = ent.text.strip()
+                        # Accept only if it has organisation shape (proper-noun
+                        # structure, org suffix, brand casing) — not merely
+                        # "absent from a denylist".
+                        if _shape.evaluate(ORGANIZATION_NAME, candidate).accept:
+                            orgs.append(candidate)
                 result[ORGANIZATION_NAME] = _dedup(orgs)
 
     except Exception:

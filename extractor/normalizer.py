@@ -28,6 +28,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 import uuid
 
+from extractor import entity_shape as _shape
+from extractor import confidence as _conf
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -664,6 +667,33 @@ def _extraction_method_for(entity_type: str, override: str = "") -> str:
     return "LLM"
 
 
+# Regex IOC types whose canonical form is a genuine cryptographic checksum, not
+# just a shape match, when the checksum library is available.
+_CHECKSUM_TYPES: frozenset[str] = frozenset({"ETHEREUM_ADDRESS", "ETH_ADDRESS"})
+
+
+def _validation_tier(entity_type: str, value: str, shape_verdict, raw_value: Optional[str] = None) -> str:
+    """Classify how strongly *value* was validated, for confidence computation.
+
+    Name types carry the shape/gazetteer tier from entity_shape; regex IOC types
+    are at least format-verified (the pattern enforces a precise structure) and
+    checksum-verified when the address as written genuinely passes EIP-55
+    (Ethereum).  The checksum test runs against the *raw* extracted string —
+    the canonical form is re-checksummed, so testing it would always pass.
+    """
+    if shape_verdict is not None:
+        return shape_verdict.tier
+    if entity_type in _REGEX_TYPES:
+        if entity_type in _CHECKSUM_TYPES and eth_is_checksum_valid(
+            raw_value if raw_value is not None else value
+        ):
+            return "checksum_verified"
+        return "format_verified"
+    # Remaining NER/LLM types (PERSON_NAME, LOCATION, DATE) that cleared the
+    # light structural check — a modest positive tier, not "unvalidated".
+    return "heuristic_ok"
+
+
 def _context_snippet(page_text: str, needle: str, max_len: int = 2000) -> str:
     """Return a window of *page_text* around *needle* for analyst / stylometry context."""
     try:
@@ -1082,6 +1112,11 @@ class NormalizedEntity:
     # 0.6 = secondary source (GitHub README, GitLab repo files)
     # 0.0 = placeholder / reserved range (RFC 5737 IPs, RFC 2606 domains)
     source_quality: float = field(default=1.0)
+    # Validation tier that fed the computed confidence — one of
+    # "checksum_verified", "format_verified", "gazetteer", "shape_strong",
+    # "shape_ok", "shape_weak", "unvalidated".  Kept for introspection/ranking;
+    # not persisted to the DB.
+    validation_tier: str = field(default="")
 
     @property
     def canonical_value(self) -> str:
@@ -1147,22 +1182,37 @@ def _normalize_value(entity_type: str, value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Web3 availability check (import once at module load)
+# Ethereum EIP-55 checksum support (import once at module load)
 # ---------------------------------------------------------------------------
+# We use eth-utils (a lightweight checksum-only library) rather than full web3
+# so an extracted Ethereum address can be genuinely checksum-validated instead
+# of only shape-matched.  web3 is accepted as a fallback if it happens to be the
+# thing installed; without either, ETH addresses degrade to format-verified.
 
+_eth_to_checksum = None
+_eth_is_checksum = None
 try:
-    from web3 import Web3
-
-    Web3.to_checksum_address("0x" + "0" * 40)
-    WEB3_AVAILABLE = True
+    from eth_utils import to_checksum_address as _eth_to_checksum
+    from eth_utils import is_checksum_address as _eth_is_checksum
+    ETH_CHECKSUM_AVAILABLE = True
 except Exception:
-    WEB3_AVAILABLE = False
+    try:
+        from web3 import Web3 as _Web3
+
+        _eth_to_checksum = _Web3.to_checksum_address
+        _eth_is_checksum = _Web3.is_checksum_address
+        ETH_CHECKSUM_AVAILABLE = True
+    except Exception:
+        ETH_CHECKSUM_AVAILABLE = False
+
+# Backwards-compatible alias (older code / tests referenced WEB3_AVAILABLE).
+WEB3_AVAILABLE = ETH_CHECKSUM_AVAILABLE
 
 
 def _eth_checksum(addr: str) -> str:
     """
     Apply EIP-55 mixed-case checksum encoding to an Ethereum address.
-    Falls back to lowercase if web3 is unavailable or checksum fails.
+    Falls back to lowercase if no checksum library is available or it fails.
     """
     if not addr:
         return ""
@@ -1171,17 +1221,32 @@ def _eth_checksum(addr: str) -> str:
     if not addr.startswith("0x") or len(addr) != 42:
         return addr.lower()
 
-    if not WEB3_AVAILABLE:
+    if not ETH_CHECKSUM_AVAILABLE:
         return addr.lower()
 
     try:
-        from web3 import Web3
-
-        return Web3.to_checksum_address(addr)
-    except ValueError:
-        return addr.lower()
+        return _eth_to_checksum(addr)
     except Exception:
         return addr.lower()
+
+
+def eth_is_checksum_valid(addr: str) -> bool:
+    """Return True only if *addr* is written in valid EIP-55 checksummed form.
+
+    An all-lowercase (or all-uppercase) address is syntactically valid but not
+    checksum-protected, so it is NOT checksum-verified — this is the genuine
+    "checksum-valid vs. shape-only" distinction the confidence model rewards.
+    Returns False when no checksum library is available.
+    """
+    if not ETH_CHECKSUM_AVAILABLE or not addr:
+        return False
+    addr = addr.strip()
+    if not addr.startswith("0x") or len(addr) != 42:
+        return False
+    try:
+        return bool(_eth_is_checksum(addr))
+    except Exception:
+        return False
 
 
 def canonicalize_entity_value(entity_type: str, value: str) -> str:
@@ -1368,9 +1433,6 @@ def normalize_entities(
     seen_values: set[str] = set()
     result: list[NormalizedEntity] = []
 
-    tool_count = 0
-    generic_count = 0
-    leet_count = 0
     noise_count = 0
 
     for entity_type, values in raw_entities.items():
@@ -1446,26 +1508,35 @@ def normalize_entities(
             if not canonical:
                 continue
 
-            if entity_type not in _REGEX_TYPES:
-                value_lower = canonical.lower()
-                if is_blocked_entity(entity_type, canonical):
-                    if entity_type == "THREAT_ACTOR_HANDLE" and value_lower in KNOWN_TOOLS:
-                        tool_count += 1
-                    elif entity_type == "THREAT_ACTOR_HANDLE" and LEET_GENERIC.match(value_lower):
-                        leet_count += 1
-                    elif value_lower in ENTITY_BLOCKLIST:
-                        generic_count += 1
-                    else:
-                        noise_count += 1
-
+            # -------------------------------------------------------------
+            # Acceptance gate.
+            #
+            # Shape-validated name types (THREAT_ACTOR_HANDLE, ORGANIZATION_NAME,
+            # MALWARE_FAMILY, RANSOMWARE_GROUP) are accepted ONLY if they
+            # plausibly have the entity's shape or match the known-good
+            # gazetteer — the accept-if-plausible test that replaces the old
+            # reject-if-on-denylist approach.  A never-before-seen generic word
+            # is rejected structurally the first time it appears, without anyone
+            # having to have added it to a list.
+            #
+            # The remaining NER/LLM types (PERSON_NAME, LOCATION, DATE) keep a
+            # light structural check only (length / numeric-only); regex IOC
+            # types bypass both — their patterns are already precise.
+            # -------------------------------------------------------------
+            shape_verdict = None
+            if _conf.is_shape_validated_type(entity_type):
+                shape_verdict = _shape.evaluate(entity_type, canonical)
+                if not shape_verdict.accept:
+                    noise_count += 1
                     logger.debug(
-                        "Filtered blocked entity: %s=%s", entity_type, canonical
+                        "Shape-rejected %s=%r (tier=%s score=%.2f)",
+                        entity_type, canonical, shape_verdict.tier, shape_verdict.score,
                     )
                     continue
-
-                if entity_type == "ORGANIZATION_NAME" and not _is_valid_org_name(canonical):
+            elif entity_type not in _REGEX_TYPES:
+                if is_blocked_entity(entity_type, canonical):
                     noise_count += 1
-                    logger.debug("Filtered noisy ORGANIZATION_NAME: %s", canonical)
+                    logger.debug("Filtered blocked entity: %s=%s", entity_type, canonical)
                     continue
 
             dedup_key = f"{entity_type}::{canonical}"
@@ -1506,6 +1577,22 @@ def normalize_entities(
                 continue
 
             snip = _context_snippet(page_text, canonical) if page_text else ""
+
+            # Computed, continuous confidence from real signals — validation
+            # strength, shape plausibility, context support, and method prior —
+            # instead of a fixed lookup by type.  Corroboration across sources is
+            # folded in later at the batch cap stage (pipeline.apply_entity_cap).
+            validation = _validation_tier(entity_type, canonical, shape_verdict, raw_value=raw_value)
+            context_window = snip or (page_text or "")[:2000]
+            context_ok = _conf.context_supports(entity_type, context_window)
+            confidence = _conf.compute_confidence(
+                entity_type,
+                method,
+                validation=validation,
+                shape_score=(shape_verdict.score if shape_verdict is not None else None),
+                context_support=context_ok,
+            )
+
             result.append(
                 NormalizedEntity(
                     entity_type=entity_type,
@@ -1516,15 +1603,14 @@ def normalize_entities(
                     context_snippet=snip,
                     extraction_method=_extraction_method_for(entity_type, extraction_method),
                     source_quality=source_quality,
+                    validation_tier=validation,
                 )
             )
 
-    total_filtered = tool_count + leet_count + generic_count + noise_count
-    if total_filtered:
+    if noise_count:
         logger.warning(
-            f"Entity blocklist filtered {total_filtered} entities "
-            f"(tool_names={tool_count}, generic_terms={generic_count}, "
-            f"leet_generic={leet_count}, NER/LLM noise={noise_count})"
+            "Shape/structural validation filtered %d candidate entities "
+            "(rejected as not entity-shaped)", noise_count
         )
 
     return result
@@ -1536,13 +1622,25 @@ def merge_with_db(
 ) -> list:
     """
     Upsert each entity to the DB entities table using canonical deduplication.
-    Returns a list of DB-assigned entity IDs (as strings).
+
+    Returns a list of DB-assigned entity IDs (as strings) aligned 1:1 with the
+    input ``entities`` list — an entry is ``None`` only if that one entity could
+    not be persisted.  Callers rely on this positional alignment (see
+    ``extractor/pipeline.py``), so the length always matches the input.
+
+    Issue 3 — a collision on a single entity must never discard the rest of the
+    batch.  Each entity is persisted inside its own SAVEPOINT: if a concurrent
+    writer inserts the same canonical value between our existence check and our
+    INSERT, the unique constraint fires, we roll back *only that entity's*
+    savepoint, then resolve it cleanly by re-running the upsert (which now finds
+    the committed row and links it to this investigation).  Every other entity
+    in the batch is committed normally.
     """
     if not os.getenv("DATABASE_URL"):
         logger.warning(
             "DATABASE_URL not set — skipping DB persist (%d entities)", len(entities)
         )
-        return []
+        return [None] * len(entities)
 
     if not entities:
         return []
@@ -1550,50 +1648,115 @@ def merge_with_db(
     ids: list = []
     new_count = 0
     dedup_count = 0
+    collision_count = 0
+    failed_count = 0
 
     try:
         from db.session import get_session
         from db.queries import upsert_entity_canonical, create_page, get_page_by_url
+        from sqlalchemy.exc import IntegrityError
+
+        def _persist_one(session, entity, page) -> tuple[object, bool]:
+            return upsert_entity_canonical(
+                session=session,
+                investigation_id=investigation_id,
+                entity_type=entity.entity_type,
+                entity_value=entity.value,
+                confidence=entity.confidence,
+                source_page_id=page.id if page is not None else None,
+                context_snippet=entity.context_snippet,
+                extraction_method=entity.extraction_method or None,
+            )
 
         with get_session() as session:
             page_cache: dict[str, object] = {}
 
             for entity in entities:
                 url = entity.source_url
-                if url not in page_cache:
-                    page = get_page_by_url(session, url)
-                    if page is None:
-                        page = create_page(session, url=url)
-                    page_cache[url] = page
 
-                page = page_cache[url]
+                # Resolve the source Page in its own savepoint so a later
+                # entity-level rollback can never invalidate a cached page.
+                page = page_cache.get(url)
+                if page is None:
+                    try:
+                        with session.begin_nested():
+                            page = get_page_by_url(session, url)
+                            if page is None:
+                                page = create_page(session, url=url)
+                        page_cache[url] = page
+                    except IntegrityError:
+                        # Concurrent page insert — re-read the now-committed row.
+                        try:
+                            with session.begin_nested():
+                                page = get_page_by_url(session, url)
+                            if page is not None:
+                                page_cache[url] = page
+                        except Exception as _pexc:
+                            logger.debug("page re-read failed for %s: %s", url, _pexc)
+                            page = None
+                    except Exception as _pexc:
+                        logger.debug("page resolve failed for %s: %s", url, _pexc)
+                        page = None
 
-                db_entity, created = upsert_entity_canonical(
-                    session=session,
-                    investigation_id=investigation_id,
-                    entity_type=entity.entity_type,
-                    entity_value=entity.value,
-                    confidence=entity.confidence,
-                    source_page_id=page.id,
-                    context_snippet=entity.context_snippet,
-                    extraction_method=entity.extraction_method or None,
-                )
+                try:
+                    with session.begin_nested():  # SAVEPOINT per entity
+                        db_entity, created = _persist_one(session, entity, page)
+                    if created:
+                        new_count += 1
+                    else:
+                        dedup_count += 1
+                    ids.append(str(db_entity.id))
+                    continue
+                except IntegrityError as exc:
+                    # A concurrent writer inserted the same canonical entity
+                    # between our existence check and our INSERT.  The savepoint
+                    # rolled back just this entity's work — resolve it by
+                    # retrying the upsert, which now finds the committed row and
+                    # links it to this investigation.
+                    logger.debug(
+                        "Entity collision for %s=%s — resolving via re-link: %s",
+                        entity.entity_type, entity.value, exc,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "merge_with_db: entity %s=%s failed (skipped, batch continues): %s",
+                        entity.entity_type, entity.value, exc,
+                    )
+                    ids.append(None)
+                    failed_count += 1
+                    continue
 
-                if created:
-                    new_count += 1
-                else:
-                    dedup_count += 1
-
-                ids.append(str(db_entity.id))
+                # Collision-resolution retry, isolated in its own savepoint.
+                try:
+                    with session.begin_nested():
+                        db_entity, created = _persist_one(session, entity, page)
+                    collision_count += 1
+                    if created:
+                        new_count += 1
+                    else:
+                        dedup_count += 1
+                    ids.append(str(db_entity.id))
+                except Exception as re_exc:
+                    logger.warning(
+                        "merge_with_db: entity %s=%s failed to resolve after "
+                        "collision (skipped, batch continues): %s",
+                        entity.entity_type, entity.value, re_exc,
+                    )
+                    ids.append(None)
+                    failed_count += 1
 
             session.commit()
             if investigation_id:
                 logger.warning(
-                    f"[{investigation_id}] Entity dedup: {new_count} new, {dedup_count} merged with existing"
+                    f"[{investigation_id}] Entity dedup: {new_count} new, "
+                    f"{dedup_count} merged with existing, "
+                    f"{collision_count} concurrent collisions resolved, "
+                    f"{failed_count} failed"
                 )
 
     except Exception as exc:
         logger.warning("merge_with_db failed: %s", exc)
-        return []
+        # Preserve positional alignment for the caller even on total failure.
+        return ids + [None] * (len(entities) - len(ids))
 
     return ids

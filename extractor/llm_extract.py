@@ -235,14 +235,22 @@ async def extract_with_llm(
     from utils.investigation_metrics import record_extraction
     record_extraction(cache_hit=False)
 
-    # Filter blocked entities before LLM to avoid processing noise
-    # Only apply to NER types (regex types have precise patterns, skip blocklist)
+    # Filter noise out of the existing entities before deciding whether to
+    # spend an LLM call.  Regex IOC types have precise patterns (kept as-is);
+    # shape-validated name types use the same shape/gazetteer test the rest of
+    # the pipeline uses (not a denylist); other NER/LLM types keep the light
+    # structural check.
     try:
         from extractor.normalizer import is_blocked_entity, _REGEX_TYPES
+        from extractor import confidence as _conf, entity_shape as _shape
         filtered: dict[str, list[str]] = {}
         for entity_type, values in existing_entities.items():
             if entity_type in _REGEX_TYPES:
                 filtered[entity_type] = list(values)
+            elif _conf.is_shape_validated_type(entity_type):
+                kept = [v for v in values if _shape.evaluate(entity_type, v).accept]
+                if kept:
+                    filtered[entity_type] = kept
             else:
                 kept = [v for v in values if not is_blocked_entity(entity_type, v)]
                 if kept:

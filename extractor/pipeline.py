@@ -28,6 +28,7 @@ import uuid
 from extractor.regex_patterns import extract_all as _regex_extract_all
 from extractor.ner import extract_named_entities as _ner_extract
 from extractor.llm_extract import extract_with_llm as _llm_extract
+from extractor import confidence as _conf
 from extractor.normalizer import (
     normalize_entities as _normalize,
     merge_with_db as _merge_db,
@@ -513,7 +514,14 @@ async def extract_entities_from_pages(
         try:
             entity_id_map = _merge_db(capped_entities, investigation_id)
             url_to_ids: dict[str, list] = {}
+            # entity_id_map is aligned 1:1 with capped_entities; an entry is
+            # None only when that single entity could not be persisted (a
+            # collision or per-entity failure never sinks the rest of the
+            # batch — see normalizer.merge_with_db).  Skip None so a partial
+            # failure doesn't misalign the remaining entity IDs.
             for ent, eid in zip(capped_entities, entity_id_map):
+                if eid is None:
+                    continue
                 if ent.source_url not in url_to_ids:
                     url_to_ids[ent.source_url] = []
                 url_to_ids[ent.source_url].append(eid)
@@ -634,31 +642,39 @@ def apply_entity_cap(
     Returns: (capped_entities, original_count)
     """
     original_count = len(entities)
+    _CONFIDENCE_FLOOR = 0.80
 
-    # Step a: confidence filter — also drops placeholder entities (source_quality=0.0)
-    filtered = [e for e in entities if e.confidence >= 0.80]
+    # Drop placeholder / reserved-range entities (source_quality == 0.0) up front.
     placeholder_count = sum(1 for e in entities if getattr(e, "source_quality", 1.0) == 0.0)
-    filtered = [e for e in filtered if getattr(e, "source_quality", 1.0) != 0.0]
-    removed_confidence = original_count - placeholder_count - len(filtered)
-    if removed_confidence:
-        logger.warning(f"Entity confidence/placeholder filter removed {removed_confidence} low-confidence entities")
-    if placeholder_count:
-        logger.info(f"Entity placeholder filter dropped {placeholder_count} reserved-range entities")
+    candidates = [e for e in entities if getattr(e, "source_quality", 1.0) != 0.0]
 
-    # Count occurrences per entity (by type+value) and boost confidence.
-    # The boost is per-investigation and additive: base confidence plus a
-    # capped occurrence boost, never multiplied across stages.
-    for ent in filtered:
+    # Corroboration + source-quality lift is applied BEFORE the confidence floor,
+    # so an entity observed across several independent sources can clear the
+    # floor on the strength of that corroboration.  Confidence is already a
+    # computed per-entity signal at this point (see extractor.confidence); here
+    # we fold in the one signal that isn't knowable per-page — how many distinct
+    # sources saw the same value.
+    for ent in candidates:
         occ_pages = len({
             e.source_url
-            for e in filtered
+            for e in candidates
             if e.entity_type == ent.entity_type and e.value == ent.value
         })
         ent._occurrence = occ_pages
-        confidence_boost = min(max(occ_pages - 1, 0) * 0.01, 0.05)
         source_quality = float(getattr(ent, "source_quality", 1.0) or 1.0)
         quality_boost = max(0.0, (source_quality - 0.5) * 0.06)
-        ent.confidence = min(ent.confidence + confidence_boost + quality_boost, 1.0)
+        ent.confidence = min(
+            ent.confidence + _conf.corroboration_boost(occ_pages) + quality_boost,
+            0.99,
+        )
+
+    # Step a: confidence floor (after corroboration).
+    filtered = [e for e in candidates if e.confidence >= _CONFIDENCE_FLOOR]
+    removed_confidence = len(candidates) - len(filtered)
+    if removed_confidence:
+        logger.warning(f"Entity confidence filter removed {removed_confidence} low-confidence entities")
+    if placeholder_count:
+        logger.info(f"Entity placeholder filter dropped {placeholder_count} reserved-range entities")
 
     # Step b: per-type sub-caps
     filtered = _apply_per_type_caps(filtered)

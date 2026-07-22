@@ -1419,84 +1419,75 @@ async def _run_investigation_task(
                 logger.info("[%s] Telegram failed (non-fatal): %s", inv_uuid, exc)
                 raise
 
-        # Hard 5-minute cap on the entire parallel phase (search + enrichment +
-        # crawler + paste scraping + github scraping + gitlab scraping + RSS
-        # feeds).  Each inner function also has its own timeout so partial
-        # results are preserved even if only one hangs.
-        # return_exceptions=True ensures one failing task never cancels the others.
-        try:
-            _gr = await _gather_with_partial_results([
-                    run_search_and_filter(),
-                    run_enrichment(),
-                    run_crawler_task(),
-                    run_paste_scraping_task(),
-                    run_github_scraping_task(),
-                    run_gitlab_scraping_task(),
-                    run_rss_scraping_task(),
-                    run_telegram_task(),
-                ],
-                timeout=_phase_timeout("parallel_sources"),
+        # Hard cap on the entire parallel phase (search + enrichment + crawler +
+        # paste scraping + github + gitlab + RSS feeds).  Each inner function
+        # also has its own timeout so a single slow source can't stall the phase.
+        #
+        # Issue 1 — we must NOT discard work that already finished when the
+        # overall deadline fires.  Each source runs as its own task with its own
+        # result slot; whatever has genuinely completed by the deadline is kept,
+        # and only tasks still in flight are marked as timed out — never
+        # conflated with sources that completed or errored.
+        _parallel_specs = [
+            ("tor_search", run_search_and_filter),
+            ("enrichment", run_enrichment),
+            ("crawler", run_crawler_task),
+            ("paste_sites", run_paste_scraping_task),
+            ("github", run_github_scraping_task),
+            ("gitlab", run_gitlab_scraping_task),
+            ("rss_feeds", run_rss_scraping_task),
+            ("telegram", run_telegram_task),
+        ]
+        _parallel_tasks: dict[str, asyncio.Task] = {
+            name: asyncio.ensure_future(fn()) for name, fn in _parallel_specs
+        }
+        _parallel_deadline = _phase_timeout("parallel_sources")
+        _done, _pending = await asyncio.wait(
+            _parallel_tasks.values(), timeout=_parallel_deadline
+        )
+        if _pending:
+            logger.warning(
+                "[%s] Parallel phase hit %ds cap — %d source(s) still running "
+                "(marked timed_out); continuing with %d completed source(s)",
+                inv_uuid, _parallel_deadline, len(_pending),
+                len(_parallel_tasks) - len(_pending),
+>>>>>>> 47bde6ad (fix: improve extraction confidence and timeout handling)
             )
-        except asyncio.TimeoutError:
-            logger.warning("[%s] Parallel phase hit 300s hard cap — using empty results", inv_uuid)
-            _gr = [[], [], [], [], [], [], []]
+            for _t in _pending:
+                _t.cancel()
+            # Await the cancellations so no source task is left orphaned.
+            await asyncio.gather(*_pending, return_exceptions=True)
 
+        # After the optional cancel-and-gather above, every task is now done —
+        # either it completed (kept), raised (error), or was cancelled at the
+        # deadline (timed_out).  A task that finished in the instant between the
+        # deadline and cancel() lands here as done-with-result, so its work is
+        # still preserved rather than discarded.
         _source_errors: set[str] = set()
+        _source_timeouts: set[str] = set()
+        _parallel_results: dict[str, list] = {}
+        for _name, _task in _parallel_tasks.items():
+            if _task.cancelled() or not _task.done():
+                logger.warning("[%s] Source '%s' did not finish in time (timed_out)", inv_uuid, _name)
+                _source_timeouts.add(_name)
+                _parallel_results[_name] = []
+                continue
+            _exc = _task.exception()
+            if _exc is not None:
+                logger.warning("[%s] Source '%s' task raised: %s", inv_uuid, _name, _exc)
+                _source_errors.add(_name)
+                _parallel_results[_name] = []
+            else:
+                _parallel_results[_name] = _task.result()
 
-        if isinstance(_gr[0], Exception):
-            logger.warning("[%s] Search+filter task raised: %s", inv_uuid, _gr[0])
-            _source_errors.add("tor_search")
-            onionsearch_error = True
-            search_urls = []
-        else:
-            search_urls = _gr[0]
-
-        if isinstance(_gr[1], Exception):
-            logger.warning("[%s] Enrichment task raised: %s", inv_uuid, _gr[1])
-            _source_errors.add("enrichment")
-            enrichment_pages = []
-        else:
-            enrichment_pages = _gr[1]
-
-        if isinstance(_gr[2], Exception):
-            logger.warning("[%s] Crawler task raised: %s", inv_uuid, _gr[2])
-            crawler_urls = []
-        else:
-            crawler_urls = _gr[2]
-
-        if isinstance(_gr[3], Exception):
-            logger.warning("[%s] Paste scraping task raised: %s", inv_uuid, _gr[3])
-            _source_errors.add("paste_sites")
-            paste_pages = []
-        else:
-            paste_pages = _gr[3]
-
-        if isinstance(_gr[4], Exception):
-            logger.warning("[%s] GitHub scraping task raised: %s", inv_uuid, _gr[4])
-            _source_errors.add("github")
-            github_pages = []
-        else:
-            github_pages = _gr[4]
-
-        if isinstance(_gr[5], Exception):
-            logger.warning("[%s] GitLab scraping task raised: %s", inv_uuid, _gr[5])
-            _source_errors.add("gitlab")
-            gitlab_pages = []
-        else:
-            gitlab_pages = _gr[5]
-
-        if isinstance(_gr[6], Exception):
-            logger.warning("[%s] RSS scraping task raised: %s", inv_uuid, _gr[6])
-            _source_errors.add("rss_feeds")
-            rss_pages = []
-        else:
-            rss_pages = _gr[6]
-
-        if isinstance(_gr[7], Exception):
-            _source_errors.add("telegram")
-            telegram_pages = []
-        else:
-            telegram_pages = _gr[7]
+        search_urls = _parallel_results["tor_search"]
+        enrichment_pages = _parallel_results["enrichment"]
+        crawler_urls = _parallel_results["crawler"]
+        paste_pages = _parallel_results["paste_sites"]
+        github_pages = _parallel_results["github"]
+        gitlab_pages = _parallel_results["gitlab"]
+        rss_pages = _parallel_results["rss_feeds"]
+        telegram_pages = _parallel_results["telegram"]
 
         await _update_progress(inv_uuid, 2)
         _metric_finish("source_gathering")
@@ -1520,8 +1511,13 @@ async def _run_investigation_task(
         _otx_key = (resolved_keys.get("OTX_API_KEY") or "").strip()
         _vt_key = os.getenv("VT_API_KEY", "").strip()
         _st_key = os.getenv("SECURITYTRAILS_API_KEY", "").strip()
+        # abuse.ch (MalwareBazaar / ThreatFox / URLhaus) now require a free
+        # Auth-Key.  Absence means those sources could not run at all (Issue 4).
+        _abusech_key = os.getenv("ABUSECH_API_KEY", "").strip()
 
         def _src_status(count: int, error_key: str | None = None) -> str:
+            if error_key and error_key in _source_timeouts:
+                return "timed_out"
             if error_key and error_key in _source_errors:
                 return "error"
             return f"ok_{count}_results" if count > 0 else "ok_0_results"
@@ -1543,14 +1539,20 @@ async def _run_investigation_task(
 
         sources_used["securitytrails"] = "skipped_no_key" if not _st_key else "skipped_not_implemented"
 
-        # Free enrichment sources
+        # abuse.ch family (MalwareBazaar / ThreatFox / URLhaus) — these require a
+        # free Auth-Key (ABUSECH_API_KEY).  When it's missing they cannot run, so
+        # report skipped_no_key rather than ok_0_results, which would read as
+        # "ran fine, found nothing" (Issue 4).  Same pattern as otx/virustotal.
         for _skey, _psrc in [
             ("malwarebazaar", "malwarebazaar"),
             ("threatfox", "threatfox"),
             ("urlhaus", "urlhaus"),
         ]:
-            n = sum(1 for p in enrichment_pages if p.get("source") == _psrc)
-            sources_used[_skey] = _src_status(n, "enrichment")
+            if not _abusech_key:
+                sources_used[_skey] = "skipped_no_key"
+            else:
+                n = sum(1 for p in enrichment_pages if p.get("source") == _psrc)
+                sources_used[_skey] = _src_status(n, "enrichment")
 
         _rl_n = sum(
             1 for p in enrichment_pages
@@ -1576,7 +1578,9 @@ async def _run_investigation_task(
         sources_used["shodan"] = _src_status(_shodan_n, "enrichment")
 
         # Tor search
-        if "tor_search" in _source_errors:
+        if "tor_search" in _source_timeouts:
+            sources_used["tor_search"] = "timed_out"
+        elif "tor_search" in _source_errors:
             sources_used["tor_search"] = "error"
         else:
             n = len(search_urls)
@@ -1585,6 +1589,8 @@ async def _run_investigation_task(
         # Clearnet scrapers
         if not _github_scraping_enabled():
             sources_used["github"] = "skipped_disabled"
+        elif "github" in _source_timeouts:
+            sources_used["github"] = "timed_out"
         elif "github" in _source_errors:
             sources_used["github"] = "error"
         else:
@@ -1592,6 +1598,8 @@ async def _run_investigation_task(
 
         if not _gitlab_scraping_enabled():
             sources_used["gitlab"] = "skipped_disabled"
+        elif "gitlab" in _source_timeouts:
+            sources_used["gitlab"] = "timed_out"
         elif "gitlab" in _source_errors:
             sources_used["gitlab"] = "error"
         else:
@@ -1599,6 +1607,8 @@ async def _run_investigation_task(
 
         if not _paste_scraping_enabled():
             sources_used["paste_sites"] = "skipped_disabled"
+        elif "paste_sites" in _source_timeouts:
+            sources_used["paste_sites"] = "timed_out"
         elif "paste_sites" in _source_errors:
             sources_used["paste_sites"] = "error"
         else:
@@ -1606,6 +1616,8 @@ async def _run_investigation_task(
 
         if not _rss_scraping_enabled():
             sources_used["rss_feeds"] = "skipped_disabled"
+        elif "rss_feeds" in _source_timeouts:
+            sources_used["rss_feeds"] = "timed_out"
         elif "rss_feeds" in _source_errors:
             sources_used["rss_feeds"] = "error"
         else:

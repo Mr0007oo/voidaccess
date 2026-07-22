@@ -27,6 +27,25 @@ DEFAULT_PERSIST_DIR = "./chroma_db"
 COLLECTION_NAME = "voidaccess_pages"
 ACTOR_PROFILE_COLLECTION = "actor_style_profiles"
 
+# Issue 2: a cached page must go through the SAME size cap that a freshly
+# scraped page does before extraction, otherwise the exact same URL yields a
+# different number of entities purely depending on whether it was cached.  The
+# fresh path truncates to scraper.scrape.MAX_RETURN_CHARS before extraction, so
+# we mirror that here instead of the old, silently smaller 8 000-char cap.
+_FALLBACK_CACHE_DOCUMENT_CHARS = 15_000
+
+
+def _cache_document_cap() -> int:
+    """Character cap for stored cache documents — kept in lockstep with the
+    fresh-scrape return cap so cached and fresh content are identical inputs
+    to the extractor.  Read lazily to avoid importing the scraper at module
+    load; falls back to the known fresh cap if the import is unavailable."""
+    try:
+        from scraper.scrape import MAX_RETURN_CHARS
+        return int(MAX_RETURN_CHARS)
+    except Exception:
+        return _FALLBACK_CACHE_DOCUMENT_CHARS
+
 _ACTOR_COLLECTION: Any = None
 
 
@@ -174,7 +193,7 @@ def upsert_page(
             ids=[pid],
             embeddings=[emb],
             metadatas=[meta],
-            documents=[text[:8000]],
+            documents=[text[: _cache_document_cap()]],
         )
         return True
     except Exception as exc:
