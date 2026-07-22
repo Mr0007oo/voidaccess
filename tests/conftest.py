@@ -27,6 +27,16 @@ os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
 os.environ.pop("DATABASE_URL", None)
 
 import pytest
+from sqlalchemy import create_engine
+
+
+@pytest.fixture
+def db_engine(tmp_path):
+    """Isolated SQLite engine for database/settings/export tests."""
+    return create_engine(
+        f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
 
 from utils.enrichment_cache import EnrichmentCache, reset_default_cache
 
