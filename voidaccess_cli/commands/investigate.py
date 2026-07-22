@@ -1091,26 +1091,28 @@ def _build_cooccurrence_edges(investigation_id: str) -> int:
             .options(joinedload(Entity.page))
             .filter(Entity.investigation_id == inv_uuid)
             .all()
-        )
-    by_page: dict[uuid.UUID, list] = {}
-    for ent in rows:
-        page_id = getattr(ent, "page_id", None)
-        if page_id is None:
-            continue
-        by_page.setdefault(page_id, []).append(ent)
+        by_page: dict[uuid.UUID, list] = {}
+        for ent in rows:
+            page_id = getattr(ent, "page_id", None)
+            if page_id is None:
+                continue
+            by_page.setdefault(page_id, []).append(ent)
 
-    for page_entities in by_page.values():
-        if len(page_entities) < 2:
-            continue
-        for ent_a, ent_b in _iter_semantic_cooccurrence_pairs(page_entities):
-            edges.append(
-                {
-                    "entity_a_id": str(ent_a.id),
-                    "entity_b_id": str(ent_b.id),
-                    "relationship_type": "CO_APPEARED_ON",
-                    "confidence": 0.8,
-                }
-            )
+        # Consume ORM rows while their session is open.  ``joinedload`` avoids
+        # a query for ``page`` but does not make detached relationship access
+        # safe after the session closes.
+        for page_entities in by_page.values():
+            if len(page_entities) < 2:
+                continue
+            for ent_a, ent_b in _iter_semantic_cooccurrence_pairs(page_entities):
+                edges.append(
+                    {
+                        "entity_a_id": str(ent_a.id),
+                        "entity_b_id": str(ent_b.id),
+                        "relationship_type": "CO_APPEARED_ON",
+                        "confidence": 0.8,
+                    }
+                )
     return save_relationships(investigation_id, edges)
 
 
@@ -1257,6 +1259,5 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- {glyph} {name}{detail}")
 
     return "\n".join(lines) + "\n"
-
 
 
