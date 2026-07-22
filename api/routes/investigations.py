@@ -366,8 +366,12 @@ async def _build_graph_phase(
         from db.session import get_session
         from db.models import Investigation
 
+        # CLI investigations carry IDs as strings, while the ORM UUID columns
+        # require uuid.UUID values on SQLite/PostgreSQL alike.
+        graph_investigation_id = uuid.UUID(str(inv_uuid))
+
         graph_obj = await asyncio.to_thread(
-            build_graph_from_db, investigation_id=inv_uuid
+            build_graph_from_db, investigation_id=graph_investigation_id
         )
         node_count = len(graph_obj.nodes())
         edge_count = len(graph_obj.edges())
@@ -388,7 +392,7 @@ async def _build_graph_phase(
 
         try:
             persist_result = await asyncio.to_thread(
-                _persist_graph_edges_sync, graph_obj, inv_uuid
+                _persist_graph_edges_sync, graph_obj, graph_investigation_id
             )
             graph_status = persist_result.get("status", "written")
             edges_written = persist_result.get("edges_written", 0)
