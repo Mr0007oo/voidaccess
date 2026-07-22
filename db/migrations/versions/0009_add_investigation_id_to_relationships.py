@@ -21,7 +21,11 @@ def upgrade():
             sa.Column(
                 "investigation_id",
                 sa.UUID(as_uuid=True),
-                sa.ForeignKey("investigations.id", ondelete="SET NULL"),
+                sa.ForeignKey(
+                    "investigations.id",
+                    name="fk_entity_relationships_investigation_id",
+                    ondelete="SET NULL",
+                ),
                 nullable=True,
                 index=True,
             )
