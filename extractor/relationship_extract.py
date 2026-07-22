@@ -39,7 +39,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import io
 import logging
+from contextlib import redirect_stdout
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -146,7 +148,8 @@ async def _invoke_llm(prompt: str, llm) -> str:
     """Call the LLM with streaming/callbacks disabled (mirrors llm_extract)."""
     try:
         silent_llm = llm.bind(streaming=False, callbacks=[])
-        response = await silent_llm.ainvoke(prompt)
+        with redirect_stdout(io.StringIO()):
+            response = await silent_llm.ainvoke(prompt)
         content = response.content if hasattr(response, "content") else str(response)
         return content.strip()
     except Exception as exc:  # noqa: BLE001 — never let one page break the pass
