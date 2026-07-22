@@ -15,6 +15,14 @@ All notable changes to VoidAccess are documented here.
 ### Fixed
 - Phase-A threat-intel enrichment now preserves the results of sources that finished before the deadline instead of discarding the entire batch when the 59s/55s cap is hit (`_gather_with_partial_results`).
 - CLI `investigate` reputation steps (domain/hash/email) no longer clobber the threaded `extraction_results` list into a `(results, stats)` tuple, which had silently starved subsequent steps and actor-profile aggregation of entities.
+- Typed relationship edges. A distinct LLM relationship-extraction pass (`extractor/relationship_extract.py`) runs after entity extraction and asks, for the entities already found on a page, which specific typed relationship (if any) connects them — `USED`, `DROPS`, `CONTROLS`, `TARGETS`, `EXPLOITS`, `COMMUNICATES_WITH`. Each relationship carries its own claim confidence, separate from the confidence of the two entities it connects. The vocabulary is bounded: anything the LLM cannot map cleanly is dropped and the pair keeps its plain co-occurrence edge.
+- The pass is additive — co-occurrence edge generation is unchanged; typed edges sit alongside it. Bounded by `MAX_REL_PAGES_PER_INV` (default 10; one LLM call per selected page) so it can never scale unbounded with page count, mirroring the existing `MAX_LLM_PAGES_PER_INV` entity-extraction cap. Disable with `ENABLE_RELATIONSHIP_EXTRACTION=false`.
+
+### Fixed
+- STIX export keyed its entity→object map only by raw entity value, so graph edges whose node id is disambiguated (e.g. `THREAT_ACTOR_HANDLE` as `handle@forum`) were silently dropped from the bundle. The map now also registers the graph node id, so relationships with a threat-actor endpoint — including the new typed relationships — survive into the bundle.
+
+### Changed
+- STIX `Relationship` SROs now carry the edge's confidence (STIX 2.1 `confidence`, 0–100), and the new typed edge types map to documented STIX relationship types (`uses`, `drops`, `targets`, `exploits`, `communicates-with`); `CONTROLS` has no standard STIX verb and degrades to `related-to`. `CO_INVESTIGATION` now has an explicit mapping instead of relying on the default.
 
 ## [1.7.2] - 2026-07-08
 ### Fixed

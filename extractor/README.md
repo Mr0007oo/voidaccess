@@ -65,6 +65,28 @@ fetch of the public taxonomies + dictionary).  Extraction itself never fetches
 anything at runtime — it reads only the committed snapshots, so results stay
 offline and deterministic.  If a snapshot is missing, the shape checks degrade
 gracefully rather than failing.
+## Typed relationship extraction (`relationship_extract.py`)
+
+A **distinct** pass from entity extraction. Entity extraction answers *"what
+things are on this page"*; this pass answers *"how are those already-identified
+things related"*. For the entities already found on a page it asks the LLM which
+specific typed relationship (if any) connects each pair, returning a
+relationship type, the two entities, and a **claim-specific confidence** that is
+separate from the entities' own confidence.
+
+It runs inside `extract_entities_from_pages` after entities are persisted and
+before the graph is built, writing `EntityRelationship` rows that the graph
+builder's persisted-relationship pass then picks up as typed edges alongside the
+co-occurrence edges it generates itself.
+
+- **Additive.** Co-occurrence edges are never removed; typed edges sit beside
+  them. A page with no confident typed relationship simply keeps co-occurrence.
+- **Bounded vocabulary.** Only `USED`, `DROPS`, `CONTROLS`, `TARGETS`,
+  `EXPLOITS`, `COMMUNICATES_WITH`. Anything the LLM cannot map cleanly is
+  dropped — no free-text types are invented.
+- **Bounded cost.** One LLM call per selected page, at most
+  `MAX_REL_PAGES_PER_INV` pages per investigation (default 10). Set
+  `ENABLE_RELATIONSHIP_EXTRACTION=false` to disable.
 
 ## Entity Types
 

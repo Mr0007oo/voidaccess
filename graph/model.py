@@ -84,6 +84,15 @@ class EDGE_TYPES:
     CO_INVESTIGATION = "CO_INVESTIGATION"       # Entities found in same investigation across multiple pages
     PAID_TO = "PAID_TO"                         # financial transaction
     FUNDED_BY = "FUNDED_BY"                     # financial transaction
+    # Typed relationships from the LLM relationship-extraction pass.  These
+    # sit ALONGSIDE CO_APPEARED_ON — they are emitted only when the LLM finds
+    # genuine evidence for a specific relationship, and each carries its own
+    # claim confidence (not the flat co-occurrence confidence).
+    DROPS = "DROPS"                             # malware drops another payload
+    CONTROLS = "CONTROLS"                       # actor controls a wallet / infra
+    TARGETS = "TARGETS"                         # actor/campaign targeted an org
+    EXPLOITS = "EXPLOITS"                       # malware/actor exploits a CVE
+    COMMUNICATES_WITH = "COMMUNICATES_WITH"     # C2 / host communication
 
 
 

@@ -13,9 +13,15 @@ from extractor.pipeline import (
     extract_entities_from_page,
     extract_entities_from_pages,
 )
+from extractor.relationship_extract import (
+    extract_relationships_for_page,
+    extract_relationships_from_results,
+)
 
 __all__ = [
     "ExtractionResult",
     "extract_entities_from_page",
     "extract_entities_from_pages",
+    "extract_relationships_for_page",
+    "extract_relationships_from_results",
 ]

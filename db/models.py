@@ -81,6 +81,16 @@ class RelationshipType(str, enum.Enum):
     CONFIRMED_SAME_ACTOR = "CONFIRMED_SAME_ACTOR"
     FUNDED_BY = "FUNDED_BY"
     POSSIBLE_SAME_AUTHOR = "POSSIBLE_SAME_AUTHOR"
+    # Typed relationships extracted by the LLM relationship-extraction pass
+    # (extractor/relationship_extract.py).  These carry a claim-specific
+    # confidence separate from the confidence of the two entities they connect.
+    # The vocabulary is deliberately bounded — the LLM may only emit one of
+    # these; anything it cannot map cleanly falls back to CO_APPEARED_ON.
+    DROPS = "DROPS"                     # malware drops another payload
+    CONTROLS = "CONTROLS"               # actor controls a wallet/infrastructure
+    TARGETS = "TARGETS"                 # actor/campaign targeted an organization
+    EXPLOITS = "EXPLOITS"               # malware/actor exploits a vulnerability
+    COMMUNICATES_WITH = "COMMUNICATES_WITH"  # host/malware C2 communication
 
 
 # ---------------------------------------------------------------------------

@@ -131,6 +131,22 @@ SHODAN_RATE_LIMIT_DELAY = 1.0        # seconds between Shodan requests (Internet
 MAX_IPS_PER_INVESTIGATION = 50      # max IPs to query Shodan per investigation
 MAX_HASHES_PER_INVESTIGATION = 20    # max file hashes to query VirusTotal per investigation
 
+# Relationship extraction (typed graph edges) — a distinct LLM pass that,
+# for entities already extracted from a page, asks which specific typed
+# relationship (if any) connects them.  It is bounded exactly like the
+# entity-extraction LLM cap (MAX_LLM_PAGES_PER_INV): at most one LLM call per
+# selected page and never more than MAX_REL_PAGES_PER_INV pages per
+# investigation, so it can never scale unbounded with page count.  Set
+# ENABLE_RELATIONSHIP_EXTRACTION=false to disable and fall back to
+# co-occurrence-only edges.
+ENABLE_RELATIONSHIP_EXTRACTION = (
+    _clean_env("ENABLE_RELATIONSHIP_EXTRACTION", "true") or "true"
+).strip().lower() not in ("false", "0", "no")
+try:
+    MAX_REL_PAGES_PER_INV = int(_clean_env("MAX_REL_PAGES_PER_INV", "10") or 10)
+except ValueError:
+    MAX_REL_PAGES_PER_INV = 10
+
 # Blockchain API Keys (optional — free tiers work without)
 BLOCKCYPHER_TOKEN = _clean_env("BLOCKCYPHER_TOKEN", "")
 ETHERSCAN_API_KEY = _clean_env("ETHERSCAN_API_KEY", "")

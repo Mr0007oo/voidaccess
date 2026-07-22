@@ -532,6 +532,76 @@ async def extract_entities_from_pages(
         except Exception as exc:
             logger.error("Batch entity persist failed: %s", exc)
 
+    # -----------------------------------------------------------------------
+    # Typed relationship extraction (distinct LLM pass).
+    #
+    # For pages that yielded entities, ask the LLM which specific typed
+    # relationship (if any) connects them, and persist those as
+    # EntityRelationship rows BEFORE the graph is built — the graph builder's
+    # persisted-relationship pass then picks them up as typed edges alongside
+    # the co-occurrence edges it generates itself.  This is additive: pages
+    # with no confident typed relationship simply keep their co-occurrence
+    # edges.  Bounded by MAX_REL_PAGES_PER_INV (one LLM call per selected
+    # page) so it cannot scale unbounded with page count.
+    # -----------------------------------------------------------------------
+    if (
+        run_llm_extraction
+        and llm is not None
+        and investigation_id is not None
+        and capped_entities
+    ):
+        try:
+            import config as _config  # noqa: PLC0415
+
+            if getattr(_config, "ENABLE_RELATIONSHIP_EXTRACTION", True):
+                from extractor.relationship_extract import (  # noqa: PLC0415
+                    extract_relationships_from_results,
+                )
+                from db.queries import save_typed_relationships  # noqa: PLC0415
+                from db.session import get_session  # noqa: PLC0415
+
+                page_text_by_url: dict[str, str] = {}
+                page_id_by_url: dict[str, Any] = {}
+                for _p in pages:
+                    _url = _p.get("url", "")
+                    if not _url:
+                        continue
+                    page_text_by_url[_url] = (
+                        _p.get("text")
+                        or _p.get("content")
+                        or _p.get("cleaned_text")
+                        or ""
+                    )
+                    page_id_by_url[_url] = _p.get("page_id")
+
+                max_rel_pages = int(
+                    getattr(_config, "MAX_REL_PAGES_PER_INV", 10) or 10
+                )
+                typed_rels = await extract_relationships_from_results(
+                    results,
+                    page_text_by_url,
+                    page_id_by_url,
+                    llm,
+                    max_rel_pages=max_rel_pages,
+                )
+                if typed_rels:
+                    with get_session() as _rel_session:
+                        inserted = save_typed_relationships(
+                            _rel_session, investigation_id, typed_rels
+                        )
+                    logger.info(
+                        "Typed relationships persisted for %s: %d new (of %d claims)",
+                        investigation_id,
+                        inserted,
+                        len(typed_rels),
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Typed relationship extraction failed for %s (non-fatal): %s",
+                investigation_id,
+                exc,
+            )
+
     if build_graph_on_complete and investigation_id is not None and capped_entities:
         try:
             from graph.builder import (

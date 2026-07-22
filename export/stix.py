@@ -241,24 +241,50 @@ def investigation_to_stix_bundle(
     if not entities:
         return _empty_bundle()
 
+    try:
+        from graph.builder import _make_node_id  # noqa: PLC0415
+    except Exception:  # pragma: no cover — graph layer optional
+        def _make_node_id(entity_type, value, source_url):  # type: ignore
+            return value
+
     stix_objects: list[Any] = []
-    stix_id_map: dict[str, str] = {}  # entity.value → stix_object.id
+    # Maps BOTH the raw entity.value AND the graph node_id → stix_object.id.
+    # Graph edges are keyed by node_id (which for THREAT_ACTOR_HANDLE is
+    # "value@domain", not the bare value), so registering only entity.value
+    # here silently dropped every threat-actor relationship — the exact
+    # "silently dropped relationships" failure mode the CHANGELOG keeps
+    # re-fixing.  Registering the node_id alias lets typed edges (which very
+    # often have a threat-actor endpoint) survive into the bundle.
+    stix_id_map: dict[str, str] = {}
+
+    def _register(entity: Any, stix_id: str) -> None:
+        stix_id_map.setdefault(entity.value, stix_id)
+        try:
+            node_id = _make_node_id(
+                entity.entity_type,
+                entity.value,
+                getattr(entity, "source_url", "") or "",
+            )
+        except Exception:
+            node_id = entity.value
+        if node_id:
+            stix_id_map.setdefault(node_id, stix_id)
 
     for entity in entities:
         indicator = entity_to_stix_indicator(entity)
         if indicator:
             stix_objects.append(indicator)
-            stix_id_map[entity.value] = indicator.id
+            _register(entity, indicator.id)
 
         malware = entity_to_stix_malware(entity)
         if malware:
             stix_objects.append(malware)
-            stix_id_map.setdefault(entity.value, malware.id)
+            _register(entity, malware.id)
 
         actor = entity_to_stix_threat_actor(entity)
         if actor:
             stix_objects.append(actor)
-            stix_id_map.setdefault(entity.value, actor.id)
+            _register(entity, actor.id)
 
     if include_relationships and stix_objects:
         relationships, relationship_warning = _build_stix_relationships(
@@ -442,16 +468,31 @@ def _build_stix_relationships(
             if relationship_key in seen_relationships:
                 continue
             seen_relationships.add(relationship_key)
+            # Carry the edge's own confidence onto the SRO.  Typed relationships
+            # have a claim-specific confidence distinct from co-occurrence's
+            # flat value; STIX 2.1 confidence is an int 0-100.
+            rel_kwargs: dict[str, Any] = {
+                "relationship_type": rel_type,
+                "source_ref": src_stix_id,
+                "target_ref": tgt_stix_id,
+                "allow_custom": True,
+            }
             try:
-                rel = stix2.Relationship(
-                    relationship_type=rel_type,
-                    source_ref=src_stix_id,
-                    target_ref=tgt_stix_id,
-                    allow_custom=True,
-                )
+                edge_conf = data.get("confidence")
+                if edge_conf is not None:
+                    rel_kwargs["confidence"] = _to_stix_confidence(float(edge_conf))
+            except (TypeError, ValueError):
+                pass
+            try:
+                rel = stix2.Relationship(**rel_kwargs)
                 relationships.append(rel)
             except Exception:
-                continue
+                # Retry without confidence in case the value tripped validation.
+                try:
+                    rel_kwargs.pop("confidence", None)
+                    relationships.append(stix2.Relationship(**rel_kwargs))
+                except Exception:
+                    continue
         return relationships, None
     except Exception as exc:
         logger.warning("_build_stix_relationships failed: %s", exc)
@@ -462,6 +503,7 @@ def _edge_type_to_stix(edge_type: str) -> str:
     """Map VoidAccess graph edge types to STIX relationship type strings."""
     mapping = {
         "CO_APPEARED_ON": "related-to",
+        "CO_INVESTIGATION": "related-to",
         "POSTED_BY": "attributed-to",
         "LINKED_TO": "related-to",
         "PAID_TO": "related-to",
@@ -471,6 +513,15 @@ def _edge_type_to_stix(edge_type: str) -> str:
         "LIKELY_SAME_ACTOR": "related-to",
         "CONFIRMED_SAME_ACTOR": "related-to",
         "FUNDED_BY": "related-to",
+        # Typed relationships from the LLM relationship-extraction pass.  These
+        # map to documented STIX 2.1 common relationship types where one
+        # exists; CONTROLS has no standard STIX verb so it degrades to the
+        # safe "related-to" default rather than emitting a non-spec type.
+        "DROPS": "drops",
+        "TARGETS": "targets",
+        "EXPLOITS": "exploits",
+        "COMMUNICATES_WITH": "communicates-with",
+        "CONTROLS": "related-to",
     }
     return mapping.get(edge_type, "related-to")
 
