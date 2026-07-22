@@ -1547,6 +1547,7 @@ def normalize_entities(
             extraction_method = (extraction_method_overrides or {}).get(
                 (entity_type, raw_value), ""
             )
+            method = _extraction_method_for(entity_type, extraction_method)
             confidence = _confidence_for(entity_type, extraction_method)
 
             # v1.7 Q-1 — reserved-range / placeholder filtering.
