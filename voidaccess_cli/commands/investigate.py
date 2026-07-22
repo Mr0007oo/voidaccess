@@ -1091,6 +1091,7 @@ def _build_cooccurrence_edges(investigation_id: str) -> int:
             .options(joinedload(Entity.page))
             .filter(Entity.investigation_id == inv_uuid)
             .all()
+        )
         by_page: dict[uuid.UUID, list] = {}
         for ent in rows:
             page_id = getattr(ent, "page_id", None)
@@ -1259,5 +1260,4 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- {glyph} {name}{detail}")
 
     return "\n".join(lines) + "\n"
-
 
