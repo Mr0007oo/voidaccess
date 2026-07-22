@@ -508,7 +508,7 @@ def _edge_type_to_stix(edge_type: str) -> str:
         "LINKED_TO": "related-to",
         "PAID_TO": "related-to",
         "MEMBER_OF": "member-of",
-        "USED": "uses",
+        "USES": "uses",
         "CLAIMED": "attributed-to",
         "LIKELY_SAME_ACTOR": "related-to",
         "CONFIRMED_SAME_ACTOR": "related-to",

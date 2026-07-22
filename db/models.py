@@ -75,7 +75,7 @@ class RelationshipType(str, enum.Enum):
     LINKED_TO = "LINKED_TO"
     PAID_TO = "PAID_TO"
     MEMBER_OF = "MEMBER_OF"
-    USED = "USED"
+    USES = "USES"
     CLAIMED = "CLAIMED"
     LIKELY_SAME_ACTOR = "LIKELY_SAME_ACTOR"
     CONFIRMED_SAME_ACTOR = "CONFIRMED_SAME_ACTOR"

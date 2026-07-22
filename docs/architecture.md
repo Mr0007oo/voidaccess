@@ -139,7 +139,7 @@ All tables are in `db/models.py`. Primary keys are UUID4 generated in Python (in
 | `investigation_id` | UUID FK → investigations (SET NULL) | |
 | `first_seen` | DateTime TZ | |
 
-Relationship types: `CO_APPEARED_ON`, `POSTED_BY`, `LINKED_TO`, `PAID_TO`, `MEMBER_OF`, `USED`, `CLAIMED`, `LIKELY_SAME_ACTOR`, `CONFIRMED_SAME_ACTOR`, `FUNDED_BY`, `POSSIBLE_SAME_AUTHOR`
+Relationship types: `CO_APPEARED_ON`, `POSTED_BY`, `LINKED_TO`, `PAID_TO`, `MEMBER_OF`, `USES`, `CLAIMED`, `LIKELY_SAME_ACTOR`, `CONFIRMED_SAME_ACTOR`, `FUNDED_BY`, `POSSIBLE_SAME_AUTHOR`
 
 **`investigation_entity_links`** — cross-investigation entity deduplication junction
 

@@ -3,6 +3,21 @@
 All notable changes to VoidAccess are documented here.
 
 ## [Unreleased]
+
+## [1.8.1] - 2026-07-22
+### Fixed
+- `--no-tor` now generates **zero** Tor traffic for the entire run. Previously the flag only skipped the primary Tor search branch; the Torch/Haystack onion search engines still ran and fed real `.onion` result URLs into the scrape list, which were then routed back through Tor. The onion search engines are now skipped when `--no-tor` is set, and any `.onion` link from any source is stripped before the scraper sees it — so no outbound connection to the Tor SOCKS proxy is ever attempted and no onion-sourced pages appear in the output.
+- Typed relationship extraction now works against the real LLM adapter. The call built a silent client with `llm.bind(callbacks=[])`, which LangChain forwarded to `agenerate_prompt` as a keyword while `ainvoke` also passed `callbacks` explicitly, raising `got multiple values for keyword argument 'callbacks'` on every page and silently degrading to zero typed relationships. It now uses `with_config({"callbacks": []})` (matching the entity-extraction path), and a failed relationship LLM call logs a visible warning distinct from a call that genuinely found no relationship.
+- Step-cost metrics (`investigation_step_metrics`) are no longer written all-zero from the CLI. The CLI created the metrics collector but never started/finished steps or recorded scraping, so `duration_ms`, `llm_calls`, and the page-fetch counters stayed zero even though work was happening (and `record_llm_call` only credits an *active* step). The CLI pipeline is now instrumented per step like the API path, so durations, per-step LLM-call counts, and page-fetch counters reflect real values.
+- Empty, whitespace-only, and trivially short (< 3 character) investigation queries are now rejected up front with a clear message, before any network activity — instead of silently proceeding to produce a full, confident-looking report from generic noise.
+- Non-actionable IP addresses are now filtered alongside the existing RFC 5737 documentation ranges: `0.0.0.0`, the broadcast address, and well-known public DNS resolvers (`8.8.8.8`, `8.8.4.4`, `1.1.1.1`, `1.0.0.1`, Quad9, OpenDNS, Level3). They no longer appear in the persisted entity store or the exported `ip_addresses.txt`, so a user importing that file into a blocklist can't accidentally block a legitimate resolver or a null route.
+- ransomlook.io and ransomware.live group matching is now token-based. The old logic required the entire query string to appear literally in a tracked group name, so realistic analyst queries like `"LockBit ransomware leak site"` matched nothing even though `lockbit3` exists. Generic words are stripped and the meaningful token(s) are matched against group names (`lockbit` → `lockbit`, `lockbit2`, `lockbit3`); a genuine no-match still reports `ok_0_results` honestly.
+
+### Changed
+- The typed-relationship vocabulary term `USED` was renamed to **`USES`** for a consistent, externally-visible name across the LLM prompt/parser, the internal storage type (`RelationshipType`/`EDGE_TYPES`), the API response, and the STIX export mapping (`USES` → STIX `uses`).
+- Version bumped to 1.8.1 (`pyproject.toml`, `voidaccess_cli.__version__`, IOC package `PACKAGE_VERSION`).
+
+## [1.8.0] - 2026-07-22
 ### Added
 - Five new free (key-optional) intelligence sources, each reporting honestly into `sources_used`:
   - **XposedOrNot** (`sources/breach_lookup.py`) — email breach-exposure lookup, complements HIBP with a different corpus; free tier includes stealer-log exposure.

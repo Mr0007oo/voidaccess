@@ -77,7 +77,7 @@ class EDGE_TYPES:
     POSTED_BY = "POSTED_BY"                     # content attributed to a handle
     LINKED_TO = "LINKED_TO"                     # URL links to URL
     MEMBER_OF = "MEMBER_OF"                     # handle to group/forum
-    USED = "USED"                               # actor used a malware family
+    USES = "USES"                               # actor uses a malware family
     CLAIMED = "CLAIMED"                         # group claimed an attack
     LIKELY_SAME_ACTOR = "LIKELY_SAME_ACTOR"     # inferred, medium confidence
     CONFIRMED_SAME_ACTOR = "CONFIRMED_SAME_ACTOR"  # PGP key match, high confidence

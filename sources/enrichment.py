@@ -565,6 +565,42 @@ def abusech_to_pages(
 _RANSOMWARE_LIVE_BASE = "https://api.ransomware.live/v2"
 _RANSOMWARE_LIVE_HEADERS = {"User-Agent": "VoidAccess-OSINT/1.0", "Accept": "application/json"}
 
+# Generic words that carry no group-identity signal in a realistic analyst
+# query ("LockBit ransomware leak site").  Stripped before matching so the
+# meaningful token(s) — e.g. "lockbit" — are what we match on, rather than
+# requiring the whole query string to appear literally in a group name.
+_GROUP_QUERY_STOPWORDS: frozenset[str] = frozenset({
+    "ransomware", "ransom", "group", "gang", "crew", "team",
+    "leak", "leaks", "leaksite", "site", "blog", "portal",
+    "data", "the", "and", "actor", "threat", "malware",
+})
+
+
+def _significant_group_tokens(query: str) -> list[str]:
+    """Meaningful lowercase tokens from a group query, stopwords removed.
+
+    Falls back to all tokens if every token was a stopword, so a query made
+    entirely of generic words still matches on something rather than nothing.
+    """
+    tokens = re.findall(r"[a-z0-9.]+", (query or "").lower())
+    tokens = [t.strip(".") for t in tokens if t.strip(".")]
+    significant = [t for t in tokens if t not in _GROUP_QUERY_STOPWORDS and len(t) >= 3]
+    return significant or tokens
+
+
+def _group_name_matches_query(name: str, tokens: list[str]) -> bool:
+    """Token-based match of a tracked group name against query tokens.
+
+    A token matches if it is a substring of the group name (so ``lockbit``
+    matches ``lockbit``, ``lockbit2``, ``lockbit3``) or the group name is a
+    substring of the token.  This is how an analyst actually phrases a query,
+    versus the old "entire query string must appear in the name" rule.
+    """
+    n = (name or "").lower()
+    if not n:
+        return False
+    return any(t and (t in n or n in t) for t in tokens)
+
 
 def _rl_extract_onion_urls(group: dict) -> list[str]:
     """Extract .onion leak-site URLs from a group dict (available sites first)."""
@@ -609,10 +645,11 @@ async def fetch_ransomware_live(query: str) -> list[dict]:
                     return []
                 all_groups = await resp.json(content_type=None)
 
+            _tokens = _significant_group_tokens(query)
             matched_summary: list[dict] = []
             for g in (all_groups if isinstance(all_groups, list) else []):
                 name = (g.get("name") or "").lower()
-                if q in name:
+                if _group_name_matches_query(name, _tokens):
                     matched_summary.append(g)
 
             if not matched_summary:
@@ -904,7 +941,8 @@ async def fetch_ransomlook(query: str) -> list[dict]:
                 all_groups = await resp.json(content_type=None)
 
             group_names = [g for g in all_groups if isinstance(g, str)] if isinstance(all_groups, list) else []
-            matched = [name for name in group_names if q in name.lower()]
+            _tokens = _significant_group_tokens(query)
+            matched = [name for name in group_names if _group_name_matches_query(name, _tokens)]
 
             if not matched:
                 logger.info("ransomlook.io: no groups matched %r", query)

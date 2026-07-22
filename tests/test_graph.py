@@ -61,7 +61,7 @@ def _make_graph_with_nodes() -> nx.MultiDiGraph:
     # Edges
     g.add_edge("actor1", "wallet1", edge_type="CO_APPEARED_ON", confidence=1.0,
                source_url="http://forum1.onion/page", timestamp=now, metadata={})
-    g.add_edge("actor1", "malware1", edge_type="USED", confidence=0.9,
+    g.add_edge("actor1", "malware1", edge_type="USES", confidence=0.9,
                source_url="http://forum1.onion/page", timestamp=now, metadata={})
     g.add_edge("actor1", "forum1", edge_type="MEMBER_OF", confidence=1.0,
                source_url="", timestamp=now, metadata={})
@@ -122,7 +122,7 @@ class TestModel(unittest.TestCase):
     def test_edge_types_are_strings(self):
         et = self.m.EDGE_TYPES
         for attr in ("CO_APPEARED_ON", "POSTED_BY", "LINKED_TO", "MEMBER_OF",
-                     "USED", "CLAIMED", "LIKELY_SAME_ACTOR", "CONFIRMED_SAME_ACTOR"):
+                     "USES", "CLAIMED", "LIKELY_SAME_ACTOR", "CONFIRMED_SAME_ACTOR"):
             self.assertIsInstance(getattr(et, attr), str, msg=f"EDGE_TYPES.{attr} is not str")
 
     def test_node_types_no_duplicates(self):
@@ -138,7 +138,7 @@ class TestModel(unittest.TestCase):
         et = self.m.EDGE_TYPES
         values = [
             et.CO_APPEARED_ON, et.POSTED_BY, et.LINKED_TO, et.MEMBER_OF,
-            et.USED, et.CLAIMED, et.LIKELY_SAME_ACTOR, et.CONFIRMED_SAME_ACTOR,
+            et.USES, et.CLAIMED, et.LIKELY_SAME_ACTOR, et.CONFIRMED_SAME_ACTOR,
         ]
         self.assertEqual(len(values), len(set(values)), "Duplicate EDGE_TYPES values detected")
 
@@ -700,9 +700,9 @@ class TestQueries(unittest.TestCase):
     def test_get_neighbors_edge_type_filter(self):
         """get_neighbors with edge_type filter only traverses matching edges."""
         from graph.queries import get_neighbors
-        result = get_neighbors(self.graph, "actor1", hops=2, edge_types=["USED"])
+        result = get_neighbors(self.graph, "actor1", hops=2, edge_types=["USES"])
 
-        # Only malware1 should be reachable via USED edge
+        # Only malware1 should be reachable via USES edge
         hop1_ids = {n.node_id for n in result.get("1", [])}
         self.assertIn("malware1", hop1_ids)
         # wallet1 should NOT be in hop 1 (it's connected via CO_APPEARED_ON)

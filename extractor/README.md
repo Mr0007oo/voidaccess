@@ -81,7 +81,7 @@ co-occurrence edges it generates itself.
 
 - **Additive.** Co-occurrence edges are never removed; typed edges sit beside
   them. A page with no confident typed relationship simply keeps co-occurrence.
-- **Bounded vocabulary.** Only `USED`, `DROPS`, `CONTROLS`, `TARGETS`,
+- **Bounded vocabulary.** Only `USES`, `DROPS`, `CONTROLS`, `TARGETS`,
   `EXPLOITS`, `COMMUNICATES_WITH`. Anything the LLM cannot map cleanly is
   dropped — no free-text types are invented.
 - **Bounded cost.** One LLM call per selected page, at most

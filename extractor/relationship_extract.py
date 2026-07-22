@@ -60,8 +60,8 @@ _DEFAULT_MAX_RELATIONSHIPS_PER_PAGE = 60
 # EDGE_TYPES).  Passive forms map to the same stored type but flip the edge
 # direction (handled below) so the stored edge always reads source -> target.
 _LLM_REL_VOCAB: dict[str, str] = {
-    "uses": "USED",
-    "used": "USED",
+    "uses": "USES",
+    "used": "USES",
     "drops": "DROPS",
     "controls": "CONTROLS",
     "targets": "TARGETS",
@@ -144,17 +144,41 @@ def _parse_relationship_json(raw: str) -> list[dict]:
     return rels if isinstance(rels, list) else []
 
 
+class RelationshipLLMCallError(Exception):
+    """Raised when the relationship-extraction LLM invocation itself fails.
+
+    Distinct from a call that *succeeds* and legitimately returns no
+    relationships — callers use this to log a visible warning so a broken LLM
+    integration can never masquerade as "the LLM found no relationships".
+    """
+
+
 async def _invoke_llm(prompt: str, llm) -> str:
-    """Call the LLM with streaming/callbacks disabled (mirrors llm_extract)."""
-    try:
+    """Call the LLM with streaming/callbacks disabled (mirrors llm_extract).
+
+    Raises :class:`RelationshipLLMCallError` if the underlying invocation
+    fails, so the caller can distinguish a *failed* call from a successful
+    call that found nothing.
+    """
+    # ``bind(callbacks=[])`` puts ``callbacks`` into the model's invocation
+    # kwargs, which LangChain forwards to ``agenerate_prompt`` as ``**kwargs``
+    # — while ``ainvoke`` ALSO passes ``callbacks`` explicitly, raising
+    # "agenerate_prompt() got multiple values for keyword argument 'callbacks'".
+    # ``with_config`` overrides callbacks for this call WITHOUT adding model
+    # kwargs, exactly as extractor/llm_extract._extract_chunk does.
+    if hasattr(llm, "with_config"):
+        silent_llm = llm.with_config({"callbacks": []})
+    else:
         silent_llm = llm.bind(streaming=False, callbacks=[])
+    try:
+        # Guard stdout in case a legacy constructor callback still streams
+        # partial JSON tokens even with an empty per-call callback list.
         with redirect_stdout(io.StringIO()):
             response = await silent_llm.ainvoke(prompt)
-        content = response.content if hasattr(response, "content") else str(response)
-        return content.strip()
-    except Exception as exc:  # noqa: BLE001 — never let one page break the pass
-        logger.warning("Relationship LLM call failed: %s", exc)
-        return ""
+    except Exception as exc:  # noqa: BLE001 — surface as a typed failure
+        raise RelationshipLLMCallError(str(exc)) from exc
+    content = response.content if hasattr(response, "content") else str(response)
+    return content.strip()
 
 
 async def extract_relationships_for_page(
@@ -194,7 +218,19 @@ async def extract_relationships_for_page(
     content = page_text[:max_chunk_chars]
     prompt = _PROMPT_TEMPLATE.format(entities=entity_lines, content=content)
 
-    raw = await _invoke_llm(prompt, llm)
+    try:
+        raw = await _invoke_llm(prompt, llm)
+    except RelationshipLLMCallError as exc:
+        # The LLM call itself failed — this is NOT the same as the LLM running
+        # successfully and finding no relationship.  Log loudly so a broken
+        # integration is visible in normal operation instead of silently
+        # degrading every page to zero typed relationships.
+        logger.warning(
+            "Relationship extraction: LLM call FAILED (%s) — this page yielded "
+            "NO typed relationships due to an error, not because none exist",
+            exc,
+        )
+        return []
     rels = _parse_relationship_json(raw)
     if not rels:
         return []

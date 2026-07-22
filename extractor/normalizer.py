@@ -887,6 +887,27 @@ _RFC5737_NETWORKS: list[tuple[str, str]] = [
     ("203.0.113.0", "255.255.255.0"),   # 203.0.113.0/24
 ]
 
+# Real, routable IPs that are never a meaningful indicator of compromise:
+# the unspecified/null address, the broadcast address, and the well-known
+# public DNS resolvers that appear constantly in technical content for
+# reasons unrelated to being an IOC.  Filtered like the RFC 5737 ranges so a
+# user pulling ip_addresses.txt into a blocklist can't end up blocking a
+# legitimate public resolver or a null route.
+_NON_ACTIONABLE_IPS: frozenset[str] = frozenset({
+    "0.0.0.0",              # unspecified / null route — never a real host
+    "255.255.255.255",      # limited broadcast
+    "8.8.8.8", "8.8.4.4",           # Google Public DNS
+    "1.1.1.1", "1.0.0.1",           # Cloudflare Public DNS
+    "9.9.9.9", "149.112.112.112",   # Quad9
+    "208.67.222.222", "208.67.220.220",  # OpenDNS
+    "4.2.2.1", "4.2.2.2",           # Level3 legacy resolvers
+})
+
+
+def _is_non_actionable_ip(value: str) -> bool:
+    """Return True for real IPs that are never meaningful IOCs (null route, public DNS)."""
+    return value.strip() in _NON_ACTIONABLE_IPS
+
 # RFC 2606 reserved domain names.
 _RFC2606_DOMAINS: frozenset[str] = frozenset({
     "example.com",
@@ -1560,6 +1581,14 @@ def normalize_entities(
                 source_quality = 0.0
                 logger.debug(
                     "RFC 5737 IP rejected (reserved documentation range): %s", canonical
+                )
+                continue
+
+            if entity_type == "IP_ADDRESS" and _is_non_actionable_ip(canonical):
+                source_quality = 0.0
+                logger.debug(
+                    "Non-actionable IP rejected (null route / broadcast / public DNS resolver): %s",
+                    canonical,
                 )
                 continue
 

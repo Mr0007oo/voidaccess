@@ -395,7 +395,7 @@ class TestEntityRelationship:
         rel = EntityRelationship(
             entity_a_id=e1.id,
             entity_b_id=e2.id,
-            relationship_type=RelationshipType.USED.value,
+            relationship_type=RelationshipType.USES.value,
             source_page_id=page.id,
             confidence=0.85,
         )
@@ -404,7 +404,7 @@ class TestEntityRelationship:
 
         assert rel.id is not None
         assert rel.confidence == 0.85
-        assert rel.relationship_type == "USED"
+        assert rel.relationship_type == "USES"
 
     def test_bidirectional_orm_access(self, session):
         from db.models import EntityRelationship
@@ -788,12 +788,12 @@ class TestQueries:
             session,
             entity_a_id=e1.id,
             entity_b_id=e2.id,
-            relationship_type="USED",
+            relationship_type="USES",
             source_page_id=page.id,
             confidence=0.9,
         )
         assert rel.id is not None
-        assert rel.relationship_type == "USED"
+        assert rel.relationship_type == "USES"
         assert rel.confidence == 0.9
 
     def test_get_relationships_for_entity(self, session):
@@ -809,7 +809,7 @@ class TestQueries:
         e2 = create_entity(session, page_id=page.id, entity_type="malware", value="Malware_Q")
         e3 = create_entity(session, page_id=page.id, entity_type="handle", value="alias_q")
 
-        create_entity_relationship(session, e1.id, e2.id, "USED", page.id)
+        create_entity_relationship(session, e1.id, e2.id, "USES", page.id)
         create_entity_relationship(session, e3.id, e1.id, "LIKELY_SAME_ACTOR", page.id)
 
         rels = get_relationships_for_entity(session, e1.id)
@@ -849,8 +849,9 @@ class TestEnums:
         from db.models import RelationshipType
         expected = {
             "CO_APPEARED_ON", "POSTED_BY", "LINKED_TO", "PAID_TO",
-            "MEMBER_OF", "USED", "CLAIMED", "LIKELY_SAME_ACTOR",
+            "MEMBER_OF", "USES", "CLAIMED", "LIKELY_SAME_ACTOR",
             "CONFIRMED_SAME_ACTOR", "FUNDED_BY", "POSSIBLE_SAME_AUTHOR",
+            "DROPS", "CONTROLS", "TARGETS", "EXPLOITS", "COMMUNICATES_WITH",
         }
         actual = {r.value for r in RelationshipType}
         assert expected == actual
