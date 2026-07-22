@@ -33,10 +33,13 @@ from sqlalchemy import create_engine
 @pytest.fixture
 def db_engine(tmp_path):
     """Isolated SQLite engine for database/settings/export tests."""
-    return create_engine(
+    engine = create_engine(
         f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
         connect_args={"check_same_thread": False},
     )
+    from db.models import Base
+    Base.metadata.create_all(engine)
+    return engine
 
 from utils.enrichment_cache import EnrichmentCache, reset_default_cache
 
