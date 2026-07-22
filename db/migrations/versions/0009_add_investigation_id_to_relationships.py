@@ -13,17 +13,21 @@ depends_on = None
 def upgrade():
     # Calling add_column with index=True already creates the index
     # 'ix_entity_relationships_investigation_id'
-    op.add_column(
-        "entity_relationships",
-        sa.Column(
-            "investigation_id",
-            sa.UUID(as_uuid=True),
-            sa.ForeignKey("investigations.id", ondelete="SET NULL"),
-            nullable=True,
-            index=True,
-        ),
-    )
+    # SQLite cannot ALTER TABLE ADD COLUMN with a foreign-key constraint;
+    # Alembic's batch mode rebuilds the table there and remains a normal
+    # ALTER on databases that support it.
+    with op.batch_alter_table("entity_relationships", recreate="auto") as batch_op:
+        batch_op.add_column(
+            sa.Column(
+                "investigation_id",
+                sa.UUID(as_uuid=True),
+                sa.ForeignKey("investigations.id", ondelete="SET NULL"),
+                nullable=True,
+                index=True,
+            )
+        )
 
 
 def downgrade():
-    op.drop_column("entity_relationships", "investigation_id")
+    with op.batch_alter_table("entity_relationships", recreate="auto") as batch_op:
+        batch_op.drop_column("investigation_id")

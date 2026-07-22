@@ -46,7 +46,12 @@ def upgrade() -> None:
         op.create_index('ix_entity_canonical', 'entities', ['entity_type', 'canonical_value'])
     
     # 5. Backfill canonical_value with size limits to avoid B-tree index row size errors
-    op.execute("UPDATE entities SET canonical_value = substring(lower(regexp_replace(value, '[\\s\\-_\\.]', '', 'g')), 1, 1024) WHERE entity_type IN ('THREAT_ACTOR', 'MALWARE', 'FORUM', 'THREAT_ACTOR_HANDLE', 'MALWARE_FAMILY', 'RANSOMWARE_GROUP', 'handle', 'malware', 'ransomware_group');")
+    # ``regexp_replace`` is PostgreSQL-specific.  SQLite is the supported
+    # local/Windows development backend and has no equivalent built-in
+    # function; a fresh SQLite database has no rows to backfill, so the
+    # schema migration can safely defer this historical-data normalization.
+    if op.get_bind().dialect.name != "sqlite":
+        op.execute("UPDATE entities SET canonical_value = substring(lower(regexp_replace(value, '[\\s\\-_\\.]', '', 'g')), 1, 1024) WHERE entity_type IN ('THREAT_ACTOR', 'MALWARE', 'FORUM', 'THREAT_ACTOR_HANDLE', 'MALWARE_FAMILY', 'RANSOMWARE_GROUP', 'handle', 'malware', 'ransomware_group');")
     op.execute("UPDATE entities SET canonical_value = substring(lower(value), 1, 1024) WHERE entity_type IN ('EMAIL', 'ONION_URL', 'EMAIL_ADDRESS', 'email', 'onion_url');")
     op.execute("UPDATE entities SET canonical_value = substring(value, 1, 1024) WHERE canonical_value IS NULL;")
 
