@@ -223,6 +223,16 @@ export function StylometryPanel({ entityId: _entityId, data, loading, error, onE
 
           {hasData && !loading && (
             <>
+              <div className="rounded-md border border-[var(--border-dim)] bg-[var(--bg-raised)] p-3 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                <p className="font-bold uppercase tracking-widest text-[var(--text-muted)]">Attribution limits</p>
+                <p className="mt-1">Scores use Burrows-style z-score normalization and are statistical similarity estimates, not proof of common authorship.</p>
+                {data.calibration?.status === "calibrated" ? (
+                  <p className="mt-1">Validated false-match rate: {(data.calibration.false_match_rate! * 100).toFixed(1)}% ({data.calibration.validation_pairs} labeled pairs).</p>
+                ) : (
+                  <p className="mt-1 text-[var(--warning)]">No labeled calibration artifact is configured; cross-actor match decisions are disabled.</p>
+                )}
+                {data.reliability?.warning && <p className="mt-1 text-[var(--warning)]">{data.reliability.warning}</p>}
+              </div>
               {/* Feature grid */}
               <div className="space-y-4">
                 <div className="flex items-center justify-between border-b border-[var(--border-dim)] pb-2 text-[9px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
@@ -314,4 +324,3 @@ export function StylometryPanel({ entityId: _entityId, data, loading, error, onE
     </div>
   );
 }
-

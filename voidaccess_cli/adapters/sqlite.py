@@ -23,7 +23,6 @@ add_actor_note()            — set analyst note on an actor profile
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,9 +33,6 @@ from sqlalchemy import text
 from db.search_engine_stats import (
     CREATE_SEARCH_ENGINE_STATS_SQL,
     get_all_engine_stats_async as _get_all_engine_stats_async,
-    get_engine_stats,
-    record_engine_attempt,
-    reset_circuit,
 )
 from utils.enrichment_cache import _SQLITE_CREATE_TABLE, _SQLITE_INDEX_EXPIRES
 
@@ -781,7 +777,6 @@ def search_actor_profiles(query: str, limit: int = 20) -> list[dict[str, Any]]:
 
 def get_actor_profile(handle_or_id: str) -> Optional[dict[str, Any]]:
     """Return a full actor profile by canonical handle or UUID."""
-    from db.models import ActorProfile
     from db.session import get_session
 
     with get_session() as session:
@@ -882,7 +877,6 @@ def _serialize_actor_profile(session, profile) -> dict[str, Any]:
 
 def add_actor_note(handle_or_id: str, note: str) -> bool:
     """Append/set an analyst note on an actor profile. Returns True on success."""
-    from db.models import ActorProfile
     from db.session import get_session
 
     with get_session() as session:

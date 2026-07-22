@@ -19,7 +19,23 @@ export interface StylometryData {
     confidence: "low" | "medium" | "high";
     matching_features: string[];
     profile_sample_count: number;
+    calibration_status?: "calibrated";
   }>;
+  similarity_method?: string;
+  calibration?: {
+    status: "calibrated" | "uncalibrated";
+    threshold?: number;
+    false_match_rate?: number;
+    validation_pairs?: number;
+    dataset?: string;
+    message?: string;
+  };
+  reliability?: {
+    text_samples: number;
+    total_chars: number;
+    minimum_recommended_chars: number;
+    warning: string | null;
+  };
   // Graceful degradation
   error?: string;
   message?: string;

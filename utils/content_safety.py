@@ -8,7 +8,6 @@ Never logs actual prohibited content — only event metadata.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 from typing import Optional

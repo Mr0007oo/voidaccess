@@ -648,7 +648,6 @@ async def enrich_email_entities(
 
             # High-value identity signal: breach history + malicious activity
             if rep.get("password_exposed"):
-                domain = _extract_domain(email)
                 logger.info(
                     "[%s] High-value email entity: %s — "
                     "breach history + malicious activity confirmed",

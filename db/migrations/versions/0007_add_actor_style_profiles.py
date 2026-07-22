@@ -5,9 +5,6 @@ Revises: 0006
 Create Date: 2026-04-17 19:55:00.000000
 
 """
-from alembic import op
-import sqlalchemy as sa
-from datetime import datetime, timezone
 
 # revision identifiers, used by Alembic.
 revision = '0008_add_actor_style_profiles'

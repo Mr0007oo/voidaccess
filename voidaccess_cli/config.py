@@ -299,7 +299,7 @@ def ensure_spacy_model(model_name: str = "en_core_web_sm") -> bool:
             importlib.invalidate_caches()
             import spacy as _spacy2
             _spacy2.load(model_name)
-            con.print(f"  [green]✓[/green] spaCy model ready")
+            con.print("  [green]✓[/green] spaCy model ready")
             return True
         except Exception:
             pass

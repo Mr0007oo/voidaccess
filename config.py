@@ -1,5 +1,4 @@
 import os
-import secrets
 import logging
 from dotenv import load_dotenv
 
@@ -58,7 +57,8 @@ API_PORT = _clean_env("API_PORT", "8000")
 
 # Phase 6 — advanced capabilities
 DEEPL_API_KEY        = _clean_env("DEEPL_API_KEY")           # optional; translation
-STYLOMETRY_THRESHOLD = _clean_env("STYLOMETRY_THRESHOLD", "0.85")  # same-author detection
+# Stylometry decisions are enabled only by a labeled calibration artifact.
+STYLOMETRY_CALIBRATION_FILE = _clean_env("STYLOMETRY_CALIBRATION_FILE")
 
 # LLM extraction cache (optional — defaults to enabled)
 DISABLE_EXTRACTION_CACHE = _clean_env("DISABLE_EXTRACTION_CACHE")

@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import re
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,7 +107,8 @@ def run(
         import spacy
         spacy.load("en_core_web_sm")
     except Exception:
-        import subprocess, sys
+        import subprocess
+        import sys
         from rich.console import Console
         Console().print(
             "  [dim]→[/dim] Installing spaCy NER model (one-time)..."
@@ -375,6 +375,8 @@ async def _run_investigation(
     github_pages: list[dict] = []
     gitlab_pages: list[dict] = []
     rss_pages: list[dict] = []
+    telegram_pages: list[dict] = []
+    onion_pages: list[dict] = []
     search_summary: dict[str, int] = {}
 
     if not no_tor:
@@ -406,13 +408,43 @@ async def _run_investigation(
             sources_used[key] = {"status": "fail", "error": str(exc)}
             return []
 
+    async def _onionsearch():
+        from sources.engines import search_onionsearch
+        return await search_onionsearch(refined)
+
+    async def _telegram():
+        if not os.getenv("TELEGRAM_API_ID", "").strip() or not os.getenv("TELEGRAM_API_HASH", "").strip():
+            return []
+        from sources.telegram import fetch_telegram_messages
+        channels = [c.strip() for c in os.getenv("TELEGRAM_CHANNELS", "").split(",") if c.strip()]
+        return await fetch_telegram_messages(channels, refined)
+
     side_tasks = await asyncio.gather(
         _safe(lambda: _scrape_pastes(refined), "Paste sites", "paste_sites"),
         _safe(lambda: _scrape_github(refined), "GitHub", "github"),
         _safe(lambda: _scrape_gitlab(refined), "GitLab", "gitlab"),
         _safe(lambda: _scrape_rss(refined), "RSS feeds", "rss"),
+        _safe(_onionsearch, "Torch + Haystack", "onion_search"),
+        _safe(_telegram, "Telegram", "telegram"),
     )
-    paste_pages, github_pages, gitlab_pages, rss_pages = side_tasks
+    paste_pages, github_pages, gitlab_pages, rss_pages, onion_pages, telegram_pages = side_tasks
+    for onion in onion_pages:
+        search_links.append({
+            "link": onion.get("url", ""),
+            "title": onion.get("title", ""),
+            "snippet": onion.get("snippet", ""),
+            "source_engine": onion.get("source", ""),
+        })
+    if not os.getenv("TELEGRAM_API_ID", "").strip() or not os.getenv("TELEGRAM_API_HASH", "").strip():
+        sources_used["telegram"] = {"status": "skipped_no_key"}
+    for _engine_name in ("Torch", "Haystack"):
+        _count = sum(1 for item in onion_pages if item.get("source") == _engine_name)
+        from sources.engines import get_last_onionsearch_status
+        _engine_status = get_last_onionsearch_status().get(_engine_name, "ok")
+        sources_used[_engine_name.lower()] = {
+            "status": "ok" if _engine_status.startswith("ok_") else _engine_status,
+            "count": _count,
+        }
 
     if not no_tor and search_summary:
         display.update_step(
@@ -498,7 +530,6 @@ async def _run_investigation(
     # and to surface in the final report payload.
     seeds_discovered = 0
     try:
-        from scraper.scrape import _discover_seeds_from_one_page  # noqa: WPS437
 
         seeds_discovered = await _discover_seeds_from_pages(
             scraped_pages,
@@ -522,6 +553,15 @@ async def _run_investigation(
             if not url or not text:
                 continue
             scraped_pages.append({"url": url, "text": text, "source": page.get("source", "clearnet")})
+
+    for page in telegram_pages:
+        url = page.get("url") or ""
+        text = page.get("text") or ""
+        if url and text:
+            scraped_pages.append({"url": url, "text": text, "source": "telegram", "source_type": "telegram"})
+
+    from utils.content_dedup import deduplicate_page_records
+    scraped_pages = deduplicate_page_records(scraped_pages)
 
     # Resolve page_ids from DB (scrape_multiple persisted .onion pages)
     page_ids = await asyncio.to_thread(_lookup_page_ids, [p["url"] for p in scraped_pages])

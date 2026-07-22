@@ -11,7 +11,7 @@ import math
 import re
 import string
 from collections import Counter
-from typing import Optional
+from typing import Sequence
 
 # Top-20 English function words — nearly impossible to consciously change
 _FUNCTION_WORDS = [
@@ -215,13 +215,98 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (mag_a * mag_b)
 
 
-def compute_similarity(vector_a: dict, vector_b: dict) -> float:
+# Conservative reference statistics used when no calibration corpus is supplied.
+# These are scale priors, not authorship thresholds.  They put length features
+# on the same order as the already-normalized ratios; a fitted corpus should be
+# preferred for production evaluation (see fit_reference_stats).
+_DEFAULT_STATS = {
+    "avg_word_length": (5.0, 1.5),
+    "avg_sentence_length": (15.0, 12.0),
+    "vocabulary_richness": (0.55, 0.20),
+    "punctuation_density": (0.12, 0.08),
+    "uppercase_ratio": (0.08, 0.12),
+    "digit_ratio": (0.02, 0.05),
+    "avg_paragraph_length": (3.0, 3.0),
+    "exclamation_ratio": (0.05, 0.15),
+    "question_ratio": (0.05, 0.15),
+}
+
+
+def fit_reference_stats(vectors: Sequence[dict]) -> dict:
+    """Fit per-feature mean/std statistics for Burrows-style normalization."""
+    valid = [v for v in vectors if isinstance(v, dict)]
+    if not valid:
+        return {}
+    combined: dict = {}
+    for vector in valid:
+        for key, value in vector.items():
+            if isinstance(value, dict):
+                combined.setdefault(key, {}).update(value)
+            else:
+                combined.setdefault(key, 0.0)
+    names = _feature_names(combined, combined)
+    template = {
+        key: ({subkey: 0.0 for subkey in value} if isinstance(value, dict) else 0.0)
+        for key, value in combined.items()
+    }
+    columns: dict[str, list[float]] = {name: [] for name in names}
+    for vector in valid:
+        flat, _ = _aligned_flatten(vector, template)
+        for name, value in zip(names, flat):
+            columns[name].append(value)
+    stats = {}
+    for name, values in columns.items():
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / max(len(values), 1)
+        stats[name] = {"mean": mean, "std": max(math.sqrt(variance), 1e-6)}
+    return stats
+
+
+def _feature_names(vector_a: dict, vector_b: dict) -> list[str]:
+    names: list[str] = []
+    for key in sorted(set(vector_a.keys()) | set(vector_b.keys())):
+        value_a, value_b = vector_a.get(key), vector_b.get(key)
+        if isinstance(value_a, dict) or isinstance(value_b, dict):
+            keys = set(value_a.keys() if isinstance(value_a, dict) else ()) | set(
+                value_b.keys() if isinstance(value_b, dict) else ()
+            )
+            names.extend(f"{key}.{subkey}" for subkey in sorted(keys))
+        else:
+            names.append(key)
+    return names
+
+
+def _zscore_values(
+    flat: list[float], names: list[str], reference_stats: dict | None = None
+) -> list[float]:
+    # ``names`` is already aligned to the union of both vectors.
+    result = []
+    for i, value in enumerate(flat):
+        configured = (reference_stats or {}).get(names[i]) or (reference_stats or {}).get(str(i))
+        if configured:
+            mean, std = float(configured["mean"]), max(float(configured["std"]), 1e-6)
+        else:
+            # Scalar defaults are keyed by feature name; nested values use a
+            # deliberately broad ratio prior.
+            mean, std = _DEFAULT_STATS.get(names[i].split(".")[-1], (0.0, 0.05))
+        result.append((value - mean) / std)
+    return result
+
+
+def compute_similarity(
+    vector_a: dict,
+    vector_b: dict,
+    reference_stats: dict | None = None,
+) -> float:
     """
-    Cosine similarity between two style vectors (0.0–1.0).
+    Burrows-style similarity between two style vectors (0.0–1.0).
 
     Handles nested function_word_freq and char_ngram_freq dicts by
-    flattening both vectors into aligned float arrays. Returns 0.0 if
-    either vector is None or malformed. Never raises.
+    flattening both vectors into aligned arrays, z-scoring each feature, and
+    converting the mean absolute z-score distance to ``exp(-distance)``.
+    This prevents raw sentence length/word-count magnitudes from dominating.
+    ``reference_stats`` should be fitted on a representative corpus when
+    available. Returns 0.0 for malformed input. Never raises.
     """
     try:
         if not vector_a or not vector_b:
@@ -229,8 +314,18 @@ def compute_similarity(vector_a: dict, vector_b: dict) -> float:
         if not isinstance(vector_a, dict) or not isinstance(vector_b, dict):
             return 0.0
         flat_a, flat_b = _aligned_flatten(vector_a, vector_b)
-        raw = _cosine_similarity(flat_a, flat_b)
-        return float(max(0.0, min(1.0, raw)))
+        if not flat_a or len(flat_a) != len(flat_b):
+            return 0.0
+        # Pairwise centering is intentionally avoided: it makes every feature
+        # equally influential and discards magnitude. Reference priors keep
+        # the score meaningful for legacy profiles without a fitted corpus.
+        names = _feature_names(vector_a, vector_b)
+        za = _zscore_values(flat_a, names, reference_stats)
+        zb = _zscore_values(flat_b, names, reference_stats)
+        distance = sum(abs(a - b) for a, b in zip(za, zb)) / len(za)
+        if distance >= 5.3:
+            return 0.0
+        return float(max(0.0, min(1.0, math.exp(-distance))))
     except Exception:
         return 0.0
 
@@ -238,12 +333,12 @@ def compute_similarity(vector_a: dict, vector_b: dict) -> float:
 def are_likely_same_author(
     vector_a: dict,
     vector_b: dict,
-    threshold: float = 0.85,
+    threshold: float | None = None,
 ) -> tuple[bool, float]:
     """
-    Returns (True, similarity_score) if similarity >= threshold.
-
-    Threshold of 0.85 is conservative — only flag high-confidence matches.
+    Returns (True, similarity_score) only when an explicit calibrated
+    threshold is supplied and the score clears it. ``None`` deliberately
+    means "score only; do not make an attribution decision".
     """
     score = compute_similarity(vector_a, vector_b)
-    return (score >= threshold, score)
+    return (threshold is not None and score >= threshold, score)

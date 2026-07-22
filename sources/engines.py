@@ -59,6 +59,12 @@ _ONIONSEARCH_ENGINES = [
 
 _TIMEOUT = aiohttp.ClientTimeout(connect=15, sock_read=45)
 _ONION_RE = re.compile(r"https?://[a-z2-7]{16,56}\.onion[^\s\"'<>]*", re.IGNORECASE)
+_LAST_ONIONSEARCH_STATUS: dict[str, str] = {"Torch": "not_run", "Haystack": "not_run"}
+
+
+def get_last_onionsearch_status() -> dict[str, str]:
+    """Return the latest per-engine transport/HTTP/parser status."""
+    return dict(_LAST_ONIONSEARCH_STATUS)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +164,9 @@ async def search_onionsearch(query: str) -> List[dict]:
     Returns list[dict] with keys: title, url, snippet, source.
     Returns [] on any error; partial results from working engines are included.
     """
+    global _LAST_ONIONSEARCH_STATUS
     results: List[dict] = []
+    _LAST_ONIONSEARCH_STATUS = {engine["name"]: "pending" for engine in _ONIONSEARCH_ENGINES}
     encoded = quote_plus(query)
 
     try:
@@ -174,15 +182,26 @@ async def search_onionsearch(query: str) -> List[dict]:
                         url, headers={"User-Agent": _ua()}
                     ) as resp:
                         if resp.status != 200:
+                            _LAST_ONIONSEARCH_STATUS[name] = f"http_{resp.status}"
                             _logger.debug(
                                 "%s returned HTTP %d", name, resp.status
                             )
                             continue
                         html = await resp.text(errors="replace")
-                        results.extend(_parse_onion_links(html, name))
+                        parsed = _parse_onion_links(html, name)
+                        results.extend(parsed)
+                        _LAST_ONIONSEARCH_STATUS[name] = f"ok_{len(parsed)}_results"
                 except (aiohttp.ClientError, Exception) as exc:
+                    error_name = type(exc).__name__.lower()
+                    _LAST_ONIONSEARCH_STATUS[name] = (
+                        "error_proxy" if "proxy" in error_name or "proxy" in str(exc).lower()
+                        else "error_timeout" if isinstance(exc, asyncio.TimeoutError)
+                        else "error_transport"
+                    )
                     _logger.debug("%s fetch error: %s", name, exc)
     except Exception as exc:
+        status = "error_proxy" if "proxy" in type(exc).__name__.lower() or "proxy" in str(exc).lower() else "error_transport"
+        _LAST_ONIONSEARCH_STATUS = {name: status for name in _LAST_ONIONSEARCH_STATUS}
         _logger.debug("OnionSearch session error: %s", exc)
 
     return _deduplicate(results)

@@ -144,6 +144,9 @@ class Investigation(Base):
     status: Mapped[str] = mapped_column(
         sa.String(20), nullable=False, default="pending", server_default="pending"
     )
+    cancellation_requested: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, default=False, server_default="false"
+    )
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),
         nullable=False,
@@ -199,6 +202,36 @@ class Investigation(Base):
 
     def __repr__(self) -> str:
         return f"<Investigation {self.id} query={self.query!r}>"
+
+
+class InvestigationStepMetric(Base):
+    """Persisted timing and work counters for one pipeline step/run."""
+
+    __tablename__ = "investigation_step_metrics"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True, autoincrement=True)
+    investigation_id: Mapped[uuid.UUID] = mapped_column(
+        sa.UUID(as_uuid=True), sa.ForeignKey("investigations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    step_name: Mapped[str] = mapped_column(sa.String(50), nullable=False)
+    duration_ms: Mapped[float] = mapped_column(sa.Float, nullable=False, default=0.0)
+    llm_calls: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    extraction_llm_pages: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    extraction_cache_hits: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    pages_attempted: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    pages_fetched: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    pages_failed: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    pages_cache_hits: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    pages_fresh: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    recorded_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint("investigation_id", "step_name", name="uq_investigation_step_metric"),
+    )
 
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+from datetime import timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -65,11 +66,16 @@ def detect_timezone_leak(texts_with_timestamps: list[dict]) -> dict:
         if ts is None:
             continue
         if hasattr(ts, "utcoffset") and ts.utcoffset() is not None:
-            # Convert to UTC
-            utc_ts = ts.astimezone(tz=None).replace(tzinfo=None)
+            # Convert to an explicit, host-independent reference frame.  Using
+            # tz=None here made results depend on the analyst server's zone.
+            utc_ts = ts.astimezone(timezone.utc)
             posting_hours.append(utc_ts.hour)
         else:
-            posting_hours.append(ts.hour)
+            # Naive timestamps have no information with which to convert.  The
+            # ingestion contract treats them as UTC; make that assumption
+            # explicit instead of allowing the host timezone to leak in.
+            utc_ts = ts.replace(tzinfo=timezone.utc) if hasattr(ts, "replace") else ts
+            posting_hours.append(utc_ts.hour)
 
     if not posting_hours:
         return {

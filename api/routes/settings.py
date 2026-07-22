@@ -13,7 +13,7 @@ All routes require authentication (JWT).
 
 import asyncio
 import time
-from typing import Annotated, Optional, List
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
@@ -179,12 +179,11 @@ ALLOWED_KEY_NAMES = {
     # Phase 1.6 — ScrapingAnt clearnet proxy.
     # Routes paste sites and RSS feeds through ScrapingAnt to improve
     # reliability on flaky upstreams.  Never touches Tor/dark web traffic.
-    # Per https://docs.scrapingant.com/proxy-mode this single API key is
-    # the primary ScrapingAnt credential — it authenticates both the REST API
-    # transport (POST to api.scrapingant.com) and the proxy transport
-    # (HTTP CONNECT through the configured ScrapingAnt proxy endpoint).  The proxy transport
-    # username string ("the ScrapingAnt proxy username string") is built
-    # at connection time; "scrapingant" is a literal constant.
+    # SCRAPINGANT_API_KEY is used exclusively by the REST Web Scraping API
+    # transport (POST to api.scrapingant.com).  Proxy transport uses the
+    # separate dashboard-issued SCRAPINGANT_PROXY_USERNAME and
+    # SCRAPINGANT_PROXY_PASSWORD pair for HTTP CONNECT through the configured
+    # ScrapingAnt proxy endpoint.
     #
     # The two transport toggles (VOIDACCESS_USE_PROXIES, VOIDACCESS_USE_PROXY)
     # are separate env vars and are intentionally NOT exposed as keys here.
@@ -791,10 +790,6 @@ async def validate_model(
 
     try:
         from voidaccess.llm_utils import resolve_model_config, _common_llm_params
-        from langchain_openai import ChatOpenAI
-        from langchain_anthropic import ChatAnthropic
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        from langchain_ollama import ChatOllama
 
         config = resolve_model_config(model_id)
         if config is None:
@@ -885,7 +880,7 @@ async def validate_model(
                 provider=provider,
                 error="model_not_found",
                 message=f"Model '{model_id}' not found. Check the model ID and try again.",
-                suggestion=f"Browse available models or check https://openrouter.ai/models for valid IDs.",
+                suggestion="Browse available models or check https://openrouter.ai/models for valid IDs.",
             )
         if "429" in exc_str or "rate limit" in exc_str.lower():
             return ValidateModelResponse(

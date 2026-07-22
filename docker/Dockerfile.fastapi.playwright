@@ -19,14 +19,32 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY pyproject.toml README.md ./
+COPY api/ api/
+COPY analysis/ analysis/
+COPY auth/ auth/
+COPY crawler/ crawler/
+COPY db/ db/
+COPY export/ export/
+COPY extractor/ extractor/
+COPY fingerprint/ fingerprint/
+COPY graph/ graph/
+COPY i18n/ i18n/
+COPY monitor/ monitor/
+COPY scraper/ scraper/
+COPY search/ search/
+COPY sources/ sources/
+COPY utils/ utils/
+COPY voidaccess/ voidaccess/
+COPY voidaccess_cli/ voidaccess_cli/
+COPY config.py .
 
 RUN --mount=type=cache,target=/root/.pip \
     if [ "$GPU" = "true" ]; then \
-        pip install --no-cache-dir -r requirements.txt; \
+        pip install --no-cache-dir .; \
     else \
         pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-        pip install --no-cache-dir --no-deps -r requirements.txt; \
+        pip install --no-cache-dir .; \
     fi
 
 RUN --mount=type=cache,target=/root/.pip \

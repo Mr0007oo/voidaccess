@@ -256,7 +256,8 @@ async def _sweep_stuck_investigations(cutoff_minutes: Optional[int] = 30) -> int
             if not stuck:
                 return 0
 
-            swept_ids = [inv.id for inv in stuck]
+            cancelled_ids = [inv.id for inv in stuck if inv.cancellation_requested]
+            failed_ids = [inv.id for inv in stuck if not inv.cancellation_requested]
             sweep_reason = (
                 "Server restarted mid-investigation"
                 if cutoff_minutes is None
@@ -267,20 +268,32 @@ async def _sweep_stuck_investigations(cutoff_minutes: Optional[int] = 30) -> int
         # Update outside the read session.
         from sqlalchemy import update
         with get_session() as session:
-            session.execute(
-                update(Investigation)
-                .where(Investigation.id.in_(swept_ids))
-                .values(
-                    status="failed",
-                    summary=sweep_reason,
+            if cancelled_ids:
+                session.execute(
+                    update(Investigation)
+                    .where(Investigation.id.in_(cancelled_ids))
+                    .values(
+                        status="cancelled",
+                        summary="Investigation cancelled by user before worker termination",
+                    )
                 )
-            )
+            if failed_ids:
+                session.execute(
+                    update(Investigation)
+                    .where(Investigation.id.in_(failed_ids))
+                    .values(status="failed", summary=sweep_reason)
+                )
             session.commit()
 
-        for inv_id in swept_ids:
+        for inv_id in cancelled_ids:
+            logger.warning("Resolved cancelled investigation after worker termination: %s", inv_id)
+        for inv_id in failed_ids:
             logger.warning("Swept stuck investigation: %s", inv_id)
-        logger.info("Swept %d stuck investigations (cutoff=%s)", len(swept_ids), cutoff_minutes)
-        return len(swept_ids)
+        logger.info(
+            "Swept %d stuck investigations (cancelled=%d, failed=%d, cutoff=%s)",
+            len(stuck), len(cancelled_ids), len(failed_ids), cutoff_minutes,
+        )
+        return len(stuck)
     except Exception as exc:
         logger.warning("Swept-investigation sweep failed: %s", exc)
         return 0

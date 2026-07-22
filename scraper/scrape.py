@@ -473,37 +473,37 @@ async def _fetch_one(
 
             try:
                 async def _get_with_timeout():
-                    connector = _tor_aiohttp_connector() if is_onion_url(url) else _direct_tcp_connector()
-                    async with aiohttp.ClientSession(
-                        connector=connector,
-                        timeout=aiohttp.ClientTimeout(connect=5, sock_read=25 if not is_onion_url(url) else 20),
-                    ) as local_session:
-                        async with local_session.get(url, headers=headers) as resp:
-                            if resp.status in RETRYABLE_STATUS:
-                                return "retry", f"HTTP {resp.status}", None, None, None
+                    # The orchestrator passes a cached session for this URL's
+                    # network (Tor or clearnet).  Reusing it is what preserves
+                    # aiohttp's connector pool and, for Tor, the established
+                    # SOCKS connection/circuit.  A fresh session is created
+                    # only by the cache factory or an explicit error reset.
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status in RETRYABLE_STATUS:
+                            return "retry", f"HTTP {resp.status}", None, None, None
 
-                            if resp.status != 200:
-                                return "fail", None, None, None, None
+                        if resp.status != 200:
+                            return "fail", None, None, None, None
 
-                            content_type = (resp.headers.get("Content-Type") or "").lower()
-                            if content_type and not any(
-                                t in content_type for t in ALLOWED_CONTENT_TYPES
-                            ):
-                                return "fail", None, None, None, None
+                        content_type = (resp.headers.get("Content-Type") or "").lower()
+                        if content_type and not any(
+                            t in content_type for t in ALLOWED_CONTENT_TYPES
+                        ):
+                            return "fail", None, None, None, None
 
-                            chunks: List[bytes] = []
-                            bytes_read = 0
-                            async for chunk in resp.content.iter_chunked(8192):
-                                if not chunk:
-                                    continue
-                                bytes_read += len(chunk)
-                                if bytes_read > MAX_DOWNLOAD_BYTES:
-                                    break
-                                chunks.append(chunk)
+                        chunks: List[bytes] = []
+                        bytes_read = 0
+                        async for chunk in resp.content.iter_chunked(8192):
+                            if not chunk:
+                                continue
+                            bytes_read += len(chunk)
+                            if bytes_read > MAX_DOWNLOAD_BYTES:
+                                break
+                            chunks.append(chunk)
 
-                            raw_bytes = b"".join(chunks)
-                            encoding = resp.charset or "utf-8"
-                            return "ok", raw_bytes, encoding, None, None
+                        raw_bytes = b"".join(chunks)
+                        encoding = resp.charset or "utf-8"
+                        return "ok", raw_bytes, encoding, None, None
 
                 status_res, r_bytes, enc, _, _ = await asyncio.wait_for(
                     _get_with_timeout(), timeout=10.0

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from api.auth import get_current_user
 from search.search import SEARCH_ENGINES
-from search.circuit_breaker import get_all_states, record_success, is_open, _engine_failures, _engine_last_success
+from search.circuit_breaker import record_success, is_open, _engine_failures
 from sources.seed_manager import get_seed_manager
 
 logger = logging.getLogger(__name__)

@@ -264,6 +264,18 @@ def _validate_crypto_wallet(entity_type: str, value: str) -> bool:
     if not value:
         return False
 
+    if entity_type == "BITCOIN_ADDRESS":
+        return _validate_bitcoin_address(value)
+    if entity_type == "ETHEREUM_ADDRESS":
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", value):
+            return False
+        # Lowercase/uppercase addresses are valid; mixed case must satisfy EIP-55.
+        if value[2:] not in (value[2:].lower(), value[2:].upper()):
+            return _eth_checksum(value) == value
+        return True
+    if entity_type == "MONERO_ADDRESS":
+        return _validate_monero_address(value)
+
     if entity_type == "LITECOIN_ADDRESS":
         # L or M prefix, base58, 27-34 chars total
         return bool(re.fullmatch(r"[LM][a-km-zA-HJ-NP-Z1-9]{26,33}", value))
@@ -319,6 +331,77 @@ def _validate_crypto_wallet(entity_type: str, value: str) -> bool:
 
     # Unknown crypto entity type — let it through (validator should be added).
     return True
+
+
+_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _base58_decode(value: str) -> bytes:
+    number = 0
+    for char in value:
+        number = number * 58 + _BASE58_ALPHABET.index(char)
+    raw = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    return b"\x00" * (len(value) - len(value.lstrip("1"))) + raw
+
+
+def _validate_bitcoin_address(value: str) -> bool:
+    if value.lower().startswith("bc1"):
+        return _validate_bech32(value.lower())
+    try:
+        decoded = _base58_decode(value)
+        return len(decoded) in (25, 26) and hashlib.sha256(hashlib.sha256(decoded[:-4]).digest()).digest()[:4] == decoded[-4:]
+    except (ValueError, IndexError):
+        return False
+
+
+def _bech32_polymod(values: list[int]) -> int:
+    generator = (0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)
+    checksum = 1
+    for value in values:
+        top = checksum >> 25
+        checksum = ((checksum & 0x1FFFFFF) << 5) ^ value
+        for bit, gen in enumerate(generator):
+            if (top >> bit) & 1:
+                checksum ^= gen
+    return checksum
+
+
+def _validate_bech32(value: str) -> bool:
+    if value.lower() != value and value.upper() != value:
+        return False
+    value = value.lower()
+    if not value.startswith("bc1") or len(value) > 90:
+        return False
+    alphabet = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+    pos = value.rfind("1")
+    if pos < 1 or pos + 7 > len(value) or any(c not in alphabet for c in value[pos + 1:]):
+        return False
+    data = [alphabet.index(c) for c in value[pos + 1:]]
+    hrp = [ord(c) >> 5 for c in value[:pos]] + [0] + [ord(c) & 31 for c in value[:pos]]
+    if _bech32_polymod(hrp + data) not in (1, 0x2BC830A3):
+        return False
+    return 2 <= data[0] <= 40 and 4 <= len(data[1:-6]) <= 65
+
+
+def _validate_monero_address(value: str) -> bool:
+    if not re.fullmatch(r"4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}", value):
+        return False
+    try:
+        decoded = b""
+        for start in range(0, len(value), 11):
+            block = value[start:start + 11]
+            decoded += _base58_decode(block)
+        if len(decoded) < 5:
+            return False
+        try:
+            from Crypto.Hash import keccak
+            digest = keccak.new(digest_bits=256, data=decoded[:-4]).digest()
+        except ImportError:
+            from eth_hash.auto import keccak
+            digest = keccak(decoded[:-4])
+        return digest[:4] == decoded[-4:]
+    except (ValueError, IndexError, ImportError):
+        return False
 
 
 def _validate_network_forensic(entity_type: str, value: str) -> bool:
@@ -546,7 +629,9 @@ _ELEVATED_CONFIDENCE: dict[str, float] = {
 }
 
 
-def _confidence_for(entity_type: str) -> float:
+def _confidence_for(entity_type: str, extraction_method: str = "") -> float:
+    if extraction_method.upper() == "LLM":
+        return 0.80
     if entity_type in _TIER_1_TYPES:
         return _TIER_1_CONFIDENCE
     if entity_type in _TIER_2_TYPES:
@@ -569,7 +654,9 @@ _REGEX_TYPE_CONFIDENCE: dict[str, float] = {
 }
 
 
-def _extraction_method_for(entity_type: str) -> str:
+def _extraction_method_for(entity_type: str, override: str = "") -> str:
+    if override:
+        return override
     if entity_type in _REGEX_TYPES:
         return "regex"
     if entity_type in _NER_TYPES:
@@ -1273,6 +1360,7 @@ def normalize_entities(
     page_url: str,
     page_id: Optional[uuid.UUID] = None,
     page_text: Optional[str] = None,
+    extraction_method_overrides: Optional[dict[tuple[str, str], str]] = None,
 ) -> list[NormalizedEntity]:
     """
     Convert raw extraction results into deduplicated NormalizedEntity records.
@@ -1286,7 +1374,6 @@ def normalize_entities(
     noise_count = 0
 
     for entity_type, values in raw_entities.items():
-        confidence = _confidence_for(entity_type)
         for raw_value in values:
             if not raw_value or not raw_value.strip():
                 continue
@@ -1308,6 +1395,9 @@ def normalize_entities(
             # this is a second line of defence so a malformed value can
             # never reach the DB even if a future refactor weakens the regex.
             _CRYPTO_WALLET_TYPES = (
+                "BITCOIN_ADDRESS",
+                "ETHEREUM_ADDRESS",
+                "MONERO_ADDRESS",
                 "LITECOIN_ADDRESS",
                 "ZCASH_ADDRESS",
                 "DOGECOIN_ADDRESS",
@@ -1383,6 +1473,11 @@ def normalize_entities(
                 continue
             seen_values.add(dedup_key)
 
+            extraction_method = (extraction_method_overrides or {}).get(
+                (entity_type, raw_value), ""
+            )
+            confidence = _confidence_for(entity_type, extraction_method)
+
             # v1.7 Q-1 — reserved-range / placeholder filtering.
             # Assign source_quality=0.0 so these are excluded from the entity
             # store (pipeline.py's apply_entity_cap drops confidence < 0.80,
@@ -1419,7 +1514,7 @@ def normalize_entities(
                     source_url=page_url,
                     page_id=page_id,
                     context_snippet=snip,
-                    extraction_method=_extraction_method_for(entity_type),
+                    extraction_method=_extraction_method_for(entity_type, extraction_method),
                     source_quality=source_quality,
                 )
             )

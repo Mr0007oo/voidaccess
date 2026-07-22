@@ -7,7 +7,6 @@ from typing import Callable, Optional, List
 from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.callbacks.base import BaseCallbackHandler
-import os
 from config import (
     OLLAMA_BASE_URL,
     OPENROUTER_BASE_URL,
@@ -18,7 +17,6 @@ from config import (
     LLAMA_CPP_BASE_URL,
     GROQ_API_KEY,
     DEFAULT_MODELS,
-    DEFAULT_MODEL,
 )
 
 logger = logging.getLogger(__name__)

@@ -15,11 +15,11 @@ single-axis dispatch on clearnet HTTP fetches:
 
 Architectural grounding (verified against ScrapingAnt docs):
 
-    1. Username is a LITERAL constant string ("scrapingant"), not a
-       per-customer credential. Optional API parameters (browser=false,
-       proxy_type=residential|datacenter, forward_headers=true, ...)
-       are appended after "&". Only ONE credential exists: SCRAPINGANT_API_KEY
-       (used as HTTP Basic auth password in both transports).
+    1. Proxy transport uses the dashboard-issued
+       SCRAPINGANT_PROXY_USERNAME + SCRAPINGANT_PROXY_PASSWORD credential
+       pair, separate from SCRAPINGANT_API_KEY. Optional API parameters
+       (browser=false, proxy_type=residential|datacenter,
+       forward_headers=true, ...) are appended to the proxy username.
 
        Source: https://docs.scrapingant.com/proxy-mode, §Integration details
        Quote: "Username: scrapingant + API parameters separated by &
@@ -59,7 +59,8 @@ Design:
       transport is selected, even when direct (none) is selected.
       This is a routing invariant, not a proxy concern.
     - Single transport per request, picked by config:
-        - If VOIDACCESS_USE_PROXY=true (and SCRAPINGANT_API_KEY set) → proxy
+        - If VOIDACCESS_USE_PROXY=true (and the proxy username/password pair
+          is set) → proxy
         - Else if VOIDACCESS_USE_PROXIES=true (legacy pre-1.6.2,
           and SCRAPINGANT_API_KEY set) → api
         - Else → direct
@@ -73,8 +74,9 @@ Design:
       ("As browser rendering is enabled by default, we recommend to
       disable it while using ScrapingAnt proxy transport"). The two paths
       preserve raw text/XML bytes identically.
-    - SCRAPINGANT_API_KEY is the ONLY credential. No second key, no
-      per-customer username.
+    - SCRAPINGANT_API_KEY is exclusively the REST Web Scraping API
+      credential. Proxy transport uses the separate dashboard-issued
+      SCRAPINGANT_PROXY_USERNAME + SCRAPINGANT_PROXY_PASSWORD pair.
     - No import from scraper/ — sources/scraper firewall preserved.
 
 The cap constant ``MAX_RESPONSE_BYTES`` mirrors scraper/scrape.py's
@@ -121,10 +123,9 @@ MAX_RESPONSE_BYTES = 1_000_000
 def _get_api_key() -> str | None:
     """Return the configured SCRAPINGANT_API_KEY, or None if absent/empty.
 
-    This is the primary ScrapingAnt credential in the entire ScrapingAnt
-    integration. It is used as:
-        - The x-api-key query param on the REST API transport.
-        - The HTTP Basic auth password on the proxy transport.
+    This credential is used exclusively as the x-api-key query parameter
+    on the REST Web Scraping API transport. Proxy transport uses the
+    separate dashboard-issued username/password pair.
     """
     key = os.getenv("SCRAPINGANT_API_KEY", "").strip()
     return key or None
@@ -252,8 +253,8 @@ def is_proxy_transport_enabled() -> bool:
 
     Triggered by:
         - VOIDACCESS_USE_PROXY=true
-        - SCRAPINGANT_API_KEY is set (used as the proxy HTTP Basic
-          auth password — the only credential)
+        - SCRAPINGANT_PROXY_USERNAME and SCRAPINGANT_PROXY_PASSWORD are
+          set (the separate dashboard-issued proxy credential pair)
 
     Username is built at connection time per docs:
     "the ScrapingAnt proxy username string with browser=false and proxy_type"
@@ -523,7 +524,10 @@ async def _fetch_via_proxy_mode(
     The proxy URL's username encodes:
         - browser=false (always; per docs recommendation)
         - proxy_type=residential|datacenter (from SCRAPINGANT_PROXY_TYPE)
-    The password is SCRAPINGANT_API_KEY (the only credential).
+    The password is SCRAPINGANT_PROXY_PASSWORD; the username is the
+    separate SCRAPINGANT_PROXY_USERNAME dashboard credential. Neither
+    proxy credential is related to SCRAPINGANT_API_KEY, which is used
+    exclusively by the REST Web Scraping API transport.
 
     Returns None on any failure (caller falls through).  Never raises.
     """

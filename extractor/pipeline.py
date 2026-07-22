@@ -280,18 +280,38 @@ async def extract_entities_from_page(
         try:
             import hashlib
             page_hash = hashlib.sha256(page_text.encode()).hexdigest() if page_text else None
+            before_llm = {
+                (entity_type, value)
+                for entity_type, values in combined.items()
+                for value in values
+            }
             combined = await _llm_extract(
                 page_text, llm, combined, page_hash=page_hash, disable_cache=disable_cache
             )
+            llm_overrides = {
+                (entity_type, value): "LLM"
+                for entity_type, values in combined.items()
+                for value in values
+                if (entity_type, value) not in before_llm
+            }
         except Exception as exc:
             logger.error("LLM extraction failed for %s: %s", page_url, exc)
             errors.append(f"llm: {exc}")
+            llm_overrides = {}
+    else:
+        llm_overrides = {}
 
     # -----------------------------------------------------------------------
     # Stage 4 — Normalise
     # -----------------------------------------------------------------------
     try:
-        normalized = _normalize(combined, page_url, page_id, page_text=page_text)
+        normalized = _normalize(
+            combined,
+            page_url,
+            page_id,
+            page_text=page_text,
+            extraction_method_overrides=llm_overrides,
+        )
     except Exception as exc:
         logger.error("Normalization failed for %s: %s", page_url, exc)
         errors.append(f"normalize: {exc}")
@@ -373,6 +393,11 @@ async def extract_entities_from_pages(
         callback(page_index_1based, total_llm_pages, page_url)
     Used by the API route to emit SSE progress events.
     """
+    # Mirrored pages are one intelligence item.  Preserve all URLs on the
+    # canonical record, but extract/persist entities once so corroboration and
+    # investigation counts are not inflated by reposts.
+    from utils.content_dedup import deduplicate_page_records
+    pages = deduplicate_page_records(pages)
     semaphore = asyncio.Semaphore(max_concurrent)
 
     # -----------------------------------------------------------------------

@@ -104,9 +104,9 @@ The REST API transport and proxy transport are alternates, not a chain. Each req
 
 | Variable | Purpose |
 |---|---|
-| `SCRAPINGANT_API_KEY` | Credential for the REST API transport and the proxy transports |
-| `SCRAPINGANT_PROXY_USERNAME` | Residential or datacenter proxy username from the ScrapingAnt dashboard |
-| `SCRAPINGANT_PROXY_PASSWORD` | Residential or datacenter proxy password from the ScrapingAnt dashboard |
+| `SCRAPINGANT_API_KEY` | Credential exclusively for the REST Web Scraping API transport |
+| `SCRAPINGANT_PROXY_USERNAME` | Residential or datacenter proxy username from the ScrapingAnt dashboard; separate from `SCRAPINGANT_API_KEY` |
+| `SCRAPINGANT_PROXY_PASSWORD` | Residential or datacenter proxy password from the ScrapingAnt dashboard; used together with `SCRAPINGANT_PROXY_USERNAME` |
 | `SCRAPINGANT_PROXY_TYPE` | Selects `residential` or `datacenter` for proxy transport selection |
 | `VOIDACCESS_USE_PROXIES` | Enables the Web Scraping API transport |
 | `VOIDACCESS_USE_PROXY` | Enables the proxy transport |

@@ -529,9 +529,9 @@ Paste sites and RSS feeds can be routed through ScrapingAnt to reduce blocking a
 
 | Variable | Description |
 |---|---|
-| `SCRAPINGANT_API_KEY` | Credential for the Web Scraping API and for proxy authentication. |
-| `SCRAPINGANT_PROXY_USERNAME` | Residential or datacenter proxy username from the ScrapingAnt dashboard. |
-| `SCRAPINGANT_PROXY_PASSWORD` | Residential or datacenter proxy password from the ScrapingAnt dashboard. |
+| `SCRAPINGANT_API_KEY` | Credential exclusively for the Web Scraping API transport. |
+| `SCRAPINGANT_PROXY_USERNAME` | Residential or datacenter proxy username from the ScrapingAnt dashboard; separate from `SCRAPINGANT_API_KEY`. |
+| `SCRAPINGANT_PROXY_PASSWORD` | Residential or datacenter proxy password from the ScrapingAnt dashboard; used together with `SCRAPINGANT_PROXY_USERNAME`. |
 | `SCRAPINGANT_PROXY_TYPE` | Selects `residential` or `datacenter` for the proxy transports. |
 | `VOIDACCESS_USE_PROXIES` | Enables the REST API transport for clearnet scraping. |
 | `VOIDACCESS_USE_PROXY` | Enables the proxy transport for clearnet scraping. |
@@ -1317,7 +1317,7 @@ At least one LLM provider key is needed for query refinement, result filtering, 
 | `GITLAB_MAX_RESULTS` | `15` | Max GitLab results per investigation |
 | `RSS_FEEDS_ENABLED` | `true` | Set `false` to disable RSS feed scraping |
 | `RSS_MAX_ARTICLES` | `20` | Max RSS articles per investigation |
-| `SCRAPINGANT_API_KEY` | — | Optional. Credential for the Web Scraping API transport and the proxy transports. Routes paste site and RSS feed fetches through ScrapingAnt to improve reliability on flaky upstreams. Affects clearnet scraping only — never Tor, `.onion`, GitHub, or GitLab (those two carry auth tokens and are permanently excluded). Any transport failure (timeout, auth, 5xx, malformed response) silently falls back to a direct request. See §3.2 for the routing mechanism. |
+| `SCRAPINGANT_API_KEY` | — | Optional. Credential exclusively for the Web Scraping API transport. Routes paste site and RSS feed fetches through ScrapingAnt to improve reliability on flaky upstreams. Affects clearnet scraping only — never Tor, `.onion`, GitHub, or GitLab (those two carry auth tokens and are permanently excluded). Any transport failure (timeout, auth, 5xx, malformed response) silently falls back to a direct request. See §3.2 for the routing mechanism. |
 | `SCRAPINGANT_PROXY_TYPE` | `residential` | Pool type for the proxy transports. `residential` (default; harder to detect, slightly higher latency) or `datacenter` (faster, cheaper, easier to fingerprint). Selects the proxy pool and does not change the host. Env-var-only; not a secret. Ignored when neither transport is active. |
 | `VOIDACCESS_USE_PROXIES` | `false` | **REST API transport.** Set to `true` to route paste sites and RSS feeds through the ScrapingAnt Web Scraping API (`POST https://api.scrapingant.com/v2/general`). Without `SCRAPINGANT_API_KEY`, this is a no-op. Legacy pre-1.6.2 toggle; CLI: also set by `voidaccess configure proxy --enable / --disable` or the `--use-scraping-api` flag on `voidaccess investigate`. Mutually exclusive with `VOIDACCESS_USE_PROXY`; if both are set, the proxy transport wins for that request. |
 | `VOIDACCESS_USE_PROXY` | `false` | **Proxy transport.** Set to `true` to route requests through the configured ScrapingAnt proxy pool. Requires the proxy username/password pair and uses `SCRAPINGANT_PROXY_TYPE` to select the pool. Mutually exclusive with `VOIDACCESS_USE_PROXIES` — if both are set, the proxy transport wins for that request. CLI: `voidaccess configure proxy --enable-proxy / --disable-proxy`. New in v1.6.0. |
@@ -1475,6 +1475,4 @@ Free-tier models on OpenRouter enforce per-minute rate limits. The pipeline has 
 ### proxy transport Over Plain HTTP Can Return 502
 
 When `VOIDACCESS_USE_PROXY=true` is set and the target URL is plain HTTP (not HTTPS), the ScrapingAnt proxy transport endpoint occasionally returns HTTP 502 instead of the target's content. HTTPS targets succeed reliably. Because real-world paste sites and the curated RSS feed list are nearly universally HTTPS, this only surfaces against an unusual plain-HTTP target and the silent fallback to direct (`sources/proxy_client.py::_fetch_via_proxy_mode` returns `None` on `resp.status >= 500`, then the chokepoint retries without the proxy) still returns usable content. The REST API transport (`VOIDACCESS_USE_PROXIES=true`) is not affected — the same chokepoint has no observed flakiness on plain HTTP via the `/v2/general` endpoint. If a future investigation produces unexpectedly few results from a plain-HTTP source, the cause is this; switching to REST API or to direct is a workaround.
-
-
 

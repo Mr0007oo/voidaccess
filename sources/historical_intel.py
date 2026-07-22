@@ -15,11 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from pathlib import Path
 from typing import Optional
 
-import aiohttp
 
 from sources.cache import CachedFeed
 
