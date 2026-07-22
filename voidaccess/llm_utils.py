@@ -17,9 +17,11 @@ from config import (
     LLAMA_CPP_BASE_URL,
     GROQ_API_KEY,
     DEFAULT_MODELS,
+    DEFAULT_MODEL,
 )
 
 logger = logging.getLogger(__name__)
+
 
 
 class BufferedStreamingHandler(BaseCallbackHandler):
