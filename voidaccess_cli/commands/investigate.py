@@ -26,13 +26,6 @@ from typing import Any, Callable, Optional
 import typer
 from rich.console import Console
 
-from extractor.identity import entity_display_id
-
-# Import reputation enrichment sources (used in Step 6.2–6.4)
-from sources.domain_reputation import enrich_domain_entities
-from sources.email_reputation import enrich_email_entities
-from sources.hash_reputation import enrich_hash_entities
-
 console = Console()
 logger = logging.getLogger(__name__)
 
@@ -368,7 +361,11 @@ async def _run_investigation(
     if not no_llm:
         try:
             from voidaccess.llm import get_llm
-            llm = get_llm(chosen_model)
+            provider = cli_config.get_llm_provider(cfg)
+            provider_env = cli_config.PROVIDER_ENV.get(provider)
+            api_key = cli_config.get_llm_key(cfg)
+            api_keys = {provider_env: api_key} if provider_env and api_key else {}
+            llm = get_llm(chosen_model, api_keys=api_keys)
         except Exception as exc:
             display.update_step("Refining query", "fail", f"LLM init failed: {exc}")
             llm = None
@@ -716,6 +713,7 @@ async def _run_investigation(
     # whole cluster further down.
     display.update_step("Enriching domains", "active")
     try:
+        from sources.domain_reputation import enrich_domain_entities
         # enrich_*_entities return (extraction_results, stats) — unpack so the
         # threaded list isn't clobbered into a tuple for the next step.
         extraction_results, _ = await asyncio.wait_for(
@@ -738,6 +736,7 @@ async def _run_investigation(
 
     display.update_step("Enriching hashes", "active")
     try:
+        from sources.hash_reputation import enrich_hash_entities
         extraction_results, _ = await asyncio.wait_for(
             enrich_hash_entities(extraction_results, inv_uuid),
             timeout=45,
@@ -752,6 +751,7 @@ async def _run_investigation(
 
     display.update_step("Enriching emails", "active")
     try:
+        from sources.email_reputation import enrich_email_entities
         extraction_results, _ = await asyncio.wait_for(
             enrich_email_entities(extraction_results, inv_uuid),
             timeout=30,
@@ -869,9 +869,22 @@ async def _run_investigation(
         # onto the event-loop thread so Rich's live renderer remains safe.
         loop.call_soon_threadsafe(display.update_step, "Building graph", "active", label)
 
+    def _graph_metrics(metrics: dict[str, int]) -> None:
+        detail = (
+            f"entities: {metrics.get('entity_rows_loaded', 0)} | "
+            f"intra-page edges: {metrics.get('intra_page_edges', 0)} | "
+            f"cross-page edges: {metrics.get('cross_page_edges', 0)}"
+        )
+        loop.call_soon_threadsafe(display.update_step, "Building graph", "active", detail)
+
     try:
         edges_written = await asyncio.wait_for(
-            asyncio.to_thread(_build_cooccurrence_edges, investigation_id, _graph_progress),
+            asyncio.to_thread(
+                _build_cooccurrence_edges,
+                investigation_id,
+                _graph_progress,
+                _graph_metrics,
+            ),
             timeout=CLI_PHASE_TIMEOUTS["graph_build"],
         )
         if no_llm:
@@ -1272,12 +1285,19 @@ def _lookup_page_ids(urls: list[str]) -> dict[str, uuid.UUID]:
 def _build_cooccurrence_edges(
     investigation_id: str,
     progress_callback: Optional[Callable[[str], None]] = None,
+    metrics_callback: Optional[Callable[[dict[str, int]], None]] = None,
 ) -> int:
     """Generate CO_APPEARED_ON edges for entities sharing a page."""
     from db.models import Entity
     from db.session import get_session
     from sqlalchemy.orm import joinedload
-    from graph.builder import _iter_semantic_cooccurrence_pairs
+    from graph.builder import (
+        _ENTITY_TYPE_TO_NODE_TYPE,
+        _iter_semantic_cooccurrence_pairs,
+        _link_cross_page_entities,
+        _make_node_id,
+    )
+    import networkx as nx
     from voidaccess_cli.adapters.sqlite import save_relationships
 
     edges: list[dict] = []
@@ -1292,6 +1312,7 @@ def _build_cooccurrence_edges(
             .filter(Entity.investigation_id == inv_uuid)
             .all()
         )
+        entity_rows_loaded = len(rows)
         by_page: dict[uuid.UUID, list] = {}
         for ent in rows:
             page_id = getattr(ent, "page_id", None)
@@ -1316,6 +1337,31 @@ def _build_cooccurrence_edges(
                         "confidence": 0.8,
                     }
                 )
+        intra_page_edges = len(edges)
+
+        # Calculate the same cross-page bridge metric used by the graph
+        # builder, while the ORM rows are still attached to their pages. The
+        # CLI continues to persist its bounded co-occurrence set below, but
+        # the live UI now exposes all three already-computed graph metrics.
+        graph = nx.MultiDiGraph()
+        for ent in rows:
+            page_url = ent.page.url if ent.page else ""
+            node_id = _make_node_id(ent.entity_type, ent.value, page_url)
+            graph.add_node(
+                node_id,
+                node_type=_ENTITY_TYPE_TO_NODE_TYPE.get(ent.entity_type, ""),
+                confidence=float(ent.confidence or 0.0),
+                metadata={"confidence": float(ent.confidence or 0.0)},
+            )
+        cross_page_edges = _link_cross_page_entities(graph, rows, inv_uuid)
+        if metrics_callback:
+            metrics_callback(
+                {
+                    "entity_rows_loaded": entity_rows_loaded,
+                    "intra_page_edges": intra_page_edges,
+                    "cross_page_edges": cross_page_edges,
+                }
+            )
     if progress_callback:
         progress_callback("loading persisted relationships")
     written = save_relationships(investigation_id, edges)
@@ -1408,6 +1454,8 @@ def _slugify(s: str) -> str:
 
 
 def _render_markdown(payload: dict[str, Any]) -> str:
+    from extractor.identity import entity_display_id
+
     lines: list[str] = []
     lines.append(f"# Investigation: {payload['query']}")
     lines.append(

@@ -2,6 +2,10 @@
 
 from importlib import import_module, reload
 
+# Reload the compatibility target so explicit `importlib.reload` calls keep
+# reflecting a test/application environment change. The warning guard itself
+# lives on the process-wide logging module, so this reload cannot reintroduce
+# warning spam.
 _config = reload(import_module("config"))
 
 for _name in dir(_config):

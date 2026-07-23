@@ -521,12 +521,14 @@ def main(
         console.print(f"voidaccess {__version__}")
         raise typer.Exit()
     cli_config.apply_env()
+    # Validate after the CLI has injected its runtime environment. This keeps
+    # --help/--version cold-start safe while preserving the required-key and
+    # once-per-process optional-key checks for real command invocations.
+    import config as runtime_config
+    runtime_config.validate_config()
     if not no_banner and ctx.invoked_subcommand:
         show_banner(console)
 
 
 if __name__ == "__main__":
     app()
-
-
-

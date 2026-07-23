@@ -317,10 +317,11 @@ def ensure_spacy_model(model_name: str = "en_core_web_sm") -> bool:
 
 def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     """
-    Push saved config into os.environ so that the existing voidaccess
-    modules (config.py, llm.py, sources/*) pick up the values at import.
+    Push saved config into os.environ before importing runtime modules.
 
-    Must be called BEFORE any voidaccess module is imported.
+    This remains the single environment-injection boundary for the CLI;
+    runtime modules must resolve environment-dependent values when they are
+    used rather than freezing them during import.
     """
     cfg = config or load_config()
 
@@ -388,6 +389,5 @@ def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     for key in ("ABUSECH_API_KEY", "VT_API_KEY", "OTX_API_KEY"):
         if not (os.environ.get(key) or "").strip():
             os.environ.pop(key, None)
-
 
 

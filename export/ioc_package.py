@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PACKAGE_FORMAT = "voidaccess-ioc-v1"
-PACKAGE_VERSION = "1.9.0"
+PACKAGE_VERSION = "1.9.1"
 SNORT_SID_BASE = 9000001  # 9xxxxxx reserved for VoidAccess-generated rules
 
 # Map extractor upper-case entity types to the per-file bucket they belong to.

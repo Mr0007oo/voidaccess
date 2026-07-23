@@ -184,12 +184,14 @@ def _print_path(data: dict, from_value: str, to_value: str) -> None:
 def _print_summary(data: dict) -> None:
     inv = data.get("investigation") or data
     entities = data.get("entities", [])
+    relationships = data.get("relationships", []) or []
     table = Table(title="Investigation summary")
     table.add_column("Field", style="bold")
     table.add_column("Value")
     table.add_row("Query", str(inv.get("query") or ""))
     table.add_row("Status", str(inv.get("status") or ""))
     table.add_row("Entities", str(len(entities)))
+    table.add_row("Relationships", str(len(relationships)))
     table.add_row("Created", str(inv.get("created_at") or "")[:19])
     table.add_row("Summary", (str(inv.get("summary") or "—"))[:120])
     console.print(table)

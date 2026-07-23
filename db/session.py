@@ -38,6 +38,7 @@ Usage (testing — pass an explicit URL to avoid needing DATABASE_URL in env)
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 
 from contextlib import asynccontextmanager, contextmanager
 from typing import AsyncGenerator, Generator, Optional
@@ -48,7 +49,19 @@ from sqlalchemy.orm import sessionmaker, Session
 
 import config
 
+# Kept as a compatibility/testing hook.  Production lookups below use the
+# current environment so apply_env() can run before the first DB operation.
 DATABASE_URL = config.DATABASE_URL
+_INITIAL_DATABASE_URL = DATABASE_URL
+
+
+def _database_url() -> Optional[str]:
+    # Preserve the long-standing test/embedding hook of monkeypatching this
+    # module's DATABASE_URL. Otherwise, read the live environment so a caller
+    # can inject DATABASE_URL after db.session has been imported.
+    if DATABASE_URL != _INITIAL_DATABASE_URL:
+        return DATABASE_URL
+    return os.getenv("DATABASE_URL") or DATABASE_URL
 _async_engine_cache: dict[str, "AsyncEngine"] = {}
 
 
@@ -104,7 +117,7 @@ def get_engine(url: Optional[str] = None) -> Engine:
     PostgreSQL gets a connection pool tuned for the scraping workload.
     SQLite skips pool parameters that only apply to QueuePool.
     """
-    target_url = url or DATABASE_URL
+    target_url = url or _database_url()
     if not target_url:
         raise RuntimeError(
             "DATABASE_URL is not configured.\n"
@@ -122,7 +135,7 @@ def release_engine(url: Optional[str] = None) -> None:
     Calls engine.dispose() to release connection pool resources and file handles,
     then clears the cache. Use this in test teardown to prevent leaks.
     """
-    target_url = url or DATABASE_URL
+    target_url = url or _database_url()
     if target_url:
         try:
             engine = get_engine(target_url)
@@ -139,7 +152,7 @@ def get_async_engine(url: Optional[str] = None) -> "AsyncEngine":
     Converts postgresql:// to postgresql+asyncpg:// and sqlite:// to sqlite+aiosqlite://.
     """
 
-    target_url = url or DATABASE_URL
+    target_url = url or _database_url()
     if not target_url:
         raise RuntimeError(
             "DATABASE_URL is not configured.\n"
@@ -185,7 +198,7 @@ def release_async_engine(url: Optional[str] = None) -> None:
 
     Calls engine.dispose() to release connection pool resources and file handles.
     """
-    target_url = url or DATABASE_URL
+    target_url = url or _database_url()
     if target_url in _async_engine_cache:
         _async_engine_cache[target_url].dispose()
         del _async_engine_cache[target_url]

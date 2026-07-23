@@ -2,6 +2,16 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [1.9.1] - 2026-07-23
+
+- Defer CLI/runtime configuration until after environment injection.
+- Preserve configured LLM credentials through all CLI model construction paths.
+- Surface graph-build row and edge metrics in the live CLI display.
+- Correct rejected-query exit codes and relationship counts in summaries.
+- Restore once-per-process optional-configuration warning behavior.
+- Keep LockBit/LockBit4 observations distinct unless evidence supports a
+  conservative relationship, avoiding unsafe automatic entity merges.
+
 ## [1.9.0] - 2026-07-23
 
 ### Changed

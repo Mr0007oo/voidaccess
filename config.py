@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-_OPTIONAL_CONFIG_WARNING_SHOWN = False
+_OPTIONAL_CONFIG_WARNING_STATE = "_voidaccess_optional_config_warning_shown"
 
 
 def _clean_env(name, default=None):
@@ -151,16 +151,12 @@ except ValueError:
 BLOCKCYPHER_TOKEN = _clean_env("BLOCKCYPHER_TOKEN", "")
 ETHERSCAN_API_KEY = _clean_env("ETHERSCAN_API_KEY", "")
 
-# Auth — REQUIRED in production. Generate with: python -c "import secrets; print(secrets.token_hex(32))"
-_jwt_secret = _clean_env("JWT_SECRET")
-if _jwt_secret is None:
-    raise RuntimeError(
-        "JWT_SECRET environment variable is not set. "
-        "Generate a secure secret with: python -c \"import secrets; print(secrets.token_hex(32))\" "
-        "and set it as JWT_SECRET in your .env file. "
-        "Do NOT use a random secret — it will change on restart and invalidate all issued tokens."
-    )
-JWT_SECRET = _jwt_secret
+# Auth — REQUIRED when the API/auth stack is actually used.  Do not validate
+# this at import time: the CLI injects its runtime environment in its entry
+# point before importing dependent modules, and `--help`/`--version` must work
+# on a fresh install.  `validate_config()` and the API startup path enforce it
+# at the point where authentication is needed.
+JWT_SECRET = _clean_env("JWT_SECRET")
 
 # Token blacklist Redis (optional — omit to disable blacklist checks)
 REDIS_URL = _clean_env("REDIS_URL")
@@ -210,7 +206,6 @@ OPTIONAL_KEYS = [
 
 
 def validate_config():
-    global _OPTIONAL_CONFIG_WARNING_SHOWN
     missing_required = []
     for key in REQUIRED_KEYS:
         if _clean_env(key) is None:
@@ -221,16 +216,14 @@ def validate_config():
         key for key in OPTIONAL_KEYS
         if (_clean_env(key) is None or _clean_env(key) == "")
     ]
-    if missing_optional and not _OPTIONAL_CONFIG_WARNING_SHOWN:
+    if missing_optional and not getattr(logging, _OPTIONAL_CONFIG_WARNING_STATE, False):
         logger.warning(
             "Optional configuration keys not set (%d): %s - related features will be disabled",
             len(missing_optional),
             ", ".join(missing_optional),
         )
-        _OPTIONAL_CONFIG_WARNING_SHOWN = True
-
-
-validate_config()
-
+        # Store the guard on the process-wide logging module so compatibility
+        # wrappers/reloads cannot reset it and reintroduce warning spam.
+        setattr(logging, _OPTIONAL_CONFIG_WARNING_STATE, True)
 
 
