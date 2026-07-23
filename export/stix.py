@@ -22,7 +22,6 @@ import warnings
 from typing import Any, Optional
 import uuid
 
-from graph.model import RELATIONSHIP_TYPE_STIX
 from extractor.confidence import get_entity_confidence
 
 logger = logging.getLogger(__name__)
@@ -161,6 +160,11 @@ def entity_to_stix_malware(entity: Any) -> Optional[Any]:
         malware = stix2.Malware(
             name=entity.value,
             is_family=True,
+            malware_types=(
+                ["ransomware"]
+                if entity.entity_type == "RANSOMWARE_GROUP"
+                else ["malware"]
+            ),
             confidence=_to_stix_confidence(get_entity_confidence(entity)),
             allow_custom=True,
             x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),
@@ -173,6 +177,28 @@ def entity_to_stix_malware(entity: Any) -> Optional[Any]:
         return malware
     except Exception as exc:
         logger.warning("entity_to_stix_malware failed for %r: %s", entity.value, exc)
+        return None
+
+
+def entity_to_stix_identity(entity: Any) -> Optional[Any]:
+    """Convert an organization entity to a STIX Identity object."""
+    if not _STIX2_AVAILABLE or entity.entity_type != "ORGANIZATION_NAME":
+        return None
+    try:
+        return stix2.Identity(
+            name=entity.value,
+            identity_class="organization",
+            confidence=_to_stix_confidence(get_entity_confidence(entity)),
+            allow_custom=True,
+            x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),
+            external_references=(
+                [{"source_name": "voidaccess", "url": entity.source_url}]
+                if entity.source_url
+                else []
+            ),
+        )
+    except Exception as exc:
+        logger.warning("entity_to_stix_identity failed for %r: %s", entity.value, exc)
         return None
 
 
@@ -286,6 +312,11 @@ def investigation_to_stix_bundle(
         if actor:
             stix_objects.append(actor)
             _register(entity, actor.id)
+
+        identity = entity_to_stix_identity(entity)
+        if identity:
+            stix_objects.append(identity)
+            _register(entity, identity.id)
 
     if include_relationships and stix_objects:
         relationships, relationship_warning = _build_stix_relationships(
@@ -436,32 +467,22 @@ def _build_stix_relationships(
     if not _STIX2_AVAILABLE:
         return [], "stix2 is not installed"
     try:
-        from graph.builder import build_graph_from_db  # noqa: PLC0415
+        from export.relationships import load_export_relationships  # noqa: PLC0415
 
-        inv_uuid = _coerce_uuid(investigation_id)
-        graph = build_graph_from_db(investigation_id=inv_uuid)
-
+        graph_relationships, warning = load_export_relationships(
+            investigation_id, stix_id_map
+        )
+        if warning:
+            return [], warning
         relationships: list[Any] = []
-        seen_relationships: set[tuple[str, str, str]] = set()
-        for source_node, target_node, data in graph.edges(data=True):
-            src_stix_id = stix_id_map.get(source_node)
-            tgt_stix_id = stix_id_map.get(target_node)
-            if not src_stix_id or not tgt_stix_id:
-                continue
-            edge_type = data.get("edge_type", "related-to")
-            # Map VoidAccess edge types to STIX relationship types
-            rel_type = _edge_type_to_stix(edge_type)
-            relationship_key = (rel_type, src_stix_id, tgt_stix_id)
-            if relationship_key in seen_relationships:
-                continue
-            seen_relationships.add(relationship_key)
+        for data in graph_relationships:
             # Carry the edge's own confidence onto the SRO.  Typed relationships
             # have a claim-specific confidence distinct from co-occurrence's
             # flat value; STIX 2.1 confidence is an int 0-100.
             rel_kwargs: dict[str, Any] = {
-                "relationship_type": rel_type,
-                "source_ref": src_stix_id,
-                "target_ref": tgt_stix_id,
+                "relationship_type": data["stix_relationship_type"],
+                "source_ref": data["source_ref"],
+                "target_ref": data["target_ref"],
                 "allow_custom": True,
             }
             try:
@@ -488,7 +509,9 @@ def _build_stix_relationships(
 
 def _edge_type_to_stix(edge_type: str) -> str:
     """Map VoidAccess graph edge types to STIX relationship type strings."""
-    return RELATIONSHIP_TYPE_STIX.get(edge_type, "related-to")
+    from export.relationships import _normalise_edge_type  # noqa: PLC0415
+    from graph.model import RELATIONSHIP_TYPE_STIX  # noqa: PLC0415
+    return RELATIONSHIP_TYPE_STIX.get(_normalise_edge_type(edge_type), "related-to")
 
 
 def _coerce_uuid(value: Any) -> Optional[uuid.UUID]:

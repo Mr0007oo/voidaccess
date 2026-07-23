@@ -87,6 +87,17 @@ Full pipeline behavior, timeouts, recovery, and data flow are documented in [Arc
 
 Sources that need API keys skip cleanly when their keys are absent. The complete key and configuration reference is in [Architecture](docs/architecture.md#13-configuration-reference).
 
+### Optional vector embeddings
+
+The default installation can run without PyTorch. When the embedding stack is
+unavailable, VoidAccess logs that it is using a deterministic SHA-256 fallback
+encoder. Install the optional NLP dependencies to enable full
+sentence-transformer vector embeddings:
+
+```bash
+pip install "voidaccess[nlp]"
+```
+
 ## LLM Providers
 
 | Provider | Typical models | Notes |

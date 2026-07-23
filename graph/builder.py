@@ -789,8 +789,12 @@ def build_graph_from_db(
                     .join(
                         InvestigationEntityLink,
                         InvestigationEntityLink.entity_id == Entity.id,
+                        isouter=True,
                     )
-                    .filter(InvestigationEntityLink.investigation_id == investigation_id)
+                    .filter(
+                        (Entity.investigation_id == investigation_id)
+                        | (InvestigationEntityLink.investigation_id == investigation_id)
+                    )
                     .options(joinedload(Entity.page))
                 )
             else:
@@ -1230,8 +1234,12 @@ def build_graph_from_db_cached(investigation_id: uuid.UUID) -> nx.MultiDiGraph:
             .join(
                 InvestigationEntityLink,
                 InvestigationEntityLink.entity_id == Entity.id,
+                isouter=True,
             )
-            .filter(InvestigationEntityLink.investigation_id == investigation_id)
+            .filter(
+                (Entity.investigation_id == investigation_id)
+                | (InvestigationEntityLink.investigation_id == investigation_id)
+            )
             .options(joinedload(Entity.page))
             .yield_per(500)
         )

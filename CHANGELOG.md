@@ -2,6 +2,17 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [1.9.2] - 2026-07-24
+
+- Preserve typed graph relationships in MISP object references and map
+  organization targets to STIX `targets` relationships.
+- Prevent export output collisions, document the optional vector dependency,
+  surface deterministic embedding fallback use, and warn once for dropped or
+  legacy configuration keys.
+- Warning deduplication remains process-scoped: separate CLI invocations are
+  separate processes, so repeating a warning across invocations is expected
+  and does not justify persistent state for this minor UX case.
+
 ## [1.9.1] - 2026-07-23
 
 - Defer CLI/runtime configuration until after environment injection.
