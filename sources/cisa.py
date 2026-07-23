@@ -14,7 +14,6 @@ advisory titles and tags for name matches.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from sources.cache import CachedFeed
 

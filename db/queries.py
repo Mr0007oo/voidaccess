@@ -539,6 +539,98 @@ def create_entity_relationship(
     return rel
 
 
+def save_typed_relationships(
+    session: Session,
+    investigation_id: uuid.UUID,
+    relationships: List[dict],
+) -> int:
+    """
+    Persist LLM-extracted typed relationships as EntityRelationship rows.
+
+    Each dict needs ``entity_a_id``, ``entity_b_id`` and ``relationship_type``;
+    ``confidence`` (defaults to 0.5) and ``source_page_id`` are optional.  The
+    stored confidence is the relationship's OWN claim confidence — deliberately
+    independent of the confidence of the two entities it connects.
+
+    Rows are deduped against existing edges (and each other) on the triple
+    ``(entity_a_id, entity_b_id, relationship_type)``.  For an existing edge the
+    confidence is only ever raised, never lowered.  Returns the number of new
+    rows inserted.  Never raises on a bad individual row — it is skipped.
+    """
+    if not relationships:
+        return 0
+
+    def _uuid(value) -> Optional[uuid.UUID]:
+        if value is None:
+            return None
+        if isinstance(value, uuid.UUID):
+            return value
+        try:
+            return uuid.UUID(str(value))
+        except (ValueError, AttributeError, TypeError):
+            return None
+
+    # Load existing edges for the endpoints in play so we can dedup/upgrade.
+    endpoint_ids: set[uuid.UUID] = set()
+    normalized: List[tuple] = []
+    for rel in relationships:
+        a_id = _uuid(rel.get("entity_a_id"))
+        b_id = _uuid(rel.get("entity_b_id"))
+        rel_type = str(rel.get("relationship_type", "") or "").strip()
+        if a_id is None or b_id is None or a_id == b_id or not rel_type:
+            continue
+        try:
+            confidence = float(rel.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        confidence = max(0.0, min(1.0, confidence))
+        page_id = _uuid(rel.get("source_page_id"))
+        normalized.append((a_id, b_id, rel_type, confidence, page_id))
+        endpoint_ids.add(a_id)
+        endpoint_ids.add(b_id)
+
+    if not normalized:
+        return 0
+
+    existing_rows = (
+        session.query(EntityRelationship)
+        .filter(
+            (EntityRelationship.entity_a_id.in_(endpoint_ids))
+            | (EntityRelationship.entity_b_id.in_(endpoint_ids))
+        )
+        .all()
+    )
+    existing: dict[tuple, EntityRelationship] = {}
+    for row in existing_rows:
+        existing[(row.entity_a_id, row.entity_b_id, row.relationship_type)] = row
+
+    # Track triples added within this call to avoid inserting duplicates when
+    # the same relationship shows up on more than one page.
+    added_this_call: dict[tuple, EntityRelationship] = {}
+    inserted = 0
+    for a_id, b_id, rel_type, confidence, page_id in normalized:
+        key = (a_id, b_id, rel_type)
+        prior = existing.get(key) or added_this_call.get(key)
+        if prior is not None:
+            if confidence > (prior.confidence or 0.0):
+                prior.confidence = confidence
+            continue
+        row = EntityRelationship(
+            entity_a_id=a_id,
+            entity_b_id=b_id,
+            relationship_type=rel_type,
+            source_page_id=page_id,
+            confidence=confidence,
+            investigation_id=investigation_id,
+        )
+        session.add(row)
+        added_this_call[key] = row
+        inserted += 1
+
+    session.flush()
+    return inserted
+
+
 def get_relationships_for_entity(
     session: Session,
     entity_id: uuid.UUID,

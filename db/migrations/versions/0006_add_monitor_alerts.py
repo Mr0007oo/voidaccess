@@ -8,8 +8,6 @@ Create Date: 2026-04-17
 
 from typing import Sequence, Union
 
-import sqlalchemy as sa
-from alembic import op
 
 revision: str = "0007_add_monitor_alerts"
 down_revision: Union[str, None] = "0006_add_extraction_method"

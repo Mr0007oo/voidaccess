@@ -8,11 +8,9 @@ import json
 import logging
 import sys
 import uuid
-from datetime import datetime, timezone
 
 from db.session import get_session
-from db.models import Investigation, Entity, Page
-from extractor.normalizer import canonicalize_entity_value
+from db.models import Investigation, Page
 from db.queries import upsert_entity_canonical
 
 logger = logging.getLogger(__name__)
@@ -46,7 +44,6 @@ def get_or_create_seed_context(session, name: str) -> tuple[Investigation, uuid.
         session.flush()
         
     # 3. Page
-    from db.models import Page
     page_url = f"voidaccess://seed/{name}"
     page = session.query(Page).filter_by(url=page_url).first()
     if not page:

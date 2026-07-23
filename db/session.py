@@ -138,7 +138,6 @@ def get_async_engine(url: Optional[str] = None) -> "AsyncEngine":
 
     Converts postgresql:// to postgresql+asyncpg:// and sqlite:// to sqlite+aiosqlite://.
     """
-    from sqlalchemy.ext.asyncio import AsyncEngine
 
     target_url = url or DATABASE_URL
     if not target_url:

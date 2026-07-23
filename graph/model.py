@@ -77,13 +77,22 @@ class EDGE_TYPES:
     POSTED_BY = "POSTED_BY"                     # content attributed to a handle
     LINKED_TO = "LINKED_TO"                     # URL links to URL
     MEMBER_OF = "MEMBER_OF"                     # handle to group/forum
-    USED = "USED"                               # actor used a malware family
+    USES = "USES"                               # actor uses a malware family
     CLAIMED = "CLAIMED"                         # group claimed an attack
     LIKELY_SAME_ACTOR = "LIKELY_SAME_ACTOR"     # inferred, medium confidence
     CONFIRMED_SAME_ACTOR = "CONFIRMED_SAME_ACTOR"  # PGP key match, high confidence
     CO_INVESTIGATION = "CO_INVESTIGATION"       # Entities found in same investigation across multiple pages
     PAID_TO = "PAID_TO"                         # financial transaction
     FUNDED_BY = "FUNDED_BY"                     # financial transaction
+    # Typed relationships from the LLM relationship-extraction pass.  These
+    # sit ALONGSIDE CO_APPEARED_ON — they are emitted only when the LLM finds
+    # genuine evidence for a specific relationship, and each carries its own
+    # claim confidence (not the flat co-occurrence confidence).
+    DROPS = "DROPS"                             # malware drops another payload
+    CONTROLS = "CONTROLS"                       # actor controls a wallet / infra
+    TARGETS = "TARGETS"                         # actor/campaign targeted an org
+    EXPLOITS = "EXPLOITS"                       # malware/actor exploits a CVE
+    COMMUNICATES_WITH = "COMMUNICATES_WITH"     # C2 / host communication
 
 
 

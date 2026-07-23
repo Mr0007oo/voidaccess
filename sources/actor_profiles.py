@@ -1254,7 +1254,6 @@ class ActorProfileManager:
         my_investigations = set(profile.get("investigation_ids") or [])
         my_handle = profile.get("canonical_handle") or ""
         my_last_seen = profile.get("last_seen_at")
-        my_first_seen = profile.get("first_seen_at")
 
         candidates: dict[str, dict[str, Any]] = {}
 

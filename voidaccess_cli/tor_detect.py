@@ -13,7 +13,6 @@ so detection stays fast even when the wider Tor network is slow.
 from __future__ import annotations
 
 import socket
-import struct
 from dataclasses import dataclass
 from typing import Optional
 

@@ -1,7 +1,6 @@
 """Add composite index on (entity_a_id, entity_b_id) for neighbor lookups"""
 
 from alembic import op
-import sqlalchemy as sa
 
 
 revision = "0011_add_composite_index"

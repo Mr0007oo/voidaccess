@@ -57,24 +57,20 @@ async def collect_all_sources(
     from sources.pastes import fetch_recent_pastes
     from sources.seeds import get_seeds
 
-    # --- Search + pastes run concurrently -----------------------------------
-    (darksearch_results, onionsearch_results), paste_results = await asyncio.gather(
+    # --- All network sources run concurrently -------------------------------
+    (darksearch_results, onionsearch_results), paste_results, telegram_results = await asyncio.gather(
         asyncio.gather(
             search_darksearch(query),
             search_onionsearch(query),
         ),
         fetch_recent_pastes(query),
+        _fetch_telegram_if_enabled(
+            include_telegram=include_telegram,
+            telegram_channels=telegram_channels or [],
+            query=query,
+        ),
     )
     search_results: List[dict] = darksearch_results + onionsearch_results
-
-    # --- Telegram (optional, sequential after gather) -----------------------
-    telegram_results: List[dict] = []
-    if include_telegram:
-        from sources.telegram import fetch_telegram_messages
-        telegram_results = await fetch_telegram_messages(
-            channel_usernames=telegram_channels or [],
-            query=query,
-        )
 
     # --- Seeds (synchronous) ------------------------------------------------
     if seed_categories:
@@ -93,4 +89,26 @@ async def collect_all_sources(
         "paste_results": paste_results,
         "telegram_results": telegram_results,
         "seed_urls": seeds,
+        "sources_used": {
+            "torch": f"ok_{sum(1 for r in onionsearch_results if r.get('source') == 'Torch')}_results",
+            "haystack": f"ok_{sum(1 for r in onionsearch_results if r.get('source') == 'Haystack')}_results",
+            "telegram": (
+                "skipped_no_key" if include_telegram and not telegram_results and _telegram_credentials_missing()
+                else f"ok_{len(telegram_results)}_results"
+            ),
+        },
     }
+
+
+async def _fetch_telegram_if_enabled(
+    include_telegram: bool, telegram_channels: List[str], query: str
+) -> List[dict]:
+    if not include_telegram:
+        return []
+    from sources.telegram import fetch_telegram_messages
+    return await fetch_telegram_messages(channel_usernames=telegram_channels, query=query)
+
+
+def _telegram_credentials_missing() -> bool:
+    from config import TELEGRAM_API_ID, TELEGRAM_API_HASH
+    return not TELEGRAM_API_ID or not TELEGRAM_API_HASH

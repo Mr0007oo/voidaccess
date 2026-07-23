@@ -10,8 +10,9 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import date, datetime
+from statistics import median
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -124,44 +125,78 @@ def compute_activity_stats(timeline: list[dict]) -> dict:
     }
 
 
-Z_SCORE_THRESHOLD = 2.5
+POISSON_ALPHA = 0.01
 MIN_DATA_POINTS = 10
-MIN_ABSOLUTE_SPIKE = 5
+
+
+def _poisson_lower_tail(count: int, rate: float) -> float:
+    """Return P(X <= count) for X ~ Poisson(rate), without scipy."""
+    if rate <= 0:
+        return 1.0 if count >= 0 else 0.0
+    term = math.exp(-rate)
+    total = term
+    for k in range(1, count + 1):
+        term *= rate / k
+        total += term
+    return min(1.0, max(0.0, total))
+
+
+def _poisson_upper_tail(count: int, rate: float) -> float:
+    """Return P(X >= count) for X ~ Poisson(rate)."""
+    if count <= 0:
+        return 1.0
+    if rate <= 0:
+        return 0.0
+    return min(1.0, max(0.0, 1.0 - _poisson_lower_tail(count - 1, rate)))
 
 
 def detect_anomalies(
     timeline: list[dict],
-    z_threshold: float = Z_SCORE_THRESHOLD,
+    alpha: float = POISSON_ALPHA,
+    z_threshold: float | None = None,
 ) -> list[dict]:
     """
-    Flag days where activity deviates > z_threshold standard deviations.
+    Flag unusually rare daily counts under a Poisson event-count model.
 
-    Returns list of {"date": date, "count": int, "z_score": float, "type": str}.
-    Returns [] for timelines with fewer than 10 data points OR fewer than 5 posts.
+    The baseline rate is the median daily count, which is robust to the very
+    spikes this function is intended to detect.  ``z_threshold`` remains an
+    ignored compatibility parameter for callers of the old API; decisions are
+    now made from Poisson tail probabilities and ``alpha``.
+
+    Returns dictionaries containing ``poisson_p_value`` and ``expected_rate``.
+    Returns [] for timelines with fewer than 10 data points.
     """
     if len(timeline) < MIN_DATA_POINTS:
         return []
+    if z_threshold is not None:
+        logger.debug("detect_anomalies: z_threshold is deprecated; using Poisson alpha=%s", alpha)
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be between 0 and 1")
 
-    stats = compute_activity_stats(timeline)
-    mean = stats["mean_daily"]
-    std = stats["std_daily"]
-
-    if std == 0.0:
+    counts = [max(0, int(entry.get("count", 0))) for entry in timeline]
+    rate = float(median(counts))
+    if rate == 0.0 and not any(counts):
         return []
 
     anomalies: list[dict] = []
-    for entry in timeline:
-        count = entry["count"]
-        z = (count - mean) / std
-        if abs(z) > z_threshold:
-            if z > 0 and count < MIN_ABSOLUTE_SPIKE:
-                continue
+    for entry, count in zip(timeline, counts):
+        if count > rate:
+            p_value = _poisson_upper_tail(count, rate)
+            anomaly_type = "spike"
+        elif count < rate:
+            p_value = _poisson_lower_tail(count, rate)
+            anomaly_type = "drop"
+        else:
+            p_value = 1.0
+            anomaly_type = "variation"
+        if p_value <= alpha:
             anomalies.append(
                 {
                     "date": entry["date"],
                     "count": count,
-                    "z_score": float(z),
-                    "type": "spike" if z > 0 else "drop",
+                    "poisson_p_value": float(p_value),
+                    "expected_rate": rate,
+                    "type": anomaly_type,
                 }
             )
 

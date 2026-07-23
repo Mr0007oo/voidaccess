@@ -1,5 +1,4 @@
 import os
-import secrets
 import logging
 from dotenv import load_dotenv
 
@@ -58,7 +57,8 @@ API_PORT = _clean_env("API_PORT", "8000")
 
 # Phase 6 — advanced capabilities
 DEEPL_API_KEY        = _clean_env("DEEPL_API_KEY")           # optional; translation
-STYLOMETRY_THRESHOLD = _clean_env("STYLOMETRY_THRESHOLD", "0.85")  # same-author detection
+# Stylometry decisions are enabled only by a labeled calibration artifact.
+STYLOMETRY_CALIBRATION_FILE = _clean_env("STYLOMETRY_CALIBRATION_FILE")
 
 # LLM extraction cache (optional — defaults to enabled)
 DISABLE_EXTRACTION_CACHE = _clean_env("DISABLE_EXTRACTION_CACHE")
@@ -100,6 +100,16 @@ HYBRID_ANALYSIS_API_KEY = _clean_env("HYBRID_ANALYSIS_API_KEY", "")
 HIBP_API_KEY      = _clean_env("HIBP_API_KEY", "")
 EMAILREP_API_KEY  = _clean_env("EMAILREP_API_KEY", "")
 
+# Breach-exposure lookup (complements HIBP; all optional / free-tier — no key required)
+# XposedOrNot: free breach lookup incl. stealer-log exposure. Optional key = richer results.
+XPOSEDORNOT_API_KEY = _clean_env("XPOSEDORNOT_API_KEY", "")
+# LeakCheck public tier and Hudson Rock Cavalier (infostealer) need NO key — no config var.
+
+# NVD 2.0 full CVE database (complements CISA KEV). Works without a key; an
+# optional free key raises the rate limit (5→50 requests / 30s).
+NVD_API_KEY = _clean_env("NVD_API_KEY", "")
+# ransomlook.io (2nd ransomware tracker, cross-validates ransomware.live) needs NO key.
+
 # Phase 1.6 — optional clearnet proxy.  Read directly by
 # sources/proxy_client.py via os.getenv; the module-level constant is
 # exposed for code that wants to introspect the value (the same way
@@ -120,6 +130,22 @@ SCRAPINGANT_PROXY_TYPE = _clean_env("SCRAPINGANT_PROXY_TYPE", "residential")
 SHODAN_RATE_LIMIT_DELAY = 1.0        # seconds between Shodan requests (InternetDB)
 MAX_IPS_PER_INVESTIGATION = 50      # max IPs to query Shodan per investigation
 MAX_HASHES_PER_INVESTIGATION = 20    # max file hashes to query VirusTotal per investigation
+
+# Relationship extraction (typed graph edges) — a distinct LLM pass that,
+# for entities already extracted from a page, asks which specific typed
+# relationship (if any) connects them.  It is bounded exactly like the
+# entity-extraction LLM cap (MAX_LLM_PAGES_PER_INV): at most one LLM call per
+# selected page and never more than MAX_REL_PAGES_PER_INV pages per
+# investigation, so it can never scale unbounded with page count.  Set
+# ENABLE_RELATIONSHIP_EXTRACTION=false to disable and fall back to
+# co-occurrence-only edges.
+ENABLE_RELATIONSHIP_EXTRACTION = (
+    _clean_env("ENABLE_RELATIONSHIP_EXTRACTION", "true") or "true"
+).strip().lower() not in ("false", "0", "no")
+try:
+    MAX_REL_PAGES_PER_INV = int(_clean_env("MAX_REL_PAGES_PER_INV", "10") or 10)
+except ValueError:
+    MAX_REL_PAGES_PER_INV = 10
 
 # Blockchain API Keys (optional — free tiers work without)
 BLOCKCYPHER_TOKEN = _clean_env("BLOCKCYPHER_TOKEN", "")

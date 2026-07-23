@@ -7,7 +7,6 @@ from typing import Callable, Optional, List
 from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.callbacks.base import BaseCallbackHandler
-import os
 from config import (
     OLLAMA_BASE_URL,
     OPENROUTER_BASE_URL,
@@ -24,6 +23,7 @@ from config import (
 logger = logging.getLogger(__name__)
 
 
+
 class BufferedStreamingHandler(BaseCallbackHandler):
     def __init__(self, buffer_limit: int = 60, ui_callback: Optional[Callable[[str], None]] = None):
         self.buffer = ""
@@ -33,14 +33,12 @@ class BufferedStreamingHandler(BaseCallbackHandler):
     def on_llm_new_token(self, token: str, **kwargs) -> None:
         self.buffer += token
         if "\n" in token or len(self.buffer) >= self.buffer_limit:
-            print(self.buffer, end="", flush=True)
             if self.ui_callback:
                 self.ui_callback(self.buffer)
             self.buffer = ""
 
     def on_llm_end(self, response, **kwargs) -> None:
         if self.buffer:
-            print(self.buffer, end="", flush=True)
             if self.ui_callback:
                 self.ui_callback(self.buffer)
             self.buffer = ""

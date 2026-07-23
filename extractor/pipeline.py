@@ -28,6 +28,7 @@ import uuid
 from extractor.regex_patterns import extract_all as _regex_extract_all
 from extractor.ner import extract_named_entities as _ner_extract
 from extractor.llm_extract import extract_with_llm as _llm_extract
+from extractor import confidence as _conf
 from extractor.normalizer import (
     normalize_entities as _normalize,
     merge_with_db as _merge_db,
@@ -280,18 +281,38 @@ async def extract_entities_from_page(
         try:
             import hashlib
             page_hash = hashlib.sha256(page_text.encode()).hexdigest() if page_text else None
+            before_llm = {
+                (entity_type, value)
+                for entity_type, values in combined.items()
+                for value in values
+            }
             combined = await _llm_extract(
                 page_text, llm, combined, page_hash=page_hash, disable_cache=disable_cache
             )
+            llm_overrides = {
+                (entity_type, value): "LLM"
+                for entity_type, values in combined.items()
+                for value in values
+                if (entity_type, value) not in before_llm
+            }
         except Exception as exc:
             logger.error("LLM extraction failed for %s: %s", page_url, exc)
             errors.append(f"llm: {exc}")
+            llm_overrides = {}
+    else:
+        llm_overrides = {}
 
     # -----------------------------------------------------------------------
     # Stage 4 — Normalise
     # -----------------------------------------------------------------------
     try:
-        normalized = _normalize(combined, page_url, page_id, page_text=page_text)
+        normalized = _normalize(
+            combined,
+            page_url,
+            page_id,
+            page_text=page_text,
+            extraction_method_overrides=llm_overrides,
+        )
     except Exception as exc:
         logger.error("Normalization failed for %s: %s", page_url, exc)
         errors.append(f"normalize: {exc}")
@@ -373,6 +394,11 @@ async def extract_entities_from_pages(
         callback(page_index_1based, total_llm_pages, page_url)
     Used by the API route to emit SSE progress events.
     """
+    # Mirrored pages are one intelligence item.  Preserve all URLs on the
+    # canonical record, but extract/persist entities once so corroboration and
+    # investigation counts are not inflated by reposts.
+    from utils.content_dedup import deduplicate_page_records
+    pages = deduplicate_page_records(pages)
     semaphore = asyncio.Semaphore(max_concurrent)
 
     # -----------------------------------------------------------------------
@@ -488,7 +514,14 @@ async def extract_entities_from_pages(
         try:
             entity_id_map = _merge_db(capped_entities, investigation_id)
             url_to_ids: dict[str, list] = {}
+            # entity_id_map is aligned 1:1 with capped_entities; an entry is
+            # None only when that single entity could not be persisted (a
+            # collision or per-entity failure never sinks the rest of the
+            # batch — see normalizer.merge_with_db).  Skip None so a partial
+            # failure doesn't misalign the remaining entity IDs.
             for ent, eid in zip(capped_entities, entity_id_map):
+                if eid is None:
+                    continue
                 if ent.source_url not in url_to_ids:
                     url_to_ids[ent.source_url] = []
                 url_to_ids[ent.source_url].append(eid)
@@ -498,6 +531,93 @@ async def extract_entities_from_pages(
                 result.entities = [e for e in capped_entities if e.source_url == result.page_url]
         except Exception as exc:
             logger.error("Batch entity persist failed: %s", exc)
+
+    # -----------------------------------------------------------------------
+    # Typed relationship extraction (distinct LLM pass).
+    #
+    # For pages that yielded entities, ask the LLM which specific typed
+    # relationship (if any) connects them, and persist those as
+    # EntityRelationship rows BEFORE the graph is built — the graph builder's
+    # persisted-relationship pass then picks them up as typed edges alongside
+    # the co-occurrence edges it generates itself.  This is additive: pages
+    # with no confident typed relationship simply keep their co-occurrence
+    # edges.  Bounded by MAX_REL_PAGES_PER_INV (one LLM call per selected
+    # page) so it cannot scale unbounded with page count.
+    # -----------------------------------------------------------------------
+    if (
+        run_llm_extraction
+        and llm is not None
+        and investigation_id is not None
+        and capped_entities
+    ):
+        try:
+            import config as _config  # noqa: PLC0415
+
+            if getattr(_config, "ENABLE_RELATIONSHIP_EXTRACTION", True):
+                from extractor.relationship_extract import (  # noqa: PLC0415
+                    extract_relationships_from_results,
+                )
+                from db.queries import save_typed_relationships  # noqa: PLC0415
+                from db.session import get_session  # noqa: PLC0415
+
+                page_text_by_url: dict[str, str] = {}
+                page_id_by_url: dict[str, Any] = {}
+                for _p in pages:
+                    _url = _p.get("url", "")
+                    if not _url:
+                        continue
+                    page_text_by_url[_url] = (
+                        _p.get("text")
+                        or _p.get("content")
+                        or _p.get("cleaned_text")
+                        or ""
+                    )
+                    page_id_by_url[_url] = _p.get("page_id")
+
+                # Some clearnet/side-source pages are materialized in the DB
+                # during entity persistence, after the CLI's initial page-id
+                # lookup.  Resolve those URLs again before relationship
+                # extraction so provenance is never lost to that ordering.
+                missing_urls = [url for url, page_id in page_id_by_url.items() if page_id is None]
+                if missing_urls:
+                    from db.models import Page  # noqa: PLC0415
+
+                    with get_session() as _page_session:
+                        persisted_pages = (
+                            _page_session.query(Page)
+                            .filter(Page.url.in_(missing_urls))
+                            .all()
+                        )
+                        for _page in persisted_pages:
+                            page_id_by_url[_page.url] = _page.id
+
+                max_rel_pages = int(
+                    getattr(_config, "MAX_REL_PAGES_PER_INV", 10) or 10
+                )
+                typed_rels = await extract_relationships_from_results(
+                    results,
+                    page_text_by_url,
+                    page_id_by_url,
+                    llm,
+                    max_rel_pages=max_rel_pages,
+                )
+                if typed_rels:
+                    with get_session() as _rel_session:
+                        inserted = save_typed_relationships(
+                            _rel_session, investigation_id, typed_rels
+                        )
+                    logger.info(
+                        "Typed relationships persisted for %s: %d new (of %d claims)",
+                        investigation_id,
+                        inserted,
+                        len(typed_rels),
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Typed relationship extraction failed for %s (non-fatal): %s",
+                investigation_id,
+                exc,
+            )
 
     if build_graph_on_complete and investigation_id is not None and capped_entities:
         try:
@@ -609,31 +729,39 @@ def apply_entity_cap(
     Returns: (capped_entities, original_count)
     """
     original_count = len(entities)
+    _CONFIDENCE_FLOOR = 0.80
 
-    # Step a: confidence filter — also drops placeholder entities (source_quality=0.0)
-    filtered = [e for e in entities if e.confidence >= 0.80]
+    # Drop placeholder / reserved-range entities (source_quality == 0.0) up front.
     placeholder_count = sum(1 for e in entities if getattr(e, "source_quality", 1.0) == 0.0)
-    filtered = [e for e in filtered if getattr(e, "source_quality", 1.0) != 0.0]
-    removed_confidence = original_count - placeholder_count - len(filtered)
-    if removed_confidence:
-        logger.warning(f"Entity confidence/placeholder filter removed {removed_confidence} low-confidence entities")
-    if placeholder_count:
-        logger.info(f"Entity placeholder filter dropped {placeholder_count} reserved-range entities")
+    candidates = [e for e in entities if getattr(e, "source_quality", 1.0) != 0.0]
 
-    # Count occurrences per entity (by type+value) and boost confidence.
-    # The boost is per-investigation and additive: base confidence plus a
-    # capped occurrence boost, never multiplied across stages.
-    for ent in filtered:
+    # Corroboration + source-quality lift is applied BEFORE the confidence floor,
+    # so an entity observed across several independent sources can clear the
+    # floor on the strength of that corroboration.  Confidence is already a
+    # computed per-entity signal at this point (see extractor.confidence); here
+    # we fold in the one signal that isn't knowable per-page — how many distinct
+    # sources saw the same value.
+    for ent in candidates:
         occ_pages = len({
             e.source_url
-            for e in filtered
+            for e in candidates
             if e.entity_type == ent.entity_type and e.value == ent.value
         })
         ent._occurrence = occ_pages
-        confidence_boost = min(max(occ_pages - 1, 0) * 0.01, 0.05)
         source_quality = float(getattr(ent, "source_quality", 1.0) or 1.0)
         quality_boost = max(0.0, (source_quality - 0.5) * 0.06)
-        ent.confidence = min(ent.confidence + confidence_boost + quality_boost, 1.0)
+        ent.confidence = min(
+            ent.confidence + _conf.corroboration_boost(occ_pages) + quality_boost,
+            0.99,
+        )
+
+    # Step a: confidence floor (after corroboration).
+    filtered = [e for e in candidates if e.confidence >= _CONFIDENCE_FLOOR]
+    removed_confidence = len(candidates) - len(filtered)
+    if removed_confidence:
+        logger.warning(f"Entity confidence filter removed {removed_confidence} low-confidence entities")
+    if placeholder_count:
+        logger.info(f"Entity placeholder filter dropped {placeholder_count} reserved-range entities")
 
     # Step b: per-type sub-caps
     filtered = _apply_per_type_caps(filtered)

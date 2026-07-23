@@ -575,7 +575,10 @@ class RSSFeedScraper:
             return None
 
         # --- v1.6.2: per-run article cache check -------------------------
-        cached = self._article_fetch_cache.get(url)
+        article_cache = getattr(self, "_article_fetch_cache", None)
+        if article_cache is None:
+            article_cache = self._article_fetch_cache = {}
+        cached = article_cache.get(url)
         if cached is not None:
             # Either a real string (success — return text directly) or
             # the sentinel "we already tried this URL and it returned

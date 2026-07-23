@@ -14,7 +14,7 @@ from api.auth import (
 )
 from auth.token_blacklist import revoke_token
 from db.models import User
-from db.session import get_session, get_db
+from db.session import get_db
 from sqlalchemy.orm import Session
 from config import REDIS_URL
 

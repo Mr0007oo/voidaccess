@@ -283,6 +283,14 @@ pyproject.toml.test
 test_*.py
 *_test.py
 
+# Exception: the committed enrichment-source test suite is tracked on purpose.
+# These negations must stay AFTER the broad ignores above so they take effect.
+!tests/
+!tests/__init__.py
+!tests/conftest.py
+!tests/test_*.py
+!pytest.ini
+
 # Missing artifacts from code audit
 /tmp/va_*.log
 chroma_db/
@@ -301,3 +309,4 @@ cti_data/enterprise-attack.json
 /.test_venv/
 /.venv-verify-*/
 /pip/
+/.pytest-tmp/

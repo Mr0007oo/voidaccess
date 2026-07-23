@@ -305,6 +305,16 @@ _FILE_HASH_SHA1_RE = re.compile(r"\b[0-9a-fA-F]{40}\b")
 # SHA256 — exactly 64 hex chars, word-bounded
 _FILE_HASH_SHA256_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
 
+_HASH_CONTEXT_RE = re.compile(
+    r"\b(?:hash|md5|sha(?:1|224|256|384|512)?|checksum|digest|file|malware|sample)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_hash_context(text: str, start: int, end: int, window: int = 80) -> bool:
+    """Require nearby hash/file terminology for bare hexadecimal strings."""
+    return bool(_HASH_CONTEXT_RE.search(text[max(0, start - window):min(len(text), end + window)]))
+
 # CVE — case insensitive; 4-digit year + 4-8 digit ID.  MITRE now
 # assigns 8-digit suffixes for very high-volume years (e.g. CVE-2024-12345678)
 # so the upper bound was bumped from 7 → 8 in the Phase 2 final subphase.
@@ -1633,15 +1643,15 @@ def _extract_pgp(text: str) -> list[str]:
 
 
 def _extract_md5(text: str) -> list[str]:
-    return _dedup(_findall(_FILE_HASH_MD5_RE, text))
+    return _dedup(m.group(0) for m in _FILE_HASH_MD5_RE.finditer(text) if _has_hash_context(text, *m.span()))
 
 
 def _extract_sha1(text: str) -> list[str]:
-    return _dedup(_findall(_FILE_HASH_SHA1_RE, text))
+    return _dedup(m.group(0) for m in _FILE_HASH_SHA1_RE.finditer(text) if _has_hash_context(text, *m.span()))
 
 
 def _extract_sha256(text: str) -> list[str]:
-    return _dedup(_findall(_FILE_HASH_SHA256_RE, text))
+    return _dedup(m.group(0) for m in _FILE_HASH_SHA256_RE.finditer(text) if _has_hash_context(text, *m.span()))
 
 
 def _extract_cve(text: str) -> list[str]:

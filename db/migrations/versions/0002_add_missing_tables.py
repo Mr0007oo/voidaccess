@@ -14,8 +14,6 @@ Tables created
 
 from typing import Sequence, Union
 
-import sqlalchemy as sa
-from alembic import op
 
 revision: str = "0002_add_missing_tables"
 down_revision: Union[str, None] = "0001_initial_schema"

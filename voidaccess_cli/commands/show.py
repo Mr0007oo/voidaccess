@@ -145,7 +145,7 @@ def _print_path(data: dict, from_value: str, to_value: str) -> None:
 
     node_path = find_shortest_path(G, a_id, b_id, max_hops=6)
     if node_path is None:
-        console.print(f"[yellow]No path found within 6 hops.[/yellow]")
+        console.print("[yellow]No path found within 6 hops.[/yellow]")
         return
 
     values = [

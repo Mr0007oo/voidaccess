@@ -23,18 +23,36 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better layer caching
-COPY requirements.txt .
+# Copy project metadata and source for installation from the authoritative
+# dependency manifest in pyproject.toml.
+COPY pyproject.toml README.md ./
+COPY api/ api/
+COPY analysis/ analysis/
+COPY auth/ auth/
+COPY crawler/ crawler/
+COPY db/ db/
+COPY export/ export/
+COPY extractor/ extractor/
+COPY fingerprint/ fingerprint/
+COPY graph/ graph/
+COPY i18n/ i18n/
+COPY monitor/ monitor/
+COPY scraper/ scraper/
+COPY search/ search/
+COPY sources/ sources/
+COPY utils/ utils/
+COPY voidaccess/ voidaccess/
+COPY voidaccess_cli/ voidaccess_cli/
+COPY config.py .
 
 # Install Python dependencies with BuildKit cache mount
 # CPU-only torch if GPU=false (default), CUDA torch if GPU=true
 RUN --mount=type=cache,target=/root/.pip \
     if [ "$GPU" = "true" ]; then \
-        pip install --no-cache-dir -r requirements.txt; \
+        pip install --no-cache-dir .; \
     else \
         pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-        grep -vE '^(torch|torchvision)==' requirements.txt > req_no_torch.txt && \
-        pip install --no-cache-dir --no-deps -r req_no_torch.txt; \
+        pip install --no-cache-dir .; \
     fi
 
 # Install Playwright only if explicitly enabled (opt-in)

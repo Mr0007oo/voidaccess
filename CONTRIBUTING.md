@@ -25,7 +25,7 @@ cd voidaccess
 python -m venv venv
 source venv/bin/activate   # Linux/macOS
 venv\Scripts\Activate    # Windows
-pip install -r requirements.txt
+pip install .
 pip install -r dev-requirements.txt
 python -m spacy download en_core_web_sm
 ```
@@ -190,8 +190,8 @@ Follow existing component patterns.
 
 Don't add dependencies without a good reason. If you need one:
 
-1. Add it to `requirements.in` (unpinned)
-2. Run: `pip-compile requirements.in --output-file requirements.txt`
+1. Add it to the pinned `dependencies` list in `pyproject.toml`.
+2. Verify a clean install with `pip install .`.
 3. Explain why in your PR
 
 Same for the frontend — add to `web/package.json`, explain in PR.

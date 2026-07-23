@@ -14,8 +14,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from api.auth import get_current_user
+from api.errors import log_exception
 from search.search import SEARCH_ENGINES
-from search.circuit_breaker import get_all_states, record_success, is_open, _engine_failures, _engine_last_success
+from search.circuit_breaker import record_success, is_open, _engine_failures
 from sources.seed_manager import get_seed_manager
 
 logger = logging.getLogger(__name__)
@@ -40,14 +41,15 @@ async def get_enrichment_cache_stats() -> dict:
         cache = await get_enrichment_cache()
         return await cache.stats()
     except Exception as exc:
-        logger.warning("get_enrichment_cache_stats failed: %s", exc)
+        correlation_id = log_exception(exc, context="get_enrichment_cache_stats")
         return {
             "backend": "unavailable",
             "hits": 0,
             "misses": 0,
             "hit_rate_pct": 0.0,
             "size": 0,
-            "error": str(exc)[:200],
+            "error": "unavailable",
+            "correlation_id": correlation_id,
         }
 
 
@@ -152,8 +154,10 @@ async def get_content_safety_events() -> dict:
         return {"last_24h": last_24h, "total": total}
 
     except Exception as exc:
+        correlation_id = log_exception(exc, context="content_safety_stats")
         return {
-            "error": str(exc)[:200],
+            "error": "unavailable",
+            "correlation_id": correlation_id,
             "last_24h": {"query_blocked": 0, "url_blocked": 0, "content_blocked": 0},
             "total": {"query_blocked": 0, "url_blocked": 0, "content_blocked": 0},
         }
@@ -182,9 +186,12 @@ async def _run_seed_validation_job(job_id: str) -> None:
         job["status"] = "completed"
         job["results"] = results
     except Exception as exc:
-        logger.warning("Seed validation job %s failed: %s", job_id, exc)
+        correlation_id = log_exception(
+            exc, context=f"seed validation job {job_id}"
+        )
         job["status"] = "failed"
-        job["error"] = str(exc)[:300]
+        job["error"] = "Seed validation failed."
+        job["correlation_id"] = correlation_id
     finally:
         job["finished_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -322,7 +329,7 @@ async def list_discovered_seeds(
             "seeds": projected,
         }
     except Exception as exc:
-        logger.warning("list_discovered_seeds failed: %s", exc)
+        correlation_id = log_exception(exc, context="list_discovered_seeds")
         return {
             "total": 0,
             "breakdown": {
@@ -333,5 +340,6 @@ async def list_discovered_seeds(
             },
             "last_validated": None,
             "seeds": [],
-            "error": str(exc)[:200],
+            "error": "unavailable",
+            "correlation_id": correlation_id,
         }

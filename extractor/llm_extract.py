@@ -21,9 +21,11 @@ Configuration
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
+from contextlib import redirect_stdout
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -65,7 +67,7 @@ _LLM_KEY_TO_TYPE: dict[str, str] = {
     "threat_actor_handles": "THREAT_ACTOR_HANDLE",
     "malware_names": "MALWARE_FAMILY",
     "dates": "DATE",
-    "urls": "ONION_URL",
+    "urls": "URL",
     "cve_identifiers": "CVE_NUMBER",
     "mitre_techniques": "MITRE_TECHNIQUE",
     "file_hashes_md5": "FILE_HASH_MD5",
@@ -120,6 +122,8 @@ def _load_from_cache(page_hash: str) -> Optional[dict[str, list[str]]]:
                 return None
 
             logger.info("Cache HIT for page_hash=%s", page_hash[:16])
+            from utils.investigation_metrics import record_extraction
+            record_extraction(cache_hit=True)
             return json.loads(entities_json)
 
     except Exception as exc:
@@ -181,8 +185,8 @@ async def extract_with_llm(
     Augment *existing_entities* with entities found by the LLM.
 
     - If *llm* is None, returns *existing_entities* unchanged.
-    - Only processes text when *existing_entities* has at least one value
-      (to avoid API calls on irrelevant pages).
+    - Processes text even when *existing_entities* is empty. Page relevance and
+      the investigation LLM budget are enforced by ``pipeline.py``.
     - Splits text into overlapping chunks of *max_chunk_chars* with a 200-char
       overlap to avoid splitting entities at boundaries.
     - Merges and deduplicates results from every chunk into *existing_entities*.
@@ -220,10 +224,6 @@ async def extract_with_llm(
     if llm is None:
         return existing_entities
 
-    # Skip expensive LLM calls if regex/NER found nothing at all
-    if not any(existing_entities.values()):
-        return existing_entities
-
     # Determine page hash for caching
     if page_hash is None:
         page_hash = _compute_page_hash(text)
@@ -234,23 +234,29 @@ async def extract_with_llm(
         if cached is not None:
             return _merge_existing_and_cached(existing_entities, cached)
 
-    # Filter blocked entities before LLM to avoid processing noise
-    # Only apply to NER types (regex types have precise patterns, skip blocklist)
+    from utils.investigation_metrics import record_extraction
+    record_extraction(cache_hit=False)
+
+    # Filter noise out of the existing entities before deciding whether to
+    # spend an LLM call.  Regex IOC types have precise patterns (kept as-is);
+    # shape-validated name types use the same shape/gazetteer test the rest of
+    # the pipeline uses (not a denylist); other NER/LLM types keep the light
+    # structural check.
     try:
         from extractor.normalizer import is_blocked_entity, _REGEX_TYPES
+        from extractor import confidence as _conf, entity_shape as _shape
         filtered: dict[str, list[str]] = {}
         for entity_type, values in existing_entities.items():
             if entity_type in _REGEX_TYPES:
                 filtered[entity_type] = list(values)
+            elif _conf.is_shape_validated_type(entity_type):
+                kept = [v for v in values if _shape.evaluate(entity_type, v).accept]
+                if kept:
+                    filtered[entity_type] = kept
             else:
                 kept = [v for v in values if not is_blocked_entity(entity_type, v)]
                 if kept:
                     filtered[entity_type] = kept
-        if not filtered:
-            # Still cache the empty result to avoid repeated LLM calls
-            if not _get_cache_disabled(disable_cache):
-                _save_to_cache(page_hash, {})
-            return existing_entities
         existing_entities = filtered
     except ImportError:
         pass
@@ -309,6 +315,20 @@ async def extract_with_llm(
         for llm_key, entity_type in _LLM_KEY_TO_TYPE.items():
             new_vals = merged[llm_key]
             if new_vals:
+                if llm_key == "crypto_wallets":
+                    classified: dict[str, list[str]] = {}
+                    for value in new_vals:
+                        classified.setdefault(_classify_wallet(value), []).append(value)
+                    for classified_type, values in classified.items():
+                        result[classified_type] = _dedup(result.get(classified_type, []) + values)
+                    continue
+                if llm_key == "urls":
+                    onion = [v for v in new_vals if ".onion" in v.lower()]
+                    clearnet = [v for v in new_vals if ".onion" not in v.lower()]
+                    if onion:
+                        result["ONION_URL"] = _dedup(result.get("ONION_URL", []) + onion)
+                    new_vals = clearnet
+                    entity_type = "URL"
                 existing_vals = result.get(entity_type, [])
                 existing_vals.extend(new_vals)
                 result[entity_type] = _dedup(existing_vals)
@@ -324,6 +344,31 @@ async def extract_with_llm(
     except Exception:
         logger.exception("extract_with_llm encountered an unexpected error")
         return existing_entities
+
+
+def _classify_wallet(value: str) -> str:
+    """Classify an LLM-reported wallet by its address format."""
+    import re
+
+    value = value.strip()
+    if re.fullmatch(r"0x[0-9a-fA-F]{40}", value):
+        return "ETHEREUM_ADDRESS"
+    if re.fullmatch(r"4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}", value):
+        return "MONERO_ADDRESS"
+    if re.fullmatch(r"(?:bc1[a-zA-HJ-NP-Z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})", value):
+        return "BITCOIN_ADDRESS"
+    try:
+        from extractor.regex_patterns import extract_all
+        for entity_type in (
+            "LITECOIN_ADDRESS", "ZCASH_ADDRESS", "DOGECOIN_ADDRESS",
+            "XRP_ADDRESS", "SOLANA_ADDRESS", "TRON_ADDRESS",
+            "BITCOIN_CASH_ADDRESS", "DASH_ADDRESS", "ENS_DOMAIN",
+        ):
+            if value in extract_all(value).get(entity_type, []):
+                return entity_type
+    except Exception:
+        pass
+    return "BITCOIN_ADDRESS"
 
 
 def _merge_existing_and_cached(
@@ -405,8 +450,22 @@ async def _extract_chunk(chunk: str, llm) -> str:
     """
     try:
         prompt = _PROMPT_TEMPLATE.format(chunk=chunk)
-        silent_llm = llm.bind(streaming=False, callbacks=[])
-        response = await silent_llm.ainvoke(prompt)
+        # ``bind(callbacks=[])`` conflicts with callbacks already carried by
+        # some LangChain chat models and causes ``agenerate_prompt`` to receive
+        # the keyword twice. ``with_config`` overrides callbacks for this call
+        # without adding model kwargs, while leaving the shared model intact.
+        if hasattr(llm, "with_config"):
+            silent_llm = llm.with_config({"callbacks": []})
+        else:
+            silent_llm = llm.bind(streaming=False, callbacks=[])
+        from utils.investigation_metrics import record_llm_call
+        record_llm_call()
+        # Some provider adapters retain constructor callbacks even when
+        # ``with_config`` supplies an empty callback list.  Capture that
+        # legacy handler's stdout as a final guard so partial JSON tokens can
+        # never corrupt the CLI's progress/output stream.
+        with redirect_stdout(io.StringIO()):
+            response = await silent_llm.ainvoke(prompt)
         content = response.content if hasattr(response, "content") else str(response)
         return content.strip()
     except Exception as exc:

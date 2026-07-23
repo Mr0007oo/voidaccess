@@ -20,11 +20,10 @@ Each result dict has:
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 

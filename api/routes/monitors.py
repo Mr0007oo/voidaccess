@@ -35,6 +35,7 @@ from db.queries import (
     get_unacknowledged_alert_count,
 )
 from api.auth import require_password_not_reset_pending, CurrentUser
+from api.errors import internal_http_exception
 from db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -360,8 +361,7 @@ async def create_monitor(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("create_monitor failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_http_exception(exc, context="create_monitor")
 
 
 @router.delete("/{watch_name}")
@@ -381,8 +381,7 @@ async def delete_monitor(watch_name: str) -> dict:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("delete_monitor failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_http_exception(exc, context="delete_monitor")
 
 
 @router.post("/{watch_name}/trigger")

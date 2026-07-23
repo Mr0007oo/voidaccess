@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import re
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +80,27 @@ def run(
 
     cli_config.apply_env()
 
+    # Validate the query BEFORE any network activity.  An empty/whitespace-only
+    # or trivially short query cannot yield real intelligence — accepting it
+    # silently produces a report that looks identical to a genuine one but is
+    # just noise from an essentially meaningless search.  Reject up front.
+    MIN_QUERY_LENGTH = 3
+    stripped_query = (query or "").strip()
+    if not stripped_query:
+        console.print(
+            "[red]Empty query.[/red] Provide something to investigate, e.g. "
+            '[bold]voidaccess investigate "LockBit ransomware"[/bold].'
+        )
+        raise typer.Exit(code=2)
+    if len(stripped_query) < MIN_QUERY_LENGTH:
+        console.print(
+            f"[red]Query too short.[/red] '{stripped_query}' is only "
+            f"{len(stripped_query)} character(s); provide at least {MIN_QUERY_LENGTH} "
+            "characters of meaningful context so results reflect a real query, "
+            "not generic noise."
+        )
+        raise typer.Exit(code=2)
+
     # v1.6.2 — --use-scraping-api and --use-proxies are one-shot CLI flags
     # for activating the two independent clearnet transports in-process
     # only.  The REST API flag sets VOIDACCESS_USE_PROXIES=true; the
@@ -108,7 +128,8 @@ def run(
         import spacy
         spacy.load("en_core_web_sm")
     except Exception:
-        import subprocess, sys
+        import subprocess
+        import sys
         from rich.console import Console
         Console().print(
             "  [dim]→[/dim] Installing spaCy NER model (one-time)..."
@@ -348,11 +369,25 @@ async def _run_investigation(
         status="running",
     )
     inv_uuid = uuid.UUID(investigation_id)
+    from utils.investigation_metrics import InvestigationMetrics, persist as persist_metrics, set_current
+    pipeline_metrics = InvestigationMetrics(inv_uuid)
+    set_current(pipeline_metrics)
+
+    # Step-cost instrumentation.  ``start``/``finish`` bracket each phase so
+    # duration_ms is recorded, and — critically — so ``record_llm_call`` (which
+    # only credits steps that are currently *active*) attributes LLM calls to
+    # the right step.  Mirrors the API pipeline's _metric_start/_metric_finish.
+    def _metric_start(step_name: str) -> None:
+        pipeline_metrics.start(step_name)
+
+    def _metric_finish(step_name: str) -> None:
+        pipeline_metrics.finish(step_name)
 
     sources_used: dict[str, dict[str, Any]] = {}
     page_count_by_url: dict[str, dict[str, Any]] = {}
 
     # --- Step 1 — refine query -------------------------------------------
+    _metric_start("query_refinement")
     display.update_step("Refining query", "active")
     refined = query
     if llm is not None:
@@ -367,14 +402,18 @@ async def _run_investigation(
     else:
         display.update_step("Refining query", "skip", "--no-llm")
     sqlite_adapter.update_investigation(investigation_id, {"refined_query": refined})
+    _metric_finish("query_refinement")
 
     # --- Step 2 — search fan-out -----------------------------------------
+    _metric_start("source_gathering")
     display.update_step("Searching dark web", "active")
     search_links: list[dict] = []
     paste_pages: list[dict] = []
     github_pages: list[dict] = []
     gitlab_pages: list[dict] = []
     rss_pages: list[dict] = []
+    telegram_pages: list[dict] = []
+    onion_pages: list[dict] = []
     search_summary: dict[str, int] = {}
 
     if not no_tor:
@@ -406,13 +445,74 @@ async def _run_investigation(
             sources_used[key] = {"status": "fail", "error": str(exc)}
             return []
 
+    async def _onionsearch():
+        # --no-tor means NO Tor traffic for the entire run.  Torch and
+        # Haystack are .onion search engines fetched over the Tor SOCKS proxy,
+        # and they return real .onion result URLs that would otherwise be
+        # appended to the scrape list and routed back through Tor.  Skipping
+        # the lookup entirely is what makes "zero Tor traffic" a direct
+        # consequence rather than a downstream filter after Tor was contacted.
+        if no_tor:
+            return []
+        from sources.engines import search_onionsearch
+        return await search_onionsearch(refined)
+
+    async def _telegram():
+        if not os.getenv("TELEGRAM_API_ID", "").strip() or not os.getenv("TELEGRAM_API_HASH", "").strip():
+            return []
+        from sources.telegram import fetch_telegram_messages
+        channels = [c.strip() for c in os.getenv("TELEGRAM_CHANNELS", "").split(",") if c.strip()]
+        return await fetch_telegram_messages(channels, refined)
+
     side_tasks = await asyncio.gather(
         _safe(lambda: _scrape_pastes(refined), "Paste sites", "paste_sites"),
         _safe(lambda: _scrape_github(refined), "GitHub", "github"),
         _safe(lambda: _scrape_gitlab(refined), "GitLab", "gitlab"),
         _safe(lambda: _scrape_rss(refined), "RSS feeds", "rss"),
+        _safe(_onionsearch, "Torch + Haystack", "onion_search"),
+        _safe(_telegram, "Telegram", "telegram"),
     )
-    paste_pages, github_pages, gitlab_pages, rss_pages = side_tasks
+    paste_pages, github_pages, gitlab_pages, rss_pages, onion_pages, telegram_pages = side_tasks
+    for onion in onion_pages:
+        search_links.append({
+            "link": onion.get("url", ""),
+            "title": onion.get("title", ""),
+            "snippet": onion.get("snippet", ""),
+            "source_engine": onion.get("source", ""),
+        })
+    if not os.getenv("TELEGRAM_API_ID", "").strip() or not os.getenv("TELEGRAM_API_HASH", "").strip():
+        sources_used["telegram"] = {"status": "skipped_no_key"}
+    for _engine_name in ("Torch", "Haystack"):
+        if no_tor:
+            # Onion search engines are never contacted in --no-tor mode.
+            sources_used[_engine_name.lower()] = {"status": "skipped", "count": 0}
+            continue
+        _count = sum(1 for item in onion_pages if item.get("source") == _engine_name)
+        from sources.engines import get_last_onionsearch_status
+        _engine_status = get_last_onionsearch_status().get(_engine_name, "ok")
+        sources_used[_engine_name.lower()] = {
+            "status": "ok" if _engine_status.startswith("ok_") else _engine_status,
+            "count": _count,
+        }
+
+    # --no-tor defence-in-depth: even though the Tor search branch and the
+    # onion search engines are both skipped above, strip any .onion URL that
+    # may have reached the link list from ANY other side-source before it can
+    # be handed to the scraper (the scraper correctly routes .onion links
+    # through Tor, which is exactly what --no-tor must prevent).  This runs
+    # BEFORE any scrape, so no Tor connection is ever attempted.
+    if no_tor:
+        _before = len(search_links)
+        search_links = [
+            _l for _l in search_links
+            if ".onion" not in str(_l.get("link", "")).lower()
+        ]
+        _stripped = _before - len(search_links)
+        if _stripped:
+            logger.warning(
+                "[no-tor] Stripped %d .onion link(s) from search results before scraping",
+                _stripped,
+            )
 
     if not no_tor and search_summary:
         display.update_step(
@@ -460,7 +560,10 @@ async def _run_investigation(
         filtered_links = (search_links or [])[:filter_top_n]
         display.update_step("Filtering results", "skip" if no_llm else "ok", f"{len(filtered_links)} kept")
 
+    _metric_finish("source_gathering")
+
     # --- Step 4 — scrape pages -------------------------------------------
+    _metric_start("scraping")
     display.update_step("Scraping pages", "active")
     scraped_pages: list[dict] = []
     if filtered_links:
@@ -486,11 +589,18 @@ async def _run_investigation(
             for url, text in results.items():
                 if text:
                     scraped_pages.append({"url": url, "text": text, "source": "tor_search"})
+            _fetched = sum(1 for _t in results.values() if _t)
+            pipeline_metrics.record_scraping(
+                attempted=len(filtered_links),
+                fetched=_fetched,
+                cache_hits=0,
+            )
             display.update_step("Scraping pages", "ok", f"{len(scraped_pages)} pages")
         except Exception as exc:
             display.update_step("Scraping pages", "fail", str(exc))
     else:
         display.update_step("Scraping pages", "skip", "no links")
+    _metric_finish("scraping")
 
     # --- Step 4.1 — discover seeds from scraped pages --------------------
     # scrape_multiple already submits discovered seeds fire-and-forget, but
@@ -498,7 +608,6 @@ async def _run_investigation(
     # and to surface in the final report payload.
     seeds_discovered = 0
     try:
-        from scraper.scrape import _discover_seeds_from_one_page  # noqa: WPS437
 
         seeds_discovered = await _discover_seeds_from_pages(
             scraped_pages,
@@ -523,6 +632,15 @@ async def _run_investigation(
                 continue
             scraped_pages.append({"url": url, "text": text, "source": page.get("source", "clearnet")})
 
+    for page in telegram_pages:
+        url = page.get("url") or ""
+        text = page.get("text") or ""
+        if url and text:
+            scraped_pages.append({"url": url, "text": text, "source": "telegram", "source_type": "telegram"})
+
+    from utils.content_dedup import deduplicate_page_records
+    scraped_pages = deduplicate_page_records(scraped_pages)
+
     # Resolve page_ids from DB (scrape_multiple persisted .onion pages)
     page_ids = await asyncio.to_thread(_lookup_page_ids, [p["url"] for p in scraped_pages])
     for page in scraped_pages:
@@ -533,6 +651,7 @@ async def _run_investigation(
     page_count_by_url = {p["url"]: p for p in scraped_pages}
 
     # --- Step 5 — extract entities ---------------------------------------
+    _metric_start("entity_extraction")
     display.update_step("Extracting entities", "active")
     extraction_results = []
     try:
@@ -548,8 +667,10 @@ async def _run_investigation(
         display.update_step("Extracting entities", "ok", f"{total_entities} entities")
     except Exception as exc:
         display.update_step("Extracting entities", "fail", str(exc))
+    _metric_finish("entity_extraction")
 
     # --- Step 6 — enrich intelligence (OTX + IP) ---------------------------
+    _metric_start("enrichment")
     display.update_step("Enriching intelligence", "active")
     enrichment_pages: list[dict] = []
     try:
@@ -558,9 +679,17 @@ async def _run_investigation(
         entity_dicts = sqlite_adapter.get_entities(investigation_id)
         enrichment_pages = await _enrich_inv(refined, otx_api_key=otx_key, entities=entity_dicts)
         sources_used["enrichment"] = {"status": "ok", "count": len(enrichment_pages)}
+        for _source_name in ("nvd", "ransomlook"):
+            _count = sum(
+                1 for _page in enrichment_pages
+                if (_page.get("source") or _page.get("source_type")) == _source_name
+            )
+            sources_used[_source_name] = {"status": "ok", "count": _count}
         display.update_step("Enriching intelligence", "ok", f"{len(enrichment_pages)} pages added")
     except Exception as exc:
         sources_used["enrichment"] = {"status": "fail", "error": str(exc)}
+        sources_used["nvd"] = {"status": "error"}
+        sources_used["ransomlook"] = {"status": "error"}
         display.update_step("Enriching intelligence", "fail", str(exc))
 
     try:
@@ -576,7 +705,9 @@ async def _run_investigation(
     # whole cluster further down.
     display.update_step("Enriching domains", "active")
     try:
-        extraction_results = await asyncio.wait_for(
+        # enrich_*_entities return (extraction_results, stats) — unpack so the
+        # threaded list isn't clobbered into a tuple for the next step.
+        extraction_results, _ = await asyncio.wait_for(
             enrich_domain_entities(extraction_results, inv_uuid),
             timeout=60,
         )
@@ -596,7 +727,7 @@ async def _run_investigation(
 
     display.update_step("Enriching hashes", "active")
     try:
-        extraction_results = await asyncio.wait_for(
+        extraction_results, _ = await asyncio.wait_for(
             enrich_hash_entities(extraction_results, inv_uuid),
             timeout=45,
         )
@@ -610,7 +741,7 @@ async def _run_investigation(
 
     display.update_step("Enriching emails", "active")
     try:
-        extraction_results = await asyncio.wait_for(
+        extraction_results, _ = await asyncio.wait_for(
             enrich_email_entities(extraction_results, inv_uuid),
             timeout=30,
         )
@@ -621,6 +752,54 @@ async def _run_investigation(
     except Exception as exc:
         logger.debug("Email enrichment: %s", exc)
         display.update_step("Enriching emails", "fail", str(exc))
+
+    display.update_step("Breach exposure lookup", "active")
+    try:
+        from sources.breach_lookup import enrich_breach_entities
+        extraction_results, _breach_stats = await asyncio.wait_for(
+            enrich_breach_entities(extraction_results, inv_uuid),
+            timeout=60,
+        )
+        sources_used["xposedornot"] = {
+            "status": "ok",
+            "count": _breach_stats.get("xon_breached", 0),
+        }
+        sources_used["leakcheck"] = {
+            "status": "ok",
+            "count": _breach_stats.get("leakcheck_breached", 0),
+        }
+        display.update_step("Breach exposure lookup", "ok")
+    except asyncio.TimeoutError:
+        logger.warning("[%s] Breach lookup timed out after 60s", inv_uuid)
+        sources_used["xposedornot"] = {"status": "timed_out"}
+        sources_used["leakcheck"] = {"status": "timed_out"}
+        display.update_step("Breach exposure lookup", "fail", "timeout")
+    except Exception as exc:
+        logger.debug("Breach lookup: %s", exc)
+        sources_used["xposedornot"] = {"status": "error"}
+        sources_used["leakcheck"] = {"status": "error"}
+        display.update_step("Breach exposure lookup", "fail", str(exc))
+
+    display.update_step("Infostealer intel", "active")
+    try:
+        from sources.infostealer import enrich_infostealer_entities
+        extraction_results, _infostealer_stats = await asyncio.wait_for(
+            enrich_infostealer_entities(extraction_results, inv_uuid),
+            timeout=60,
+        )
+        sources_used["hudsonrock"] = {
+            "status": "ok",
+            "count": _infostealer_stats.get("emails_infected", 0),
+        }
+        display.update_step("Infostealer intel", "ok")
+    except asyncio.TimeoutError:
+        logger.warning("[%s] Infostealer enrichment timed out after 60s", inv_uuid)
+        sources_used["hudsonrock"] = {"status": "timed_out"}
+        display.update_step("Infostealer intel", "fail", "timeout")
+    except Exception as exc:
+        logger.debug("Infostealer enrichment: %s", exc)
+        sources_used["hudsonrock"] = {"status": "error"}
+        display.update_step("Infostealer intel", "fail", str(exc))
 
     if enrichment_pages:
         try:
@@ -634,6 +813,7 @@ async def _run_investigation(
             )
         except Exception as exc:
             console.print(f"[grey50]Enrichment extraction failed: {exc}[/grey50]")
+    _metric_finish("enrichment")
 
     # --- Step 6.9 — Update persistent actor profiles (non-blocking) -------
     # Aggregate THREAT_ACTOR_HANDLE / RANSOMWARE_GROUP entities from the
@@ -669,6 +849,7 @@ async def _run_investigation(
     # --- Step 7 — build graph (co-occurrence) ----------------------------
     # Phase 6.2 — capped by CLI_PHASE_TIMEOUTS["graph_build"] so a large
     # entity table doesn't pin the CLI thread indefinitely.
+    _metric_start("graph_build")
     display.update_step("Building graph", "active")
     try:
         edges_written = await asyncio.wait_for(
@@ -697,10 +878,12 @@ async def _run_investigation(
         )
     except Exception as exc:
         logger.debug("Community detection skipped: %s", exc)
+    _metric_finish("graph_build")
 
     # --- Step 8 — summary -------------------------------------------------
     # Phase 6.2 — capped by CLI_PHASE_TIMEOUTS["summary"] so a slow LLM
     # call never holds the CLI process open past its budget.
+    _metric_start("summary_generation")
     display.update_step("Generating summary", "active")
     summary_text = ""
     if llm is not None:
@@ -725,11 +908,24 @@ async def _run_investigation(
             display.update_step("Generating summary", "fail", str(exc))
     else:
         display.update_step("Generating summary", "skip", "--no-llm")
+    _metric_finish("summary_generation")
 
     # --- Step 9 — finalize & write outputs --------------------------------
+    _metric_start("finalization")
     display.update_step("Finalizing results", "active")
     final_entities = sqlite_adapter.get_entities(investigation_id)
     final_relationships = sqlite_adapter.get_relationships(investigation_id)
+    # Entity persistence may create Page rows for side-source pages after the
+    # initial pre-extraction lookup. Refresh the lightweight manifest so it
+    # agrees with relationship provenance and the persisted DB state.
+    refreshed_page_ids = await asyncio.to_thread(
+        _lookup_page_ids, [p["url"] for p in scraped_pages]
+    )
+    for page in scraped_pages:
+        if page.get("page_id") is None:
+            page_id = refreshed_page_ids.get(page["url"])
+            if page_id is not None:
+                page["page_id"] = page_id
     sqlite_adapter.update_investigation(
         investigation_id,
         {
@@ -773,7 +969,18 @@ async def _run_investigation(
         "sources_used": sources_used,
         "entities": final_entities,
         "relationships": final_relationships,
-        "pages_scraped": [{"url": p["url"], "source": p.get("source", "")} for p in scraped_pages],
+        # Keep the lightweight output manifest needed to resolve relationship
+        # provenance.  Text is intentionally omitted; the DB remains the
+        # source of page content while each relationship can point to a real
+        # page in this investigation.
+        "pages_scraped": [
+            {
+                "page_id": p.get("page_id"),
+                "url": p["url"],
+                "source": p.get("source", ""),
+            }
+            for p in scraped_pages
+        ],
         "communities": communities,
         "community_count": len(set(communities.values())) if communities else 0,
         "seeds_discovered": _discovered_count,
@@ -785,6 +992,7 @@ async def _run_investigation(
         md_path.write_text(_render_markdown(payload), encoding="utf-8")
 
     display.update_step("Finalizing results", "ok")
+    _metric_finish("finalization")
 
     # Drain any background tasks scheduled during the pipeline (e.g. the
     # actor-profile aggregator).  This keeps the "fire-and-forget"
@@ -800,6 +1008,9 @@ async def _run_investigation(
             logger.debug(
                 "Background tasks did not finish in 30s — letting them cancel"
             )
+
+    persist_metrics(pipeline_metrics)
+    set_current(None)
 
     c2_count = sum(
         1 for e in final_entities
@@ -1020,25 +1231,28 @@ def _build_cooccurrence_edges(investigation_id: str) -> int:
             .filter(Entity.investigation_id == inv_uuid)
             .all()
         )
-    by_page: dict[uuid.UUID, list] = {}
-    for ent in rows:
-        page_id = getattr(ent, "page_id", None)
-        if page_id is None:
-            continue
-        by_page.setdefault(page_id, []).append(ent)
+        by_page: dict[uuid.UUID, list] = {}
+        for ent in rows:
+            page_id = getattr(ent, "page_id", None)
+            if page_id is None:
+                continue
+            by_page.setdefault(page_id, []).append(ent)
 
-    for page_entities in by_page.values():
-        if len(page_entities) < 2:
-            continue
-        for ent_a, ent_b in _iter_semantic_cooccurrence_pairs(page_entities):
-            edges.append(
-                {
-                    "entity_a_id": str(ent_a.id),
-                    "entity_b_id": str(ent_b.id),
-                    "relationship_type": "CO_APPEARED_ON",
-                    "confidence": 0.8,
-                }
-            )
+        # Consume ORM rows while their session is open.  ``joinedload`` avoids
+        # a query for ``page`` but does not make detached relationship access
+        # safe after the session closes.
+        for page_entities in by_page.values():
+            if len(page_entities) < 2:
+                continue
+            for ent_a, ent_b in _iter_semantic_cooccurrence_pairs(page_entities):
+                edges.append(
+                    {
+                        "entity_a_id": str(ent_a.id),
+                        "entity_b_id": str(ent_b.id),
+                        "relationship_type": "CO_APPEARED_ON",
+                        "confidence": 0.8,
+                    }
+                )
     return save_relationships(investigation_id, edges)
 
 
@@ -1185,6 +1399,3 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- {glyph} {name}{detail}")
 
     return "\n".join(lines) + "\n"
-
-
-

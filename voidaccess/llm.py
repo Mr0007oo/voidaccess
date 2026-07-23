@@ -425,6 +425,8 @@ def refine_query(llm, user_input):
     )
     chain = prompt_template | llm | StrOutputParser()
     query_safe = _escape_braces(user_input or "")
+    from utils.investigation_metrics import record_llm_call
+    record_llm_call()
     raw = chain.invoke({"query": query_safe})
     return _clean_refined_query(raw)
 
@@ -641,6 +643,8 @@ def filter_results(llm, query, results, top_n: int = _FILTER_TOP_N):
     )
     chain = prompt_template | llm | StrOutputParser()
     try:
+        from utils.investigation_metrics import record_llm_call
+        record_llm_call()
         result_indices = chain.invoke({"results": final_str})
     except openai.RateLimitError as e:
         logger.warning(
@@ -649,6 +653,7 @@ def filter_results(llm, query, results, top_n: int = _FILTER_TOP_N):
             e,
         )
         final_str = _escape_braces(_generate_final_string(results, truncate=True))
+        record_llm_call()
         result_indices = chain.invoke({"results": final_str})
 
     parsed_indices = _parse_filter_response(
@@ -847,6 +852,7 @@ def generate_summary(
     Automatically selects the most relevant pages that fit within
     the context budget before sending to the LLM.
     """
+    from utils.investigation_metrics import record_llm_call
     # Normalize content to list of dicts
     pages = []
     if isinstance(content, dict):
@@ -974,6 +980,7 @@ Be specific. Reference actual entity names found. Avoid generic statements."""
 
     if hasattr(llm, "invoke") and not is_runnable_llm:
         try:
+            record_llm_call()
             direct_result = llm.invoke(user_prompt)
             if isinstance(direct_result, str):
                 return direct_result
@@ -984,10 +991,12 @@ Be specific. Reference actual entity names found. Avoid generic statements."""
             logging.error(f"LLM direct summarization failed: {e}")
 
     try:
+        record_llm_call()
         return chain.invoke({"query": query})
     except Exception as e:
         logging.error(f"LLM summarization failed: {e}")
         try:
+            record_llm_call()
             return chain.invoke({"query": query})
         except Exception as inner_e:
             logging.error(f"LLM fallback also failed: {inner_e}")

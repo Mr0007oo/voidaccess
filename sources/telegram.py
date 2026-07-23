@@ -30,8 +30,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import timezone
-from typing import List, Optional
-from urllib.parse import urlparse
+from typing import List
 
 _logger = logging.getLogger(__name__)
 

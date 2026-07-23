@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ def _snort_header(engine: str, tlp: str, query: str, start_sid: int) -> list[str
         f"# TLP: {_escape_snort_string(tlp)}",
         f"# Generated: {ts}",
         f"# SID range: {start_sid}-{SID_RANGE_MAX} (VoidAccess-reserved)",
-        f"# Review and tune before deploying to production sensors.",
+        "# Review and tune before deploying to production sensors.",
         "",
     ]
 

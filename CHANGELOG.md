@@ -2,6 +2,50 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [Unreleased]
+
+## [1.8.2] - 2026-07-23
+
+- Preserve `page_id` in the CLI's lightweight `pages_scraped` manifest so
+  typed relationship provenance resolves to the source page.
+- Add prompt-level and post-LLM endpoint-type compatibility validation for
+  typed relationships; structurally invalid pairs are excluded.
+
+## [1.8.1] - 2026-07-22
+### Fixed
+- `--no-tor` now generates **zero** Tor traffic for the entire run. Previously the flag only skipped the primary Tor search branch; the Torch/Haystack onion search engines still ran and fed real `.onion` result URLs into the scrape list, which were then routed back through Tor. The onion search engines are now skipped when `--no-tor` is set, and any `.onion` link from any source is stripped before the scraper sees it — so no outbound connection to the Tor SOCKS proxy is ever attempted and no onion-sourced pages appear in the output.
+- Typed relationship extraction now works against the real LLM adapter. The call built a silent client with `llm.bind(callbacks=[])`, which LangChain forwarded to `agenerate_prompt` as a keyword while `ainvoke` also passed `callbacks` explicitly, raising `got multiple values for keyword argument 'callbacks'` on every page and silently degrading to zero typed relationships. It now uses `with_config({"callbacks": []})` (matching the entity-extraction path), and a failed relationship LLM call logs a visible warning distinct from a call that genuinely found no relationship.
+- Step-cost metrics (`investigation_step_metrics`) are no longer written all-zero from the CLI. The CLI created the metrics collector but never started/finished steps or recorded scraping, so `duration_ms`, `llm_calls`, and the page-fetch counters stayed zero even though work was happening (and `record_llm_call` only credits an *active* step). The CLI pipeline is now instrumented per step like the API path, so durations, per-step LLM-call counts, and page-fetch counters reflect real values.
+- Empty, whitespace-only, and trivially short (< 3 character) investigation queries are now rejected up front with a clear message, before any network activity — instead of silently proceeding to produce a full, confident-looking report from generic noise.
+- Non-actionable IP addresses are now filtered alongside the existing RFC 5737 documentation ranges: `0.0.0.0`, the broadcast address, and well-known public DNS resolvers (`8.8.8.8`, `8.8.4.4`, `1.1.1.1`, `1.0.0.1`, Quad9, OpenDNS, Level3). They no longer appear in the persisted entity store or the exported `ip_addresses.txt`, so a user importing that file into a blocklist can't accidentally block a legitimate resolver or a null route.
+- ransomlook.io and ransomware.live group matching is now token-based. The old logic required the entire query string to appear literally in a tracked group name, so realistic analyst queries like `"LockBit ransomware leak site"` matched nothing even though `lockbit3` exists. Generic words are stripped and the meaningful token(s) are matched against group names (`lockbit` → `lockbit`, `lockbit2`, `lockbit3`); a genuine no-match still reports `ok_0_results` honestly.
+
+### Changed
+- The typed-relationship vocabulary term `USED` was renamed to **`USES`** for a consistent, externally-visible name across the LLM prompt/parser, the internal storage type (`RelationshipType`/`EDGE_TYPES`), the API response, and the STIX export mapping (`USES` → STIX `uses`).
+- Version bumped to 1.8.1 (`pyproject.toml`, `voidaccess_cli.__version__`, IOC package `PACKAGE_VERSION`).
+
+## [1.8.0] - 2026-07-22
+### Added
+- Five new free (key-optional) intelligence sources, each reporting honestly into `sources_used`:
+  - **XposedOrNot** (`sources/breach_lookup.py`) — email breach-exposure lookup, complements HIBP with a different corpus; free tier includes stealer-log exposure.
+  - **LeakCheck** public tier (`sources/breach_lookup.py`) — breach-source corroboration; an email surfacing in both XposedOrNot and LeakCheck is tagged `breach_corroborated`.
+  - **Hudson Rock Cavalier** (`sources/infostealer.py`) — infostealer intelligence (30M+ malware-infected machines) queried by email AND domain; one of the few sources giving domain-level infostealer exposure.
+  - **NVD 2.0** (`sources/nvd.py`) — full CVE metadata (CVSS, CWE, description, dates) for any extracted CVE, complementing CISA KEV's actively-exploited subset. Optional `NVD_API_KEY` raises the rate limit.
+  - **ransomlook.io** (`sources/enrichment.py`) — second ransomware-group tracker that cross-validates ransomware.live; shared leak-site `.onion` seeds are URL-normalised to dedup across the two trackers.
+- First pytest test suite (`tests/`), covering the parsers for the five new sources with mocked HTTP (`aioresponses`).
+
+### Fixed
+- Phase-A threat-intel enrichment now preserves the results of sources that finished before the deadline instead of discarding the entire batch when the 59s/55s cap is hit (`_gather_with_partial_results`).
+- CLI `investigate` reputation steps (domain/hash/email) no longer clobber the threaded `extraction_results` list into a `(results, stats)` tuple, which had silently starved subsequent steps and actor-profile aggregation of entities.
+- Typed relationship edges. A distinct LLM relationship-extraction pass (`extractor/relationship_extract.py`) runs after entity extraction and asks, for the entities already found on a page, which specific typed relationship (if any) connects them — `USED`, `DROPS`, `CONTROLS`, `TARGETS`, `EXPLOITS`, `COMMUNICATES_WITH`. Each relationship carries its own claim confidence, separate from the confidence of the two entities it connects. The vocabulary is bounded: anything the LLM cannot map cleanly is dropped and the pair keeps its plain co-occurrence edge.
+- The pass is additive — co-occurrence edge generation is unchanged; typed edges sit alongside it. Bounded by `MAX_REL_PAGES_PER_INV` (default 10; one LLM call per selected page) so it can never scale unbounded with page count, mirroring the existing `MAX_LLM_PAGES_PER_INV` entity-extraction cap. Disable with `ENABLE_RELATIONSHIP_EXTRACTION=false`.
+
+### Fixed
+- STIX export keyed its entity→object map only by raw entity value, so graph edges whose node id is disambiguated (e.g. `THREAT_ACTOR_HANDLE` as `handle@forum`) were silently dropped from the bundle. The map now also registers the graph node id, so relationships with a threat-actor endpoint — including the new typed relationships — survive into the bundle.
+
+### Changed
+- STIX `Relationship` SROs now carry the edge's confidence (STIX 2.1 `confidence`, 0–100), and the new typed edge types map to documented STIX relationship types (`uses`, `drops`, `targets`, `exploits`, `communicates-with`); `CONTROLS` has no standard STIX verb and degrades to `related-to`. `CO_INVESTIGATION` now has an explicit mapping instead of relying on the default.
+
 ## [1.7.2] - 2026-07-08
 ### Fixed
 - STIX relationship generation now avoids near-quadratic same-page edge explosions by emitting bounded semantic co-occurrence edges instead of every pair on a page.

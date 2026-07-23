@@ -50,7 +50,9 @@ We investigate and confirm the issue. If valid, we fix it before public disclosu
 
 ## Security Design
 
-The API runs as a non-root user inside Docker containers (uid 1000, gid 1000). JWTs expire after 8 hours and include a unique ID (jti) that gets stored in Redis for revocation when users log out. If Redis is not configured, tokens cannot be revoked.
+The API runs as a non-root user inside Docker containers (uid 1000, gid 1000). JWTs expire after 8 hours and include a unique ID (jti) that gets stored in Redis for revocation when users log out.
+
+Token revocation behaviour on Redis availability is a deliberate design decision. If `REDIS_URL` is **not** configured, the blacklist is disabled by design and tokens remain valid until natural expiry (fail-open — for operators who choose not to run Redis). If `REDIS_URL` **is** configured but Redis becomes unreachable, revocation is treated as a required control and the API **fails closed**: authenticated requests are rejected with `503 Service Unavailable` and an operator warning is logged, rather than silently accepting possibly-revoked tokens. Enforcement resumes automatically once Redis recovers. This trades availability for revocation integrity when revocation has been explicitly opted in; unset `REDIS_URL` to prefer availability instead.
 
 API keys provided by users are encrypted with Fernet (AES-128) using a key derived from JWT_SECRET. Server-level keys are stored in environment variables only.
 

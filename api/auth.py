@@ -8,6 +8,7 @@ Flow:
 4. POST /auth/reset-password → sets new password, clears must_reset flag
 """
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -22,7 +23,9 @@ from sqlalchemy.orm import Session
 from config import JWT_SECRET
 from db.models import User
 from db.session import get_session, get_db
-from auth.token_blacklist import is_token_revoked
+from auth.token_blacklist import is_token_revoked, BlacklistUnavailableError
+
+logger = logging.getLogger(__name__)
 
 # Config — single canonical source from config.py
 SECRET = JWT_SECRET
@@ -130,7 +133,28 @@ async def get_current_user(
         raise credentials_exception
 
     if token_payload.jti:
-        if await is_token_revoked(token_payload.jti):
+        # Fail closed when revocation was opted in (REDIS_URL set) but the
+        # blacklist store is unreachable: we cannot confirm the token has not
+        # been revoked, so we refuse rather than silently honour it. Enforcement
+        # resumes automatically once Redis is reachable again. When REDIS_URL is
+        # unset, is_token_revoked() simply returns False (disabled by design).
+        try:
+            token_revoked = await is_token_revoked(token_payload.jti)
+        except BlacklistUnavailableError:
+            logger.warning(
+                "Token revocation store unavailable — failing closed (rejecting "
+                "authentication). Restore Redis, or unset REDIS_URL to disable "
+                "blacklist enforcement (fail-open by design)."
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "Authentication temporarily unavailable: the token revocation "
+                    "store is unreachable."
+                ),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if token_revoked:
             raise revoked_exception
 
     user = db.query(User).filter(

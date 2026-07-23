@@ -6,8 +6,6 @@ Routes traffic through Tor SOCKS5 proxy same as the main scraper.
 """
 
 import logging
-from typing import Optional
-from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 

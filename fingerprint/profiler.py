@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from fingerprint.stylometry import compute_similarity, extract_style_vector
 from vector import store as vector_store
 
 logger = logging.getLogger(__name__)
 
-SIMILARITY_THRESHOLD = 0.82
+SIMILARITY_THRESHOLD: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,8 @@ def update_profile(existing_profile: dict, new_texts: list[str]) -> dict:
 def match_against_profiles(
     style_vector: dict,
     top_k: int = 10,
-    threshold: float = SIMILARITY_THRESHOLD,
+    threshold: float | None = SIMILARITY_THRESHOLD,
+    exclude_canonical: str | None = None,
 ) -> list[dict]:
     """
     Compare a style profile against all stored actor profiles using ANN search.
@@ -159,6 +160,11 @@ def match_against_profiles(
     """
     if not isinstance(top_k, int):
         session = top_k
+        if threshold is None:
+            from fingerprint.calibration import calibrated_threshold
+            threshold = calibrated_threshold()
+        if threshold is None:
+            return []
         try:
             from db.models import ActorStyleProfile
 
@@ -167,9 +173,14 @@ def match_against_profiles(
             logger.error("match_against_profiles DB fallback failed: %s", exc)
             return []
 
+        from fingerprint.calibration import load_calibration
+        artifact = load_calibration()
+        reference_stats = artifact.get("reference_stats") if artifact else None
         matches: list[dict] = []
         for row in rows:
-            similarity = compute_similarity(style_vector, row.style_vector)
+            if exclude_canonical and row.canonical_value == exclude_canonical:
+                continue
+            similarity = compute_similarity(style_vector, row.style_vector, reference_stats)
             if similarity >= threshold:
                 matches.append(
                     {
@@ -183,6 +194,11 @@ def match_against_profiles(
                 )
         return sorted(matches, key=lambda item: item["similarity"], reverse=True)
 
+    if threshold is None:
+        from fingerprint.calibration import calibrated_threshold
+        threshold = calibrated_threshold()
+    if threshold is None:
+        return []
     return vector_store.match_actor_profiles(
         style_vector=style_vector,
         top_k=top_k,

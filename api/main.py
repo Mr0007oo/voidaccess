@@ -27,6 +27,7 @@ from slowapi.util import get_remote_address
 
 from api.routes import entities, export, investigations, monitors, search, auth, admin, settings, actors
 from api.auth import get_current_user
+from api.errors import log_exception, safe_error_body
 from monitor.scheduler import start_scheduler
 
 from config import TOR_PROXY_HOST, TOR_PROXY_PORT, PLAYWRIGHT_ENABLED, JWT_SECRET
@@ -256,7 +257,8 @@ async def _sweep_stuck_investigations(cutoff_minutes: Optional[int] = 30) -> int
             if not stuck:
                 return 0
 
-            swept_ids = [inv.id for inv in stuck]
+            cancelled_ids = [inv.id for inv in stuck if inv.cancellation_requested]
+            failed_ids = [inv.id for inv in stuck if not inv.cancellation_requested]
             sweep_reason = (
                 "Server restarted mid-investigation"
                 if cutoff_minutes is None
@@ -267,20 +269,32 @@ async def _sweep_stuck_investigations(cutoff_minutes: Optional[int] = 30) -> int
         # Update outside the read session.
         from sqlalchemy import update
         with get_session() as session:
-            session.execute(
-                update(Investigation)
-                .where(Investigation.id.in_(swept_ids))
-                .values(
-                    status="failed",
-                    summary=sweep_reason,
+            if cancelled_ids:
+                session.execute(
+                    update(Investigation)
+                    .where(Investigation.id.in_(cancelled_ids))
+                    .values(
+                        status="cancelled",
+                        summary="Investigation cancelled by user before worker termination",
+                    )
                 )
-            )
+            if failed_ids:
+                session.execute(
+                    update(Investigation)
+                    .where(Investigation.id.in_(failed_ids))
+                    .values(status="failed", summary=sweep_reason)
+                )
             session.commit()
 
-        for inv_id in swept_ids:
+        for inv_id in cancelled_ids:
+            logger.warning("Resolved cancelled investigation after worker termination: %s", inv_id)
+        for inv_id in failed_ids:
             logger.warning("Swept stuck investigation: %s", inv_id)
-        logger.info("Swept %d stuck investigations (cutoff=%s)", len(swept_ids), cutoff_minutes)
-        return len(swept_ids)
+        logger.info(
+            "Swept %d stuck investigations (cancelled=%d, failed=%d, cutoff=%s)",
+            len(stuck), len(cancelled_ids), len(failed_ids), cutoff_minutes,
+        )
+        return len(stuck)
     except Exception as exc:
         logger.warning("Swept-investigation sweep failed: %s", exc)
         return 0
@@ -361,10 +375,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Global exception caught: {exc}", exc_info=True)
+    # Public error, private log: log the full exception (message + traceback)
+    # server-side tagged with a correlation ID, and return only a generic
+    # message + that same ID to the client. Never leak raw exception text.
+    correlation_id = log_exception(exc, request=request)
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal Server Error: {str(exc)}"},
+        content=safe_error_body(correlation_id),
     )
 
 
@@ -502,8 +519,11 @@ async def _check_db_connectivity_async() -> str:
             await session.execute(text("SELECT 1"))
         return "ok"
     except Exception as exc:
-        logger.warning("DB connectivity check failed: %s", exc)
-        return f"error: {str(exc)}"
+        # /health and /healthz/ready are unauthenticated — never echo the raw
+        # DB error (can contain connection-string fragments). Log it, return
+        # a generic status.
+        log_exception(exc, context="db connectivity check")
+        return "error: database unreachable"
 
 
 async def _check_tor_connectivity_async() -> str:
@@ -634,8 +654,13 @@ async def search_test(_=Depends(get_current_user)) -> dict:
 
 
 @app.get("/debug/stack", tags=["health"])
-async def debug_stack() -> dict:
-    """Returns a list of all running asyncio tasks and their stack traces."""
+async def debug_stack(_=Depends(get_current_user)) -> dict:
+    """Returns a list of all running asyncio tasks and their stack traces.
+
+    Authenticated-only: exposes internal runtime state (filenames, coroutine
+    names, in-flight task stacks), matching the auth gate on its sibling
+    /debug/tor-test and /debug/search-test endpoints.
+    """
     import asyncio
 
     tasks = asyncio.all_tasks()

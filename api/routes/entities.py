@@ -21,6 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from api.auth import CurrentUser, get_current_user
+from api.errors import GENERIC_ERROR_MESSAGE, log_exception
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -301,6 +302,7 @@ async def get_stylometry_analysis(
         from db.session import get_session  # noqa: PLC0415
         from db.models import Entity  # noqa: PLC0415
         from fingerprint.profiler import build_actor_profile  # noqa: PLC0415
+        from fingerprint.calibration import calibration_summary  # noqa: PLC0415
 
         BASELINE = {
             "avg_word_length": 4.8,
@@ -418,12 +420,28 @@ async def get_stylometry_analysis(
                 "confidence": confidence,
                 "notable_traits": notable_traits,
                 "similar_actors": similar_actors,
+                "similarity_method": "burrows_delta_zscore",
+                "calibration": calibration_summary(),
+                "reliability": {
+                    "text_samples": sample_count,
+                    "total_chars": total_chars,
+                    "minimum_recommended_chars": 2000,
+                    "warning": (
+                        "Short texts produce less reliable stylometric estimates."
+                        if total_chars < 2000 or sample_count < 5
+                        else None
+                    ),
+                },
             }
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("get_stylometry_analysis failed: %s", exc)
-        return {"error": "analysis_failed", "message": str(exc)[:300]}
+        correlation_id = log_exception(exc, context="get_stylometry_analysis")
+        return {
+            "error": "analysis_failed",
+            "message": GENERIC_ERROR_MESSAGE,
+            "correlation_id": correlation_id,
+        }
 
 
 @router.get("/{entity_id}/analysis/opsec")
@@ -540,8 +558,12 @@ async def get_opsec_analysis(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("get_opsec_analysis failed: %s", exc)
-        return {"error": "analysis_failed", "message": str(exc)[:300]}
+        correlation_id = log_exception(exc, context="get_opsec_analysis")
+        return {
+            "error": "analysis_failed",
+            "message": GENERIC_ERROR_MESSAGE,
+            "correlation_id": correlation_id,
+        }
 
 
 @router.get("/{entity_id}")
@@ -823,7 +845,7 @@ def _find_similar_actors(
     profile,
     canonical_value: str,
     entity_type: str,
-    threshold: float = 0.82,
+    threshold: float | None = None,
     top_k: int = 5,
 ) -> list[dict]:
     """
@@ -837,8 +859,8 @@ def _find_similar_actors(
     
     with get_session() as session:
         matches = match_against_profiles(
-            profile=profile,
-            session=session,
+            profile,
+            session,
             threshold=threshold,
             exclude_canonical=canonical_value,  # Don't match self
         )
@@ -852,6 +874,7 @@ def _find_similar_actors(
             "entity_type": match.get("entity_type", entity_type),
             "similarity_score": round(float(score), 3),
             "confidence": _score_to_confidence(float(score)),
+            "calibration_status": "calibrated",
             "matching_features": match.get("matching_features", []),
             "profile_sample_count": match.get("sample_count", 0),
         })

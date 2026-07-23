@@ -12,7 +12,6 @@ GET  /investigations/{id}/graph/path — shortest path between two entities
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import csv
 import hashlib
 import io
@@ -57,7 +56,35 @@ def _gitlab_scraping_enabled() -> bool:
 
 def _rss_scraping_enabled() -> bool:
     return os.getenv("RSS_FEEDS_ENABLED", "true").lower() == "true"
+
+
+def _telegram_credentials_available() -> bool:
+    return bool(os.getenv("TELEGRAM_API_ID", "").strip() and os.getenv("TELEGRAM_API_HASH", "").strip())
+
+
+def _telegram_channels() -> list[str]:
+    return [item.strip() for item in os.getenv("TELEGRAM_CHANNELS", "").split(",") if item.strip()]
+
+
+async def _gather_with_partial_results(awaitables, timeout: float) -> list:
+    """Return completed source results when the phase deadline is reached."""
+    tasks = [asyncio.create_task(awaitable) for awaitable in awaitables]
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
+    results = []
+    for task in tasks:
+        if task in done:
+            try:
+                results.append(task.result())
+            except Exception as exc:
+                results.append(exc)
+        else:
+            results.append(TimeoutError("parallel source deadline exceeded"))
+            task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    return results
 from api.auth import CurrentUser, get_current_user, require_password_not_reset_pending
+from api.errors import GENERIC_ERROR_MESSAGE, internal_http_exception, log_exception
 import json
 
 logger = logging.getLogger(__name__)
@@ -183,167 +210,138 @@ async def _run_enrichment_phase(
 
     Returns ``(extraction_results, sources_used)`` — both possibly updated.
     """
-    # ===== STEP 6.1: IP Reputation Enrichment =====
+    # These lookups only read the extracted entities and update separate
+    # source-specific DB records.  Run them together and retain each result,
+    # using the established partial-results-on-timeout gather pattern.
+    from sources.domain_reputation import enrich_domain_entities
+    from sources.email_reputation import enrich_email_entities
+    from sources.enrichment import run_dns_enrichment
+    from sources.hash_reputation import enrich_hash_entities
+    from sources.ip_reputation import enrich_ip_entities
+
+    dns_entities = [
+        {
+            "entity_type": entity.entity_type,
+            "canonical_value": entity.value,
+            "value": entity.value,
+            "confidence": entity.confidence,
+        }
+        for result in extraction_results
+        for entity in getattr(result, "entities", [])
+        if hasattr(entity, "entity_type")
+    ]
+
+    async def _step(name, awaitable, timeout):
+        try:
+            return name, await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("[%s] %s enrichment timed out after %ss", inv_uuid, name, timeout)
+            return name, TimeoutError("enrichment step timed out")
+        except Exception as exc:
+            logger.info("[%s] %s enrichment failed (non-fatal): %s", inv_uuid, name, exc)
+            return name, exc
+
+    step_results = await _gather_with_partial_results(
+        [
+            _step("ip_reputation", enrich_ip_entities(extraction_results, inv_uuid), 60),
+            _step("circl_pdns", run_dns_enrichment(dns_entities), 120),
+            _step("domain_reputation", enrich_domain_entities(extraction_results, inv_uuid), 120),
+            _step("hash_reputation", enrich_hash_entities(extraction_results, inv_uuid), 90),
+            _step("email_reputation", enrich_email_entities(extraction_results, inv_uuid), 60),
+        ],
+        timeout=PHASE_TIMEOUTS["enrichment"],
+    )
+
+    for name, result in step_results:
+        if isinstance(result, Exception):
+            sources_used[name] = "error_timeout" if isinstance(result, TimeoutError) else "error"
+            continue
+        if name == "circl_pdns":
+            new_entities = result.get("new_entities", [])
+            clusters = result.get("infrastructure_clusters", [])
+            if clusters:
+                _set_infra_clusters(investigation_id, clusters)
+            count = len(new_entities)
+            sources_used[name] = f"ok_{count}_enrichments"
+        else:
+            updated_results, stats = result
+            # All current enrichment implementations return the same list;
+            # retain the IP step's filtered list if it removed suppressed IPs.
+            if name == "ip_reputation":
+                extraction_results = updated_results
+            status_key = {
+                "ip_reputation": "ip_reputation",
+                "domain_reputation": "domain_reputation",
+                "hash_reputation": "hash_reputation",
+                "email_reputation": "email_reputation",
+            }[name]
+            fallback = {
+                "ip_reputation": "ok_0_ips",
+                "domain_reputation": "ok_0_domains",
+                "hash_reputation": "ok_0_hashes",
+                "email_reputation": "ok_0_emails",
+            }[name]
+            sources_used[name] = stats.get(status_key, fallback)
+
+    _set_sources_used(investigation_id, sources_used)
+
+    # ===== STEP 6.5: Breach-exposure lookup (XposedOrNot + LeakCheck) =====
     try:
-        from sources.ip_reputation import enrich_ip_entities as _enrich_ips
+        from sources.breach_lookup import enrich_breach_entities as _enrich_breach
 
-        extraction_results, _ip_stats = await asyncio.wait_for(
-            _enrich_ips(extraction_results, inv_uuid),
-            timeout=60,
-        )
-        sources_used["ip_reputation"] = _ip_stats.get("ip_reputation", "ok_0_ips")
-        _set_sources_used(investigation_id, sources_used)
-        logger.info(
-            "[%s] IP reputation: %d checked, %d suppressed, %d C2 confirmed, %d abuse",
-            inv_uuid,
-            _ip_stats.get("checked", 0),
-            _ip_stats.get("suppressed", 0),
-            _ip_stats.get("c2_confirmed", 0),
-            _ip_stats.get("abuse_confirmed", 0),
-        )
-    except asyncio.TimeoutError:
-        logger.warning("[%s] IP reputation enrichment timed out after 60s", inv_uuid)
-        sources_used["ip_reputation"] = "error_timeout"
-        _set_sources_used(investigation_id, sources_used)
-    except Exception as _ip_exc:
-        logger.info("[%s] IP reputation enrichment failed (non-fatal): %s", inv_uuid, _ip_exc)
-        sources_used["ip_reputation"] = "error"
-        _set_sources_used(investigation_id, sources_used)
-
-    # ===== STEP 6.8: DNS/WHOIS Enrichment =====
-    try:
-        from sources.enrichment import run_dns_enrichment
-
-        extracted_entities_for_dns: list = []
-        for _r in extraction_results:
-            for _e in getattr(_r, "entities", []):
-                if hasattr(_e, "entity_type"):
-                    extracted_entities_for_dns.append({
-                        "entity_type": _e.entity_type,
-                        "canonical_value": _e.value,
-                        "value": _e.value,
-                        "confidence": _e.confidence,
-                    })
-                elif isinstance(_e, dict):
-                    extracted_entities_for_dns.append(_e)
-
-        dns_results = await asyncio.wait_for(
-            run_dns_enrichment(extracted_entities_for_dns),
-            timeout=120,
-        )
-        new_dns_entities = dns_results.get("new_entities", [])
-        if new_dns_entities:
-            logger.info(
-                "[%s] DNS enrichment: %d new entities discovered",
-                inv_uuid, len(new_dns_entities),
-            )
-        clusters = dns_results.get("infrastructure_clusters", [])
-        if clusters:
-            logger.info("[%s] Infrastructure clusters found: %d", inv_uuid, len(clusters))
-            for cluster in clusters:
-                logger.info("[%s]   %s", inv_uuid, cluster["description"])
-            _set_infra_clusters(investigation_id, clusters)
-        _dns_ent_count = len(new_dns_entities)
-        sources_used["circl_pdns"] = (
-            f"ok_{_dns_ent_count}_enrichments" if _dns_ent_count > 0 else "ok_0_enrichments"
-        )
-        _set_sources_used(investigation_id, sources_used)
-    except asyncio.TimeoutError:
-        logger.warning("[%s] DNS enrichment timed out after 120s", inv_uuid)
-        sources_used["circl_pdns"] = "error"
-        _set_sources_used(investigation_id, sources_used)
-    except Exception as _dns_exc:
-        logger.info("[%s] DNS enrichment failed (non-fatal): %s", inv_uuid, _dns_exc)
-        sources_used["circl_pdns"] = "error"
-        _set_sources_used(investigation_id, sources_used)
-
-    # ===== STEP 6.2: Domain Reputation Enrichment =====
-    try:
-        from sources.domain_reputation import enrich_domain_entities as _enrich_domains
-
-        extraction_results, _dom_stats = await asyncio.wait_for(
-            _enrich_domains(extraction_results, inv_uuid),
-            timeout=120,
-        )
-        sources_used["domain_reputation"] = _dom_stats.get(
-            "domain_reputation", "ok_0_domains"
-        )
-        _set_sources_used(investigation_id, sources_used)
-        logger.info(
-            "[%s] Domain reputation: %d domains, %d CT records, %d malicious, %d archived",
-            inv_uuid,
-            _dom_stats.get("domains_checked", 0),
-            _dom_stats.get("ct_records", 0),
-            _dom_stats.get("urlscan_malicious", 0),
-            _dom_stats.get("wayback_archived", 0),
-        )
-    except asyncio.TimeoutError:
-        logger.warning("[%s] Domain reputation enrichment timed out after 120s", inv_uuid)
-        sources_used["domain_reputation"] = "error_timeout"
-        _set_sources_used(investigation_id, sources_used)
-    except Exception as _dom_exc:
-        logger.info("[%s] Domain reputation enrichment failed (non-fatal): %s", inv_uuid, _dom_exc)
-        sources_used["domain_reputation"] = "error"
-        _set_sources_used(investigation_id, sources_used)
-
-    # ===== STEP 6.3: Hash Reputation Enrichment =====
-    try:
-        from sources.hash_reputation import enrich_hash_entities as _enrich_hashes
-
-        extraction_results, _hash_stats = await asyncio.wait_for(
-            _enrich_hashes(extraction_results, inv_uuid),
+        extraction_results, _breach_stats = await asyncio.wait_for(
+            _enrich_breach(extraction_results, inv_uuid),
             timeout=90,
         )
-        sources_used["hash_reputation"] = _hash_stats.get("hash_reputation", "ok_0_hashes")
+        sources_used["xposedornot"] = _breach_stats.get("xposedornot", "ok_0_results")
+        sources_used["leakcheck"] = _breach_stats.get("leakcheck", "ok_0_results")
         _set_sources_used(investigation_id, sources_used)
         logger.info(
-            "[%s] Hash reputation: %d checked, %d malicious, %d suspicious, "
-            "%d families, %d new entities",
+            "[%s] Breach lookup: %d checked, XposedOrNot %d breached (%d stealer-log), "
+            "LeakCheck %d breached, %d corroborated",
             inv_uuid,
-            _hash_stats.get("hashes_checked", 0),
-            _hash_stats.get("malicious", 0),
-            _hash_stats.get("suspicious", 0),
-            _hash_stats.get("malware_families_found", 0),
-            _hash_stats.get("new_entities_discovered", 0),
+            _breach_stats.get("emails_checked", 0),
+            _breach_stats.get("xon_breached", 0),
+            _breach_stats.get("stealer_log_exposed", 0),
+            _breach_stats.get("leakcheck_breached", 0),
+            _breach_stats.get("corroborated", 0),
         )
     except asyncio.TimeoutError:
-        logger.warning("[%s] Hash reputation enrichment timed out after 90s", inv_uuid)
-        sources_used["hash_reputation"] = "error_timeout"
+        logger.warning("[%s] Breach-exposure lookup timed out after 90s", inv_uuid)
+        sources_used["xposedornot"] = "error_timeout"
+        sources_used["leakcheck"] = "error_timeout"
         _set_sources_used(investigation_id, sources_used)
-    except Exception as _hash_exc:
-        logger.info("[%s] Hash reputation enrichment failed (non-fatal): %s", inv_uuid, _hash_exc)
-        sources_used["hash_reputation"] = "error"
+    except Exception as _breach_exc:
+        logger.info("[%s] Breach-exposure lookup failed (non-fatal): %s", inv_uuid, _breach_exc)
+        sources_used["xposedornot"] = "error"
+        sources_used["leakcheck"] = "error"
         _set_sources_used(investigation_id, sources_used)
 
-    # ===== STEP 6.4: Email Reputation Enrichment =====
+    # ===== STEP 6.6: Infostealer intelligence (Hudson Rock Cavalier) =====
     try:
-        from sources.email_reputation import enrich_email_entities as _enrich_emails
+        from sources.infostealer import enrich_infostealer_entities as _enrich_infostealer
 
-        extraction_results, _email_stats = await asyncio.wait_for(
-            _enrich_emails(extraction_results, inv_uuid),
-            timeout=60,
+        extraction_results, _is_stats = await asyncio.wait_for(
+            _enrich_infostealer(extraction_results, inv_uuid),
+            timeout=90,
         )
-        sources_used["email_reputation"] = _email_stats.get(
-            "email_reputation", "ok_0_emails"
-        )
+        sources_used["hudsonrock"] = _is_stats.get("hudsonrock", "ok_0_results")
         _set_sources_used(investigation_id, sources_used)
         logger.info(
-            "[%s] Email reputation: %d checked, %d breached, %d passwords exposed, "
-            "%d disposable, %d malicious",
+            "[%s] Infostealer (Hudson Rock): %d emails infected, %d domains exposed, "
+            "%d machines total",
             inv_uuid,
-            _email_stats.get("emails_checked", 0),
-            _email_stats.get("breached", 0),
-            _email_stats.get("password_exposed", 0),
-            _email_stats.get("disposable", 0),
-            _email_stats.get("malicious", 0),
+            _is_stats.get("emails_infected", 0),
+            _is_stats.get("domains_exposed", 0),
+            _is_stats.get("total_machines", 0),
         )
     except asyncio.TimeoutError:
-        logger.warning("[%s] Email reputation enrichment timed out after 60s", inv_uuid)
-        sources_used["email_reputation"] = "error_timeout"
+        logger.warning("[%s] Infostealer enrichment timed out after 90s", inv_uuid)
+        sources_used["hudsonrock"] = "error_timeout"
         _set_sources_used(investigation_id, sources_used)
-    except Exception as _email_exc:
-        logger.info("[%s] Email reputation enrichment failed (non-fatal): %s", inv_uuid, _email_exc)
-        sources_used["email_reputation"] = "error"
+    except Exception as _is_exc:
+        logger.info("[%s] Infostealer enrichment failed (non-fatal): %s", inv_uuid, _is_exc)
+        sources_used["hudsonrock"] = "error"
         _set_sources_used(investigation_id, sources_used)
 
     return extraction_results, sources_used
@@ -368,8 +366,12 @@ async def _build_graph_phase(
         from db.session import get_session
         from db.models import Investigation
 
+        # CLI investigations carry IDs as strings, while the ORM UUID columns
+        # require uuid.UUID values on SQLite/PostgreSQL alike.
+        graph_investigation_id = uuid.UUID(str(inv_uuid))
+
         graph_obj = await asyncio.to_thread(
-            build_graph_from_db, investigation_id=inv_uuid
+            build_graph_from_db, investigation_id=graph_investigation_id
         )
         node_count = len(graph_obj.nodes())
         edge_count = len(graph_obj.edges())
@@ -390,7 +392,7 @@ async def _build_graph_phase(
 
         try:
             persist_result = await asyncio.to_thread(
-                _persist_graph_edges_sync, graph_obj, inv_uuid
+                _persist_graph_edges_sync, graph_obj, graph_investigation_id
             )
             graph_status = persist_result.get("status", "written")
             edges_written = persist_result.get("edges_written", 0)
@@ -508,12 +510,24 @@ def _clear_cancel_flag(investigation_id: str) -> None:
 
 async def _check_cancelled(inv_uuid: uuid.UUID, investigation_id: str) -> bool:
     """Return True and mark investigation cancelled in DB if cancellation was requested."""
-    if not _is_cancelled(investigation_id):
+    from db.models import Investigation
+    from db.session import get_session
+
+    requested = _is_cancelled(investigation_id)
+    if not requested:
+        try:
+            with get_session() as session:
+                requested = bool(
+                    session.query(Investigation.cancellation_requested)
+                    .filter_by(id=inv_uuid)
+                    .scalar()
+                )
+        except Exception:
+            requested = False
+    if not requested:
         return False
     _clear_cancel_flag(investigation_id)
     logger.info("[%s] Cancellation flag detected — stopping pipeline cleanly", inv_uuid)
-    from db.models import Investigation
-    from db.session import get_session
     with get_session() as session:
         session.query(Investigation).filter_by(id=inv_uuid).update({"status": "cancelled"})
         session.commit()
@@ -752,11 +766,7 @@ def _get_db_investigation(investigation_id: str) -> Any:
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid investigation ID format")
     except Exception as exc:
-        logger.exception("_get_db_investigation failed: %s", exc)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal error: {exc!s}"[:500],
-        )
+        raise internal_http_exception(exc, context="_get_db_investigation")
 
 
 async def _update_investigation_status(
@@ -904,7 +914,8 @@ async def _get_investigation_model_choice(model: Optional[str]) -> tuple[str, An
 
 def _parse_rate_limit_reset(exc: Exception) -> float:
     """Extract reset timestamp from a 429 error and return seconds to wait."""
-    import time, re
+    import time
+    import re
     exc_str = str(exc)
     # OpenRouter returns X-RateLimit-Reset as epoch milliseconds in metadata
     match = re.search(r"'X-RateLimit-Reset':\s*'?(\d{13})'?", exc_str)
@@ -959,14 +970,25 @@ async def _run_investigation_task(
 
         from db.models import Investigation
         from db.session import get_session, get_async_session
-        from db.queries import update_investigation_summary
-        from voidaccess.llm import filter_results, generate_summary, get_llm, refine_query
-        from voidaccess.llm_utils import get_model_choices
+        from voidaccess.llm import filter_results, get_llm, refine_query
         from search.search import _search_async as _search_engines_async, _dedupe_links as _search_dedupe, ENGINE_WEIGHTS as _engine_weights
         from scraper.scrape import scrape_multiple, validate_urls_for_scraping
         from extractor import extract_entities_from_pages
 
         inv_uuid = uuid.UUID(investigation_id)
+
+        from utils.investigation_metrics import InvestigationMetrics, persist as persist_metrics, set_current
+
+        run_metrics = InvestigationMetrics(inv_uuid)
+        set_current(run_metrics)
+        persist_metrics(run_metrics)
+
+        def _metric_start(step_name: str) -> None:
+            run_metrics.start(step_name)
+
+        def _metric_finish(step_name: str) -> None:
+            run_metrics.finish(step_name)
+            persist_metrics(run_metrics)
 
         async with get_async_session() as session:
             result = await session.execute(
@@ -984,6 +1006,7 @@ async def _run_investigation_task(
                     resolved_keys[key_name] = await resolve_api_key(inv_user_id, key_name, session)
 
         # ===== STEP 0: Get model choice and mark as processing =====
+        _metric_start("query_refinement")
         selected_model, _ = await _get_investigation_model_choice(model)
         logger.info(
             "Investigation %s: using model '%s'",
@@ -1015,6 +1038,7 @@ async def _run_investigation_task(
 
         await asyncio.to_thread(_persist_refined_query)
         await _update_progress(inv_uuid, 1)
+        _metric_finish("query_refinement")
         if await _check_cancelled(inv_uuid, investigation_id):
             return
 
@@ -1090,15 +1114,29 @@ async def _run_investigation_task(
 
         # ===== STEP 2, 3.5, 4: Parallel Pipeline =====
         logger.info("[%s] STEP 2/3.5/4: Launching Search, Enrichment, and Crawler concurrently...", inv_uuid)
+        _metric_start("source_gathering")
+
+        onionsearch_counts: dict[str, int] = {"Torch": 0, "Haystack": 0}
+        onionsearch_error = False
+        onionsearch_status: dict[str, str] = {}
 
         async def run_search_and_filter() -> list:
             logger.info("[%s] STEP 2: Searching dark web...", inv_uuid)
             
             async def search_single_language(lang_code: str, q: str) -> list[dict]:
+                nonlocal onionsearch_error
                 search_query = q.replace(" ", "+")
                 logger.info("[%s] Searching [%s]: %s...", inv_uuid, lang_code, search_query[:60])
                 try:
-                    engine_results = await _search_engines_async(search_query, llm_client=llm_client)
+                    from sources.engines import search_onionsearch, get_last_onionsearch_status
+                    engine_results, onion_results = await asyncio.gather(
+                        _search_engines_async(search_query, llm_client=llm_client),
+                        search_onionsearch(q),
+                    )
+                    onion_status = get_last_onionsearch_status()
+                    onionsearch_status.update(onion_status)
+                    if any(status.startswith("error_") or status.startswith("http_") for status in onion_status.values()):
+                        onionsearch_error = True
                     all_links: list[dict] = []
                     for er in engine_results:
                         weight = 0.5
@@ -1110,12 +1148,24 @@ async def _run_investigation_task(
                             link["source_engine"] = er.name
                             link["source_weight"] = weight
                             all_links.append(link)
+                    for onion_result in onion_results:
+                        source_name = onion_result.get("source", "")
+                        if source_name in onionsearch_counts:
+                            onionsearch_counts[source_name] += 1
+                        all_links.append({
+                            "link": onion_result.get("url", ""),
+                            "title": onion_result.get("title", ""),
+                            "snippet": onion_result.get("snippet", ""),
+                            "source_engine": source_name,
+                            "source_weight": 0.7,
+                        })
                     lang_results = _search_dedupe(all_links)
                     lang_results.sort(key=lambda r: r.get("source_weight", 0.5), reverse=True)
                     for result in lang_results:
                         result["search_language"] = lang_code
                     return lang_results
                 except Exception as e:
+                    onionsearch_error = True
                     logger.info("[%s] [%s] search failed: %s", inv_uuid, lang_code, e)
                     return []
 
@@ -1356,80 +1406,94 @@ async def _run_investigation_task(
                 logger.info("[%s] RSS scraping failed (non-fatal): %s", inv_uuid, exc)
                 return []
 
-        # Hard 5-minute cap on the entire parallel phase (search + enrichment +
-        # crawler + paste scraping + github scraping + gitlab scraping + RSS
-        # feeds).  Each inner function also has its own timeout so partial
-        # results are preserved even if only one hangs.
-        # return_exceptions=True ensures one failing task never cancels the others.
-        try:
-            _gr = await asyncio.wait_for(
-                asyncio.gather(
-                    run_search_and_filter(),
-                    run_enrichment(),
-                    run_crawler_task(),
-                    run_paste_scraping_task(),
-                    run_github_scraping_task(),
-                    run_gitlab_scraping_task(),
-                    run_rss_scraping_task(),
-                    return_exceptions=True,
-                ),
-                timeout=300,
+        async def run_telegram_task() -> list:
+            if not _telegram_credentials_available():
+                logger.info("[%s] Telegram: credentials not configured", inv_uuid)
+                return []
+            try:
+                from sources.telegram import fetch_telegram_messages
+                return await asyncio.wait_for(
+                    fetch_telegram_messages(_telegram_channels(), query),
+                    timeout=120,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[%s] Telegram timed out after 120s", inv_uuid)
+                return []
+            except Exception as exc:
+                logger.info("[%s] Telegram failed (non-fatal): %s", inv_uuid, exc)
+                raise
+
+        # Hard cap on the entire parallel phase (search + enrichment + crawler +
+        # paste scraping + github + gitlab + RSS feeds).  Each inner function
+        # also has its own timeout so a single slow source can't stall the phase.
+        #
+        # Issue 1 — we must NOT discard work that already finished when the
+        # overall deadline fires.  Each source runs as its own task with its own
+        # result slot; whatever has genuinely completed by the deadline is kept,
+        # and only tasks still in flight are marked as timed out — never
+        # conflated with sources that completed or errored.
+        _parallel_specs = [
+            ("tor_search", run_search_and_filter),
+            ("enrichment", run_enrichment),
+            ("crawler", run_crawler_task),
+            ("paste_sites", run_paste_scraping_task),
+            ("github", run_github_scraping_task),
+            ("gitlab", run_gitlab_scraping_task),
+            ("rss_feeds", run_rss_scraping_task),
+            ("telegram", run_telegram_task),
+        ]
+        _parallel_tasks: dict[str, asyncio.Task] = {
+            name: asyncio.ensure_future(fn()) for name, fn in _parallel_specs
+        }
+        _parallel_deadline = _phase_timeout("parallel_sources")
+        _done, _pending = await asyncio.wait(
+            _parallel_tasks.values(), timeout=_parallel_deadline
+        )
+        if _pending:
+            logger.warning(
+                "[%s] Parallel phase hit %ds cap — %d source(s) still running "
+                "(marked timed_out); continuing with %d completed source(s)",
+                inv_uuid, _parallel_deadline, len(_pending),
+                len(_parallel_tasks) - len(_pending),
             )
-        except asyncio.TimeoutError:
-            logger.warning("[%s] Parallel phase hit 300s hard cap — using empty results", inv_uuid)
-            _gr = [[], [], [], [], [], [], []]
+            for _t in _pending:
+                _t.cancel()
+            # Await the cancellations so no source task is left orphaned.
+            await asyncio.gather(*_pending, return_exceptions=True)
 
+        # After the optional cancel-and-gather above, every task is now done —
+        # either it completed (kept), raised (error), or was cancelled at the
+        # deadline (timed_out).  A task that finished in the instant between the
+        # deadline and cancel() lands here as done-with-result, so its work is
+        # still preserved rather than discarded.
         _source_errors: set[str] = set()
+        _source_timeouts: set[str] = set()
+        _parallel_results: dict[str, list] = {}
+        for _name, _task in _parallel_tasks.items():
+            if _task.cancelled() or not _task.done():
+                logger.warning("[%s] Source '%s' did not finish in time (timed_out)", inv_uuid, _name)
+                _source_timeouts.add(_name)
+                _parallel_results[_name] = []
+                continue
+            _exc = _task.exception()
+            if _exc is not None:
+                logger.warning("[%s] Source '%s' task raised: %s", inv_uuid, _name, _exc)
+                _source_errors.add(_name)
+                _parallel_results[_name] = []
+            else:
+                _parallel_results[_name] = _task.result()
 
-        if isinstance(_gr[0], Exception):
-            logger.warning("[%s] Search+filter task raised: %s", inv_uuid, _gr[0])
-            _source_errors.add("tor_search")
-            search_urls = []
-        else:
-            search_urls = _gr[0]
-
-        if isinstance(_gr[1], Exception):
-            logger.warning("[%s] Enrichment task raised: %s", inv_uuid, _gr[1])
-            _source_errors.add("enrichment")
-            enrichment_pages = []
-        else:
-            enrichment_pages = _gr[1]
-
-        if isinstance(_gr[2], Exception):
-            logger.warning("[%s] Crawler task raised: %s", inv_uuid, _gr[2])
-            crawler_urls = []
-        else:
-            crawler_urls = _gr[2]
-
-        if isinstance(_gr[3], Exception):
-            logger.warning("[%s] Paste scraping task raised: %s", inv_uuid, _gr[3])
-            _source_errors.add("paste_sites")
-            paste_pages = []
-        else:
-            paste_pages = _gr[3]
-
-        if isinstance(_gr[4], Exception):
-            logger.warning("[%s] GitHub scraping task raised: %s", inv_uuid, _gr[4])
-            _source_errors.add("github")
-            github_pages = []
-        else:
-            github_pages = _gr[4]
-
-        if isinstance(_gr[5], Exception):
-            logger.warning("[%s] GitLab scraping task raised: %s", inv_uuid, _gr[5])
-            _source_errors.add("gitlab")
-            gitlab_pages = []
-        else:
-            gitlab_pages = _gr[5]
-
-        if isinstance(_gr[6], Exception):
-            logger.warning("[%s] RSS scraping task raised: %s", inv_uuid, _gr[6])
-            _source_errors.add("rss_feeds")
-            rss_pages = []
-        else:
-            rss_pages = _gr[6]
+        search_urls = _parallel_results["tor_search"]
+        enrichment_pages = _parallel_results["enrichment"]
+        crawler_urls = _parallel_results["crawler"]
+        paste_pages = _parallel_results["paste_sites"]
+        github_pages = _parallel_results["github"]
+        gitlab_pages = _parallel_results["gitlab"]
+        rss_pages = _parallel_results["rss_feeds"]
+        telegram_pages = _parallel_results["telegram"]
 
         await _update_progress(inv_uuid, 2)
+        _metric_finish("source_gathering")
         if await _check_cancelled(inv_uuid, investigation_id):
             return
 
@@ -1450,8 +1514,13 @@ async def _run_investigation_task(
         _otx_key = (resolved_keys.get("OTX_API_KEY") or "").strip()
         _vt_key = os.getenv("VT_API_KEY", "").strip()
         _st_key = os.getenv("SECURITYTRAILS_API_KEY", "").strip()
+        # abuse.ch (MalwareBazaar / ThreatFox / URLhaus) now require a free
+        # Auth-Key.  Absence means those sources could not run at all (Issue 4).
+        _abusech_key = os.getenv("ABUSECH_API_KEY", "").strip()
 
         def _src_status(count: int, error_key: str | None = None) -> str:
+            if error_key and error_key in _source_timeouts:
+                return "timed_out"
             if error_key and error_key in _source_errors:
                 return "error"
             return f"ok_{count}_results" if count > 0 else "ok_0_results"
@@ -1473,14 +1542,20 @@ async def _run_investigation_task(
 
         sources_used["securitytrails"] = "skipped_no_key" if not _st_key else "skipped_not_implemented"
 
-        # Free enrichment sources
+        # abuse.ch family (MalwareBazaar / ThreatFox / URLhaus) — these require a
+        # free Auth-Key (ABUSECH_API_KEY).  When it's missing they cannot run, so
+        # report skipped_no_key rather than ok_0_results, which would read as
+        # "ran fine, found nothing" (Issue 4).  Same pattern as otx/virustotal.
         for _skey, _psrc in [
             ("malwarebazaar", "malwarebazaar"),
             ("threatfox", "threatfox"),
             ("urlhaus", "urlhaus"),
         ]:
-            n = sum(1 for p in enrichment_pages if p.get("source") == _psrc)
-            sources_used[_skey] = _src_status(n, "enrichment")
+            if not _abusech_key:
+                sources_used[_skey] = "skipped_no_key"
+            else:
+                n = sum(1 for p in enrichment_pages if p.get("source") == _psrc)
+                sources_used[_skey] = _src_status(n, "enrichment")
 
         _rl_n = sum(
             1 for p in enrichment_pages
@@ -1488,14 +1563,27 @@ async def _run_investigation_task(
         )
         sources_used["ransomware_live"] = _src_status(_rl_n, "enrichment")
 
+        # ransomlook.io — second ransomware tracker (excludes .onion scrape seeds)
+        _rlook_n = sum(
+            1 for p in enrichment_pages
+            if p.get("source") == "ransomlook" and not p.get("_scrape_seed")
+        )
+        sources_used["ransomlook"] = _src_status(_rlook_n, "enrichment")
+
         _cisa_n = sum(1 for p in enrichment_pages if p.get("source") in ("cisa_kev", "cisa_advisory"))
         sources_used["cisa"] = _src_status(_cisa_n, "enrichment")
+
+        # NVD 2.0 — full CVE metadata (no key required; complements CISA KEV)
+        _nvd_n = sum(1 for p in enrichment_pages if p.get("source") == "nvd")
+        sources_used["nvd"] = _src_status(_nvd_n, "enrichment")
 
         _shodan_n = sum(1 for p in enrichment_pages if p.get("source") == "shodan_internetdb")
         sources_used["shodan"] = _src_status(_shodan_n, "enrichment")
 
         # Tor search
-        if "tor_search" in _source_errors:
+        if "tor_search" in _source_timeouts:
+            sources_used["tor_search"] = "timed_out"
+        elif "tor_search" in _source_errors:
             sources_used["tor_search"] = "error"
         else:
             n = len(search_urls)
@@ -1504,6 +1592,8 @@ async def _run_investigation_task(
         # Clearnet scrapers
         if not _github_scraping_enabled():
             sources_used["github"] = "skipped_disabled"
+        elif "github" in _source_timeouts:
+            sources_used["github"] = "timed_out"
         elif "github" in _source_errors:
             sources_used["github"] = "error"
         else:
@@ -1511,6 +1601,8 @@ async def _run_investigation_task(
 
         if not _gitlab_scraping_enabled():
             sources_used["gitlab"] = "skipped_disabled"
+        elif "gitlab" in _source_timeouts:
+            sources_used["gitlab"] = "timed_out"
         elif "gitlab" in _source_errors:
             sources_used["gitlab"] = "error"
         else:
@@ -1518,6 +1610,8 @@ async def _run_investigation_task(
 
         if not _paste_scraping_enabled():
             sources_used["paste_sites"] = "skipped_disabled"
+        elif "paste_sites" in _source_timeouts:
+            sources_used["paste_sites"] = "timed_out"
         elif "paste_sites" in _source_errors:
             sources_used["paste_sites"] = "error"
         else:
@@ -1525,16 +1619,36 @@ async def _run_investigation_task(
 
         if not _rss_scraping_enabled():
             sources_used["rss_feeds"] = "skipped_disabled"
+        elif "rss_feeds" in _source_timeouts:
+            sources_used["rss_feeds"] = "timed_out"
         elif "rss_feeds" in _source_errors:
             sources_used["rss_feeds"] = "error"
         else:
             sources_used["rss_feeds"] = _src_status(len(rss_pages))
 
+        for _engine_name, _engine_key in (("Torch", "torch"), ("Haystack", "haystack")):
+            _status = onionsearch_status.get(_engine_name, "error" if onionsearch_error else "ok")
+            sources_used[_engine_key] = (
+                _status if _status.startswith("error_") or _status.startswith("http_")
+                else _src_status(onionsearch_counts[_engine_name])
+            )
+        if not _telegram_credentials_available():
+            sources_used["telegram"] = "skipped_no_key"
+        elif "telegram" in _source_errors:
+            sources_used["telegram"] = "error"
+        else:
+            sources_used["telegram"] = _src_status(len(telegram_pages))
+
         # DNS, domain, hash, and email reputation placeholders — updated after those steps complete
+        # DNS, domain, hash, email, breach, and infostealer reputation placeholders
+        # — updated after those post-extraction steps complete.
         sources_used["circl_pdns"] = "pending"
         sources_used["domain_reputation"] = "pending"
         sources_used["hash_reputation"] = "pending"
         sources_used["email_reputation"] = "pending"
+        sources_used["xposedornot"] = "pending"
+        sources_used["leakcheck"] = "pending"
+        sources_used["hudsonrock"] = "pending"
         _sources_used_cache[investigation_id] = sources_used
         _update_investigation_metadata(
             investigation_id,
@@ -1604,6 +1718,7 @@ async def _run_investigation_task(
                 pass
 
         # ===== STEP 4.5: Vector Cache Lookup (no session held) =====
+        _metric_start("scraping")
         logger.info(
             "[%s] STEP 4.5: Checking vector cache for %d URLs...",
             inv_uuid,
@@ -1705,6 +1820,12 @@ async def _run_investigation_task(
                 blocked_count,
             )
         scraped_pages = clean_pages
+        run_metrics.record_scraping(
+            attempted=len(all_urls_to_scrape),
+            fetched=len(cached_dict) + sum(1 for text in freshly_scraped.values() if text),
+            cache_hits=len(cached_dict),
+        )
+        _metric_finish("scraping")
 
         scraped_count = len(scraped_pages)
         logger.info(
@@ -1846,6 +1967,36 @@ async def _run_investigation_task(
         else:
             logger.info("[%s] RSS feeds: no relevant articles", inv_uuid)
 
+        if telegram_pages:
+            for tp in telegram_pages:
+                u = tp.get("url") or ""
+                t = tp.get("text") or ""
+                if u and t.strip():
+                    page_records.append({
+                        "url": u,
+                        "text": t,
+                        "content": t,
+                        "source_type": "telegram",
+                        "source_name": "Telegram",
+                    })
+            logger.info("[%s] Added %d Telegram messages to extraction pool", inv_uuid, len(telegram_pages))
+
+        # Apply the same content-safety gate to direct-source pages and collapse
+        # mirrored material before entity extraction/page counting.
+        from utils.content_safety import sanitize_content
+        from utils.content_dedup import deduplicate_page_records
+        safe_page_records = []
+        for record in page_records:
+            clean_text, flagged = sanitize_content(record.get("text") or record.get("content") or "")
+            if flagged:
+                continue
+            record = dict(record)
+            record["text"] = clean_text
+            record["content"] = clean_text
+            safe_page_records.append(record)
+        page_records = deduplicate_page_records(safe_page_records)
+        scraped_count = len(page_records)
+
         non_empty_records = [r for r in page_records if len((r.get("text") or "").strip()) > 100]
         logger.info("[%s] Non-empty pages (>100 chars): %s", inv_uuid, len(non_empty_records))
         if not non_empty_records:
@@ -1879,6 +2030,7 @@ async def _run_investigation_task(
             logger.info("[%s] Language detection failed (non-fatal): %s", inv_uuid, e)
 
         # ===== STEP 6: Entity extraction (no session held) =====
+        _metric_start("entity_extraction")
         logger.info("[%s] STEP 6: Extracting entities...", inv_uuid)
         extraction_input = non_empty_records if non_empty_records else page_records
 
@@ -1920,6 +2072,10 @@ async def _run_investigation_task(
                 run_llm_extraction=run_llm_extraction,
                 max_llm_pages=max_llm_pages,
                 llm_progress_callback=_llm_extraction_progress,
+                # Graph construction is the dedicated STEP 7 phase below;
+                # keeping the extractor's compatibility default enabled here
+                # would build and persist the same graph twice.
+                build_graph_on_complete=False,
             )
             total_entities = sum(r.entity_count for r in extraction_results)
             logger.info("[%s] Extracted %s entities", inv_uuid, total_entities)
@@ -1936,10 +2092,12 @@ async def _run_investigation_task(
             total_entities = 0
 
         await _update_progress(inv_uuid, 5, entity_count=total_entities)
+        _metric_finish("entity_extraction")
         if await _check_cancelled(inv_uuid, investigation_id):
             return
 
         # ===== Phase 6.2: Wrapped enrichment cluster =====
+        _metric_start("enrichment")
         # Steps 6.1, 6.8, 6.2, 6.3, 6.4 are all reputation enrichment with
         # per-step timeouts.  The outer _run_with_timeout cap is the final
         # safety net if every sub-timeout fires.  Returns updated state.
@@ -1962,6 +2120,7 @@ async def _run_investigation_task(
                 total_entities = sum(r.entity_count for r in extraction_results)
             except Exception:
                 pass
+        _metric_finish("enrichment")
 
         # ===== STEP 6.5: Cross-reference against seed data (short-lived session) =====
         logger.info("[%s] STEP 6.5: Cross-referencing with historical data...", inv_uuid)
@@ -1988,7 +2147,6 @@ async def _run_investigation_task(
         # ===== STEP 6.7: Blockchain Wallet Enrichment (wrapped in to_thread with own session) =====
         logger.info(f"[{inv_uuid}] STEP 6.7: Enriching wallet entities...")
         try:
-            from sources.blockchain import enrich_wallets_for_investigation
             from config import BLOCKCYPHER_TOKEN, ETHERSCAN_API_KEY
 
             blockchain_stats = await asyncio.to_thread(
@@ -2082,15 +2240,18 @@ async def _run_investigation_task(
             )
 
         # ===== Phase 6.2: Wrapped graph build (STEP 7) =====
+        _metric_start("graph_build")
         await _run_with_timeout(
             _build_graph_phase(extraction_results, inv_uuid, investigation_id),
             PHASE_TIMEOUTS["graph_build"],
             "graph_build",
             investigation_id,
         )
+        _metric_finish("graph_build")
         await _update_progress(inv_uuid, 7)
 
         # ===== Phase 6.2: Wrapped summary (STEP 8) =====
+        _metric_start("summary_generation")
         summary = await _run_with_timeout(
             _generate_summary_phase(
                 extraction_results,
@@ -2108,21 +2269,32 @@ async def _run_investigation_task(
         )
         if summary is None:
             summary = "Summary generation timed out."
+        _metric_finish("summary_generation")
         logger.info("[%s] Summary preview: %s", inv_uuid, (summary or "")[:100])
         await _update_progress(inv_uuid, 8)
 
         # ===== Phase 6.2: Wrapped finalize (Final: DB update) =====
+        _metric_start("finalization")
         await _run_with_timeout(
             _finalize_phase(inv_uuid, summary),
             PHASE_TIMEOUTS["finalize"],
             "finalize",
             investigation_id,
         )
+        _metric_finish("finalization")
+        persist_metrics(run_metrics)
         await _update_progress(inv_uuid, 9)
         logger.info("[%s] Investigation COMPLETED (run_id=%s)", inv_uuid, run_id)
 
     except Exception as exc:
         logger.exception("[%s] Investigation FAILED with exception: %s", investigation_id, exc)
+        try:
+            if "run_metrics" in locals():
+                for _step_name in list(run_metrics.steps):
+                    run_metrics.finish(_step_name)
+                persist_metrics(run_metrics)
+        except Exception:
+            pass
         try:
             from db.models import Investigation
             from db.session import get_session
@@ -2283,10 +2455,8 @@ async def create_investigation(
                 session.commit()
                 investigation_id = str(inv.id)
         except Exception as exc:
-            logger.exception("Failed to create investigation record: %s", exc)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Could not persist investigation: {exc!s}"[:300],
+            raise internal_http_exception(
+                exc, context="create investigation record"
             )
     else:
         investigation_id = str(uuid.uuid4())
@@ -2363,7 +2533,6 @@ async def cancel_investigation(
         raise HTTPException(status_code=422, detail="Invalid investigation ID format")
 
     from db.session import get_session
-    from db.models import Investigation
     from db.queries import get_investigation_by_id_or_run
 
     try:
@@ -2380,6 +2549,11 @@ async def cancel_investigation(
                     detail=f"Investigation cannot be cancelled (current status: {inv.status})",
                 )
             # Set flag by both run_id and inv.id — the pipeline task uses inv.id
+            from db.models import Investigation
+            session.query(Investigation).filter_by(id=inv.id).update(
+                {"cancellation_requested": True}
+            )
+            session.commit()
             _set_cancelled(investigation_id)
             _set_cancelled(str(inv.id))
             logger.info(
@@ -2390,8 +2564,7 @@ async def cancel_investigation(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("cancel_investigation failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Internal error: {exc!s}"[:300])
+        raise internal_http_exception(exc, context="cancel_investigation")
 
     return _get_db_investigation(investigation_id)
 
@@ -2614,8 +2787,12 @@ async def get_temporal_analysis(investigation_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("get_temporal_analysis failed: %s", exc)
-        return {"error": "analysis_failed", "message": str(exc)[:300]}
+        correlation_id = log_exception(exc, context="get_temporal_analysis")
+        return {
+            "error": "analysis_failed",
+            "message": GENERIC_ERROR_MESSAGE,
+            "correlation_id": correlation_id,
+        }
 
 
 @router.get("/{investigation_id}")
@@ -2661,7 +2838,6 @@ async def get_investigation_entities(
         from db.models import Entity, InvestigationEntityLink
         from db.queries import get_investigation_by_id_or_run
         from graph.builder import _make_node_id
-        from sqlalchemy import func
         from utils.ioc_freshness import get_freshness_tag, get_freshness_display
         from utils.defang import defang_value, defang_text
 
@@ -2761,11 +2937,7 @@ async def get_investigation_entities(
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid investigation ID format")
     except Exception as exc:
-        logger.exception("get_investigation_entities failed: %s", exc)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal error: {exc!s}"[:500],
-        )
+        raise internal_http_exception(exc, context="get_investigation_entities")
 
 @router.get("/{investigation_id}/entities/export/csv")
 async def export_investigation_entities_csv(
@@ -2790,7 +2962,6 @@ async def export_investigation_entities_csv(
         from db.session import get_session
         from db.models import Entity, InvestigationEntityLink
         from db.queries import get_investigation_by_id_or_run
-        from sqlalchemy import func
 
         with get_session() as session:
             inv = get_investigation_by_id_or_run(session, inv_uuid)
@@ -2856,10 +3027,8 @@ async def export_investigation_entities_csv(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("export_investigation_entities_csv failed: %s", exc)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal error: {exc!s}"[:500],
+        raise internal_http_exception(
+            exc, context="export_investigation_entities_csv"
         )
 
 
@@ -2954,8 +3123,7 @@ async def get_investigation_graph(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("get_investigation_graph failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_http_exception(exc, context="get_investigation_graph")
 
 
 @router.get("/{investigation_id}/graph/stats")

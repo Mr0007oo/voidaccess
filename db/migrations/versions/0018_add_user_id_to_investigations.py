@@ -16,18 +16,23 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "investigations",
-        sa.Column(
-            "user_id",
-            sa.Integer(),
-            sa.ForeignKey("users.id", ondelete="SET NULL"),
-            nullable=True,
-        ),
-    )
-    op.create_index("ix_investigations_user_id", "investigations", ["user_id"])
+    with op.batch_alter_table("investigations", recreate="auto") as batch_op:
+        batch_op.add_column(
+            sa.Column(
+                "user_id",
+                sa.Integer(),
+                sa.ForeignKey(
+                    "users.id",
+                    name="fk_investigations_user_id",
+                    ondelete="SET NULL",
+                ),
+                nullable=True,
+            )
+        )
+        batch_op.create_index("ix_investigations_user_id", ["user_id"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_investigations_user_id", table_name="investigations")
-    op.drop_column("investigations", "user_id")
+    with op.batch_alter_table("investigations", recreate="auto") as batch_op:
+        batch_op.drop_index("ix_investigations_user_id")
+        batch_op.drop_column("user_id")

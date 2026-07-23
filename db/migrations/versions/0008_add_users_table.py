@@ -6,7 +6,6 @@ Create Date: 2026-04-17 22:45:00.000000
 
 """
 from alembic import op
-import sqlalchemy as sa
 from passlib.context import CryptContext
 from datetime import datetime, timezone
 

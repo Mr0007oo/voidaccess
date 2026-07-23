@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
-from typing import Any
 
 from analysis.temporal import (  # noqa: E402 — imported at module level for patchability
     build_activity_timeline,

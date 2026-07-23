@@ -10,7 +10,7 @@ import asyncio
 import aiohttp
 import logging
 import uuid
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 from datetime import datetime, timezone
 
 from db.models import Entity, EntityRelationship, RelationshipType

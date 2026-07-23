@@ -139,7 +139,7 @@ All tables are in `db/models.py`. Primary keys are UUID4 generated in Python (in
 | `investigation_id` | UUID FK → investigations (SET NULL) | |
 | `first_seen` | DateTime TZ | |
 
-Relationship types: `CO_APPEARED_ON`, `POSTED_BY`, `LINKED_TO`, `PAID_TO`, `MEMBER_OF`, `USED`, `CLAIMED`, `LIKELY_SAME_ACTOR`, `CONFIRMED_SAME_ACTOR`, `FUNDED_BY`, `POSSIBLE_SAME_AUTHOR`
+Relationship types: `CO_APPEARED_ON`, `POSTED_BY`, `LINKED_TO`, `PAID_TO`, `MEMBER_OF`, `USES`, `CLAIMED`, `LIKELY_SAME_ACTOR`, `CONFIRMED_SAME_ACTOR`, `FUNDED_BY`, `POSSIBLE_SAME_AUTHOR`
 
 **`investigation_entity_links`** — cross-investigation entity deduplication junction
 
@@ -219,7 +219,7 @@ Unique constraint: `(user_id, key_name)`
 
 Redis is optional (`REDIS_URL`). When present it stores:
 
-- **JWT blacklist**: revoked tokens from `POST /auth/logout`. On Redis failure the blacklist check silently passes (fail-open).
+- **JWT blacklist**: revoked tokens from `POST /auth/logout`. Behaviour on Redis availability is a deliberate decision: when `REDIS_URL` is unset the blacklist is disabled by design (fail-open); when `REDIS_URL` is set but Redis is unreachable the revocation check **fails closed** (authenticated requests get `503` with an operator warning) rather than silently passing. See §"JWT Blacklist" below.
 - **Rate-limit counters**: `slowapi` uses Redis for distributed rate limiting. Falls back to in-memory counting when Redis is unavailable.
 
 In-process Python dicts (`_infra_cluster_cache`, `_sources_used_cache`, `_cancel_flags`) are used for per-investigation state that does not need to survive restarts.
@@ -529,9 +529,9 @@ Paste sites and RSS feeds can be routed through ScrapingAnt to reduce blocking a
 
 | Variable | Description |
 |---|---|
-| `SCRAPINGANT_API_KEY` | Credential for the Web Scraping API and for proxy authentication. |
-| `SCRAPINGANT_PROXY_USERNAME` | Residential or datacenter proxy username from the ScrapingAnt dashboard. |
-| `SCRAPINGANT_PROXY_PASSWORD` | Residential or datacenter proxy password from the ScrapingAnt dashboard. |
+| `SCRAPINGANT_API_KEY` | Credential exclusively for the Web Scraping API transport. |
+| `SCRAPINGANT_PROXY_USERNAME` | Residential or datacenter proxy username from the ScrapingAnt dashboard; separate from `SCRAPINGANT_API_KEY`. |
+| `SCRAPINGANT_PROXY_PASSWORD` | Residential or datacenter proxy password from the ScrapingAnt dashboard; used together with `SCRAPINGANT_PROXY_USERNAME`. |
 | `SCRAPINGANT_PROXY_TYPE` | Selects `residential` or `datacenter` for the proxy transports. |
 | `VOIDACCESS_USE_PROXIES` | Enables the REST API transport for clearnet scraping. |
 | `VOIDACCESS_USE_PROXY` | Enables the proxy transport for clearnet scraping. |
@@ -677,14 +677,18 @@ All six sources below run concurrently via a single `asyncio.gather()` inside `s
 | **ThreatFox** | IOCs by search term or last 24h feed; ioc_type, ioc_value, malware, confidence | `ABUSECH_API_KEY` — optional | Yes |
 | **URLhaus** | Malicious URLs by tag; url_status, threat, reporter | `ABUSECH_API_KEY` — optional | Yes |
 | **ransomware.live** | Group profiles, leak-site `.onion` addresses, recent victim claims; also injects `.onion` seeds into the scrape queue | None | Yes (public API) |
-| **Secondary enrichment** (`_enrich_new_sources`) | Calls CISA, Shodan, VirusTotal, and historical intel concurrently (55s cap) | Varies — see below | Varies |
+| **ransomlook.io** | Second ransomware-group tracker (different corpus) — group profiles, leak-site `.onion` addresses, recent victim posts; cross-validates ransomware.live. Onion seeds are URL-normalised to match ransomware.live so shared leak sites dedup to a single scrape seed | None | Yes (public API) |
+| **Secondary enrichment** (`_enrich_new_sources`) | Calls CISA, NVD, Shodan, VirusTotal, and historical intel concurrently (55s cap) | Varies — see below | Varies |
+
+The Phase-A fan-out preserves partial results: if the 59s (outer) or 55s (nested) deadline hits while some sources are still running, the results of sources that already finished are kept rather than discarding the whole batch (`_gather_with_partial_results`).
 
 #### Secondary enrichment sources (nested, 55-second cap)
 
 | Source | What it enriches | Key required |
 |---|---|---|
-| **CISA KEV** | CVE entities: vendor, product, exploitation date, description | None |
+| **CISA KEV** | CVE entities: vendor, product, exploitation date, description (only actively-exploited CVEs) | None |
 | **CISA Advisories** | Advisory titles, URLs, dates correlated to the query | None |
+| **NVD 2.0** | CVE entities: CVSS base score/severity/vector, CWE weaknesses, description, published/modified dates — for ANY CVE, not just KEV. Capped at 15 CVEs with a soft 45s budget | `NVD_API_KEY` — optional; raises rate limit 5→50 req/30s |
 | **Shodan InternetDB** | IP entities: open ports, hostnames, tags, known CVEs | None (free public API) |
 | **VirusTotal** | File hash entities: detection ratio, threat label, first/last seen | `VT_API_KEY` — skipped if absent; free tier: 4 req/min; max 20 hashes |
 | **MITRE ATT&CK overlay** | Technique IDs (T-codes) for actors identified from OTX/ransomware.live | None (local lookup via `historical_intel.py`) |
@@ -754,6 +758,25 @@ Cache TTL: 48 h (hashes are immutable). Up to 50 hashes per investigation; SHA-2
 
 Custom-domain email addresses (non-disposable, non-freemail) also produce new `DOMAIN` entities for downstream domain reputation enrichment.
 
+### 5.7a Breach-Exposure Lookup (Step 6.5)
+
+Complements HIBP (Step 6.4) with two additional breach corpora. HIBP, XposedOrNot, and LeakCheck draw from different corpora, so all three run and each surfaces things the others miss. Each reports its own `sources_used` status (`xposedornot`, `leakcheck`).
+
+| Source | What it enriches | Key required | Free tier | Cache TTL |
+|---|---|---|---|---|
+| **XposedOrNot** | Breach names for an email, including stealer-log exposure (`stealer_log_exposure` tag) | `XPOSEDORNOT_API_KEY` — optional; free tier fully functional | Yes | 48 h |
+| **LeakCheck** (public) | Breach-source names + exposed-data categories; lightweight corroboration signal | None (unauthenticated) | Yes | 48 h |
+
+When an email appears in BOTH corpora the entity is tagged `breach_corroborated` (stronger signal than either alone). Pacing: XposedOrNot ≲2 req/s, LeakCheck gentle — both bound by a concurrency semaphore + per-request sleep. Up to 30 emails per investigation.
+
+### 5.7b Infostealer Intelligence (Step 6.6)
+
+| Source | What it enriches | Key required | Free tier | Cache TTL |
+|---|---|---|---|---|
+| **Hudson Rock Cavalier** | `EMAIL_ADDRESS`: whether the email appears in stealer logs and on how many compromised machines (`hudsonrock_infostealer` tag). `DOMAIN`: employee/user counts in stealer logs — org-level infostealer exposure | None | Yes (public API) | 24 h |
+
+Higher-signal than breach dumps: reports machines actively infected by infostealer malware, not just old breach appearances. Runs for both `EMAIL_ADDRESS` (up to 30) and `DOMAIN` (up to 20, freemail domains skipped). Reports under `hudsonrock`.
+
 ### 5.8 Entity Enrichment Pipeline Summary
 
 The following table maps all post-extraction enrichment steps to their pipeline position, entity types, and source modules.
@@ -764,6 +787,8 @@ The following table maps all post-extraction enrichment steps to their pipeline 
 | **6.2** Domain reputation | `DOMAIN`, `DOMAIN_NAME` (up to 30) | crt.sh, URLScan.io, Wayback Machine | `URLSCAN_API_KEY`, `URLSCAN_SUBMIT` |
 | **6.3** Hash reputation | `FILE_HASH_MD5/SHA1/SHA256` (up to 50) | Hybrid Analysis, MalwareBazaar, ThreatFox, VirusTotal | `HYBRID_ANALYSIS_API_KEY`, `VT_API_KEY`, `ABUSECH_API_KEY` |
 | **6.4** Email reputation | `EMAIL_ADDRESS` (up to 30) | HIBP, EmailRep, disposable blocklist | `HIBP_API_KEY`, `EMAILREP_API_KEY` |
+| **6.5** Breach exposure | `EMAIL_ADDRESS` (up to 30) | XposedOrNot, LeakCheck | `XPOSEDORNOT_API_KEY` (optional) |
+| **6.6** Infostealer | `EMAIL_ADDRESS` (up to 30), `DOMAIN` (up to 20) | Hudson Rock Cavalier | None |
 | **6.7** Blockchain | `BITCOIN_ADDRESS`, `ETHEREUM_ADDRESS` (up to 10) | BlockCypher, Etherscan | `BLOCKCYPHER_TOKEN`, `ETHERSCAN_API_KEY` |
 | **6.8** DNS/WHOIS | `IP_ADDRESS`, `DOMAIN` (up to 20 each) | CIRCL PDNS, CIRCL PSSL, RDAP, SecurityTrails | `SECURITYTRAILS_API_KEY`, `DNS_ENRICHMENT_ENABLED` |
 
@@ -1317,7 +1342,7 @@ At least one LLM provider key is needed for query refinement, result filtering, 
 | `GITLAB_MAX_RESULTS` | `15` | Max GitLab results per investigation |
 | `RSS_FEEDS_ENABLED` | `true` | Set `false` to disable RSS feed scraping |
 | `RSS_MAX_ARTICLES` | `20` | Max RSS articles per investigation |
-| `SCRAPINGANT_API_KEY` | — | Optional. Credential for the Web Scraping API transport and the proxy transports. Routes paste site and RSS feed fetches through ScrapingAnt to improve reliability on flaky upstreams. Affects clearnet scraping only — never Tor, `.onion`, GitHub, or GitLab (those two carry auth tokens and are permanently excluded). Any transport failure (timeout, auth, 5xx, malformed response) silently falls back to a direct request. See §3.2 for the routing mechanism. |
+| `SCRAPINGANT_API_KEY` | — | Optional. Credential exclusively for the Web Scraping API transport. Routes paste site and RSS feed fetches through ScrapingAnt to improve reliability on flaky upstreams. Affects clearnet scraping only — never Tor, `.onion`, GitHub, or GitLab (those two carry auth tokens and are permanently excluded). Any transport failure (timeout, auth, 5xx, malformed response) silently falls back to a direct request. See §3.2 for the routing mechanism. |
 | `SCRAPINGANT_PROXY_TYPE` | `residential` | Pool type for the proxy transports. `residential` (default; harder to detect, slightly higher latency) or `datacenter` (faster, cheaper, easier to fingerprint). Selects the proxy pool and does not change the host. Env-var-only; not a secret. Ignored when neither transport is active. |
 | `VOIDACCESS_USE_PROXIES` | `false` | **REST API transport.** Set to `true` to route paste sites and RSS feeds through the ScrapingAnt Web Scraping API (`POST https://api.scrapingant.com/v2/general`). Without `SCRAPINGANT_API_KEY`, this is a no-op. Legacy pre-1.6.2 toggle; CLI: also set by `voidaccess configure proxy --enable / --disable` or the `--use-scraping-api` flag on `voidaccess investigate`. Mutually exclusive with `VOIDACCESS_USE_PROXY`; if both are set, the proxy transport wins for that request. |
 | `VOIDACCESS_USE_PROXY` | `false` | **Proxy transport.** Set to `true` to route requests through the configured ScrapingAnt proxy pool. Requires the proxy username/password pair and uses `SCRAPINGANT_PROXY_TYPE` to select the pool. Mutually exclusive with `VOIDACCESS_USE_PROXIES` — if both are set, the proxy transport wins for that request. CLI: `voidaccess configure proxy --enable-proxy / --disable-proxy`. New in v1.6.0. |
@@ -1333,7 +1358,7 @@ At least one LLM provider key is needed for query refinement, result filtering, 
 
 | Variable | Default | Notes |
 |---|---|---|
-| `REDIS_URL` | — | Redis connection string. Optional. When absent, JWT blacklist fails open and rate-limit counters are in-memory |
+| `REDIS_URL` | — | Redis connection string. Optional. When absent, JWT blacklist is disabled by design (tokens valid to expiry) and rate-limit counters are in-memory. When **set** but Redis is unreachable, authenticated requests fail closed with `503` until Redis recovers (see "JWT Blacklist" in Known Behaviors) |
 | `ENRICHMENT_REDIS_URL` | — | Optional Redis override used by the enrichment cache when `REDIS_URL` is not set |
 | `DISABLE_RATE_LIMIT` | `false` | Set `true` to bypass all rate limiting (development only) |
 
@@ -1452,9 +1477,15 @@ Concurrent investigations share the same Tor SOCKS5 proxy. Performance degrades 
 
 Free-tier models on OpenRouter enforce per-minute rate limits. The pipeline has exponential backoff with up to 4 retries per LLM call, parsing the `X-RateLimit-Reset` header to determine wait time. Investigations involving many LLM calls (refinement + filter + summary) can stall for several minutes under rate limiting.
 
-### JWT Blacklist Fails Open When Redis is Down
+### JWT Blacklist: Fail-Open by Design, Fail-Closed on Outage
 
-`POST /auth/logout` writes revoked tokens to Redis. If Redis is unavailable, the logout call silently succeeds but the token remains valid until its JWT expiry time. This is the intended fallback to avoid blocking all auth on a Redis outage, but it means logout is best-effort without Redis.
+`POST /auth/logout` writes revoked tokens to Redis. Behaviour depends on whether revocation was opted into (a deliberate decision, not an accident of implementation):
+
+- **`REDIS_URL` unset** — the blacklist is disabled by design. `POST /auth/logout` returns success but is a no-op; tokens remain valid until their 8-hour expiry. Fail-open, for operators who choose not to run Redis.
+- **`REDIS_URL` set, Redis reachable** — revocation is enforced. `POST /auth/logout` blacklists the token; a failed write returns `503`.
+- **`REDIS_URL` set, Redis unreachable** — revocation was opted into, so it is a required control. `is_token_revoked()` raises `BlacklistUnavailableError` and `get_current_user` **fails closed**, rejecting every authenticated request with `503 Service Unavailable` plus an operator warning log, rather than silently honouring a possibly-revoked token. Enforcement resumes automatically once Redis recovers (per-request retry, no restart).
+
+Rationale: single-operator self-hosted tool with 8-hour (not short-lived) tokens — silently accepting revoked tokens during an outage would make logout/session-invalidation unreliable when it matters most, and an attacker could induce an outage to bypass revocation. Operators who prefer availability over revocation can unset `REDIS_URL`.
 
 ### Temporal Analysis Uses Scrape Time, Not Content Time
 
@@ -1475,6 +1506,4 @@ Free-tier models on OpenRouter enforce per-minute rate limits. The pipeline has 
 ### proxy transport Over Plain HTTP Can Return 502
 
 When `VOIDACCESS_USE_PROXY=true` is set and the target URL is plain HTTP (not HTTPS), the ScrapingAnt proxy transport endpoint occasionally returns HTTP 502 instead of the target's content. HTTPS targets succeed reliably. Because real-world paste sites and the curated RSS feed list are nearly universally HTTPS, this only surfaces against an unusual plain-HTTP target and the silent fallback to direct (`sources/proxy_client.py::_fetch_via_proxy_mode` returns `None` on `resp.status >= 500`, then the chokepoint retries without the proxy) still returns usable content. The REST API transport (`VOIDACCESS_USE_PROXIES=true`) is not affected — the same chokepoint has no observed flakiness on plain HTTP via the `/v2/general` endpoint. If a future investigation produces unexpectedly few results from a plain-HTTP source, the cause is this; switching to REST API or to direct is a workaround.
-
-
 
