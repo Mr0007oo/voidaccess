@@ -2,7 +2,37 @@
 
 All notable changes to VoidAccess are documented here.
 
-## [Unreleased]
+## [1.9.0] - 2026-07-23
+
+### Changed
+- Entity identity is now derived through a single shared module,
+  `extractor/identity.py` (`entity_graph_id` / `entity_canonical_id` /
+  `entity_display_id`). The graph builder (`_make_node_id`), the STIX / MISP /
+  Sigma / IOC-package exporters, and the entity API were migrated off their own
+  independent identity logic onto it, so a graph node key and an exporter's
+  lookup key can no longer silently diverge (the recurring STIX threat-actor
+  "silently dropped relationships" bug class). `NormalizedEntity.canonical_value`
+  now returns the genuine canonical form instead of the raw value.
+
+### Fixed
+- Confidence now follows one monotonic, max-based rule across extraction,
+  corroboration boosts, database upserts, and consumers; relationship type
+  definitions are sourced from `graph/model.py`; and `merge_with_db` now
+  records the page host in `corroborating_sources` for every persisted entity.
+  This resolves the three-times-carried corroboration bug from 1.6.4, 1.7.0,
+  and 1.7.1.
+
+- Consolidated confidence consistency and edge-type vocabulary across
+  extraction, persistence, graph construction, and exports; fixed
+  `corroborating_sources`, closing a three-cycle-old known issue.
+- Completed the seven-phase identity-drift remediation through the canonical
+  identity module and migrated graph, STIX, MISP, IOC package, Snort, YARA,
+  CLI browser, `show`, and investigation consumers.
+- Improved CLI honesty with 500-character query validation, live graph-build
+  progress, explicit zero-relationship distinctions, visible degraded
+  community-detection states, expanded completion metrics, and per-source
+  outcome tables.
+- Verified mixed-case and EIP-55 identity behavior with repo-wide sweeps.
 
 ## [1.8.2] - 2026-07-23
 

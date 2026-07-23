@@ -66,14 +66,21 @@ def _resolve_investigation_id(target: str) -> Optional[str]:
 
 class _FakeEntity:
     """Minimal stand-in shaped like extractor.normalizer.NormalizedEntity."""
-    __slots__ = ("entity_type", "value", "confidence", "canonical_value")
+    __slots__ = ("entity_type", "value", "confidence", "_canonical_value")
 
     def __init__(self, entity_type: str, value: str, confidence: float,
                  canonical_value: str | None = None):
         self.entity_type = entity_type
         self.value = value
         self.confidence = confidence
-        self.canonical_value = canonical_value or value
+        # Keep the historical constructor argument for compatibility, but do
+        # not trust a caller-provided derived identity string.
+        from extractor.identity import entity_canonical_id
+        self._canonical_value = entity_canonical_id(self)
+
+    @property
+    def canonical_value(self) -> str:
+        return self._canonical_value
 
 
 class _FakeResult:

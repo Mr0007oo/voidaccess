@@ -29,6 +29,9 @@ from urllib.parse import urlparse
 import networkx as nx
 import sqlalchemy as sa
 
+from types import SimpleNamespace
+
+from extractor.identity import entity_graph_id
 from extractor.normalizer import NormalizedEntity
 from graph.model import EDGE_TYPES, NODE_TYPES
 
@@ -166,12 +169,18 @@ def _make_node_id(entity_type: str, value: str, source_url: str) -> str:
     handle on two different forums produces two distinct nodes (enabling the
     LIKELY_SAME_ACTOR inference pass).  All other entity types are globally
     unique by canonical value.
+
+    This is now a thin wrapper that delegates entirely to
+    ``extractor.identity.entity_graph_id`` — the single source of truth for
+    graph node identity.  Every consumer (STIX/MISP/Sigma/IOC exporters, the
+    entity API) resolves graph nodes through that same function, so a graph
+    node id and an exporter's lookup key can no longer silently diverge (the
+    STIX threat-actor relationship-drop bug class).  Kept as a primitive-arg
+    name because other modules still import and call it directly.
     """
-    if entity_type == "THREAT_ACTOR_HANDLE" and source_url:
-        domain = _extract_domain(source_url)
-        if domain:
-            return f"{value}@{domain}"
-    return value
+    return entity_graph_id(
+        SimpleNamespace(entity_type=entity_type, value=value, source_url=source_url)
+    )
 
 
 def _now_utc() -> datetime:

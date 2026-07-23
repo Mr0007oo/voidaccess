@@ -554,26 +554,30 @@ def get_entities(
         row_dicts = [_entity_row(r) for r in rows]
         try:
             from extractor.normalizer import resolve_entity_type_conflicts
+            from extractor.identity import entity_canonical_id
 
             temp_entities = [
                 SimpleNamespace(
                     entity_type=d.get("entity_type") or "",
-                    value=d.get("canonical_value") or d.get("value") or "",
+                    value=d.get("value") or "",
                     confidence=float(d.get("confidence") or 0.0),
                 )
                 for d in row_dicts
             ]
             resolved = resolve_entity_type_conflicts(temp_entities)
             keep = {
-                ((getattr(e, "entity_type", "") or "").upper(), (getattr(e, "value", "") or "").lower())
+                entity_canonical_id(e)
                 for e in resolved
             }
             return [
                 d for d in row_dicts
                 if (
-                    (d.get("entity_type") or "").upper(),
-                    (d.get("canonical_value") or d.get("value") or "").lower(),
-                ) in keep
+                    entity_canonical_id({
+                        "entity_type": d.get("entity_type") or "",
+                        "value": d.get("value") or "",
+                    })
+                    in keep
+                )
             ]
         except Exception:
             return row_dicts

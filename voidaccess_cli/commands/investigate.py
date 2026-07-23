@@ -21,10 +21,12 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import typer
 from rich.console import Console
+
+from extractor.identity import entity_display_id
 
 # Import reputation enrichment sources (used in Step 6.2–6.4)
 from sources.domain_reputation import enrich_domain_entities
@@ -85,6 +87,7 @@ def run(
     # silently produces a report that looks identical to a genuine one but is
     # just noise from an essentially meaningless search.  Reject up front.
     MIN_QUERY_LENGTH = 3
+    MAX_QUERY_LENGTH = 500
     stripped_query = (query or "").strip()
     if not stripped_query:
         console.print(
@@ -98,6 +101,13 @@ def run(
             f"{len(stripped_query)} character(s); provide at least {MIN_QUERY_LENGTH} "
             "characters of meaningful context so results reflect a real query, "
             "not generic noise."
+        )
+        raise typer.Exit(code=2)
+    if len(stripped_query) > MAX_QUERY_LENGTH:
+        console.print(
+            f"[red]Query too long.[/red] Your query contains "
+            f"{len(stripped_query)} character(s); the maximum is "
+            f"{MAX_QUERY_LENGTH}. Please shorten it and try again."
         )
         raise typer.Exit(code=2)
 
@@ -207,6 +217,7 @@ INVESTIGATION_STEPS = [
     "Enriching hashes",
     "Enriching emails",
     "Building graph",
+    "Community detection",
     "Generating summary",
     "Finalizing results",
 ]
@@ -851,12 +862,27 @@ async def _run_investigation(
     # entity table doesn't pin the CLI thread indefinitely.
     _metric_start("graph_build")
     display.update_step("Building graph", "active")
+    loop = asyncio.get_running_loop()
+
+    def _graph_progress(label: str) -> None:
+        # The graph work runs in a worker thread; marshal display updates back
+        # onto the event-loop thread so Rich's live renderer remains safe.
+        loop.call_soon_threadsafe(display.update_step, "Building graph", "active", label)
+
     try:
         edges_written = await asyncio.wait_for(
-            asyncio.to_thread(_build_cooccurrence_edges, investigation_id),
+            asyncio.to_thread(_build_cooccurrence_edges, investigation_id, _graph_progress),
             timeout=CLI_PHASE_TIMEOUTS["graph_build"],
         )
-        display.update_step("Building graph", "ok", f"{edges_written} edges")
+        if no_llm:
+            graph_detail = (
+                f"{edges_written} relationships; typed relationships skipped: --no-llm"
+            )
+        elif edges_written == 0:
+            graph_detail = "0 relationships found (build completed; none detected)"
+        else:
+            graph_detail = f"{edges_written} relationships"
+        display.update_step("Building graph", "ok", graph_detail)
     except asyncio.TimeoutError:
         logger.warning(
             "[%s] Graph build timed out after %ds",
@@ -872,12 +898,21 @@ async def _run_investigation(
     # in ``graph.builder.detect_communities`` so the CLI JSON and the web UI
     # colour the same communities identically.
     communities: dict[str, int] = {}
+    display.update_step("Community detection", "active")
     try:
         communities = await asyncio.to_thread(
             _detect_communities_for_investigation, investigation_id
         )
+        if communities:
+            display.update_step(
+                "Community detection", "ok",
+                f"{len(set(communities.values()))} communities",
+            )
+        else:
+            display.update_step("Community detection", "skip", "no relationships to group")
     except Exception as exc:
-        logger.debug("Community detection skipped: %s", exc)
+        logger.warning("Community detection failed: %s", exc)
+        display.update_step("Community detection", "fail", str(exc))
     _metric_finish("graph_build")
 
     # --- Step 8 — summary -------------------------------------------------
@@ -1017,6 +1052,17 @@ async def _run_investigation(
         if e["entity_type"] == "IP_ADDRESS"
         and (e.get("corroborating_sources") or "").lower().find("c2") >= 0
     )
+    relationship_type_counts: dict[str, int] = {}
+    for relationship in final_relationships:
+        relationship_type = relationship.get("relationship_type") or "UNKNOWN"
+        relationship_type_counts[relationship_type] = (
+            relationship_type_counts.get(relationship_type, 0) + 1
+        )
+    actor_count = sum(
+        1 for entity in final_entities
+        if "ACTOR" in str(entity.get("entity_type", ""))
+        or entity.get("entity_type") == "RANSOMWARE_GROUP"
+    )
 
     # v1.6.2 — snapshot the per-run transport counters from the proxy
     # chokepoint so the final summary box can show real via-proxy /
@@ -1043,7 +1089,20 @@ async def _run_investigation(
             "page_count": len(scraped_pages),
             "c2_ips": c2_count,
             "seeds_discovered": _discovered_count,
-            "sources_used": sum(1 for v in sources_used.values() if v.get("status") == "ok"),
+            "sources_used": sum(
+                1 for v in sources_used.values()
+                if str(v.get("status", "")).startswith("ok")
+            ),
+            "relationship_count": len(final_relationships),
+            "relationships_by_type": relationship_type_counts,
+            "typed_relationship_count": sum(
+                count for kind, count in relationship_type_counts.items()
+                if kind != "CO_APPEARED_ON"
+            ),
+            "actor_count": actor_count,
+            "community_count": len(set(communities.values())) if communities else 0,
+            "source_details": sources_used,
+            "no_llm": no_llm,
             "report_path": str(md_path) if fmt in ("md", "both") else None,
             "data_path": str(json_path) if fmt in ("json", "both") else None,
             "proxy_summary": proxy_summary,
@@ -1210,20 +1269,22 @@ def _lookup_page_ids(urls: list[str]) -> dict[str, uuid.UUID]:
     return out
 
 
-def _build_cooccurrence_edges(investigation_id: str) -> int:
+def _build_cooccurrence_edges(
+    investigation_id: str,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> int:
     """Generate CO_APPEARED_ON edges for entities sharing a page."""
-    try:
-        from db.models import Entity
-        from db.session import get_session
-        from sqlalchemy.orm import joinedload
-    except Exception:
-        return 0
+    from db.models import Entity
+    from db.session import get_session
+    from sqlalchemy.orm import joinedload
     from graph.builder import _iter_semantic_cooccurrence_pairs
     from voidaccess_cli.adapters.sqlite import save_relationships
 
     edges: list[dict] = []
     inv_uuid = uuid.UUID(investigation_id)
 
+    if progress_callback:
+        progress_callback("loading entities")
     with get_session() as session:
         rows = list(
             session.query(Entity)
@@ -1241,6 +1302,8 @@ def _build_cooccurrence_edges(investigation_id: str) -> int:
         # Consume ORM rows while their session is open.  ``joinedload`` avoids
         # a query for ``page`` but does not make detached relationship access
         # safe after the session closes.
+        if progress_callback:
+            progress_callback("building intra-page edges")
         for page_entities in by_page.values():
             if len(page_entities) < 2:
                 continue
@@ -1253,7 +1316,12 @@ def _build_cooccurrence_edges(investigation_id: str) -> int:
                         "confidence": 0.8,
                     }
                 )
-    return save_relationships(investigation_id, edges)
+    if progress_callback:
+        progress_callback("loading persisted relationships")
+    written = save_relationships(investigation_id, edges)
+    if progress_callback:
+        progress_callback("graph build complete")
+    return written
 
 
 def _detect_communities_for_investigation(investigation_id: str) -> dict[str, int]:
@@ -1265,13 +1333,10 @@ def _detect_communities_for_investigation(investigation_id: str) -> dict[str, in
     the FastAPI graph endpoint produce identical partitions for the same
     investigation.  NetworkX is built into the project already — no new dep.
     """
-    try:
-        import networkx as nx
+    import networkx as nx
 
-        from graph.builder import detect_communities
-        from voidaccess_cli.adapters import sqlite as sqlite_adapter
-    except Exception:
-        return {}
+    from graph.builder import detect_communities
+    from voidaccess_cli.adapters import sqlite as sqlite_adapter
 
     entities = sqlite_adapter.get_entities(investigation_id)
     relationships = sqlite_adapter.get_relationships(investigation_id)
@@ -1383,7 +1448,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         lines.append("|---|---|---|---|")
         for r in rows[:50]:
             tags = (r.get("corroborating_sources") or "").replace("|", "/")
-            val = (r.get("canonical_value") or r.get("value") or "").replace("|", "/")
+            val = entity_display_id(r).replace("|", "/")
             conf = r.get("confidence")
             lines.append(
                 f"| {val} | {conf:.2f} | {r.get('extraction_method') or ''} | {tags} |"

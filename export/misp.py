@@ -209,23 +209,14 @@ def _load_investigation_and_entities(
                 want = frozenset(filter_uuids)
                 db_entities = [e for e in db_entities if e.id in want]
 
-            normalized: list[NormalizedEntity] = []
-            for e in db_entities:
-                source_url = ""
-                try:
-                    if e.page:
-                        source_url = e.page.url or ""
-                except Exception:
-                    pass
-                ne = NormalizedEntity(
-                    entity_type=e.entity_type,
-                    value=e.canonical_value or e.value,
-                    confidence=e.confidence,
-                    source_url=source_url,
-                    page_id=e.page_id,
-                    context_snippet=e.context_snippet or "",
-                )
-                normalized.append(ne)
+            from export._entity_loading import normalized_entity_from_db_row  # noqa: PLC0415
+
+            # Shared row→NormalizedEntity mapping (same one STIX/Sigma use), so
+            # auxiliary fields (source_quality, extraction_method) no longer
+            # differ between export paths.
+            normalized: list[NormalizedEntity] = [
+                normalized_entity_from_db_row(e) for e in db_entities
+            ]
 
             session.expunge_all()
             return investigation, normalized

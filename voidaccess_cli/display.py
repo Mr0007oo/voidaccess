@@ -287,9 +287,42 @@ class InvestigationDisplay:
 
         table.add_row("Entities", str(summary.get("entity_count", "—")))
         table.add_row("Pages", str(summary.get("page_count", "—")))
+        if "relationship_count" in summary:
+            table.add_row("Relationships", str(summary["relationship_count"]))
+            by_type = summary.get("relationships_by_type") or {}
+            if by_type:
+                breakdown = ", ".join(f"{kind}: {count}" for kind, count in sorted(by_type.items()))
+                table.add_row("Relationship types", breakdown)
+            if summary.get("no_llm"):
+                table.add_row("Typed relationships", "0 (skipped: --no-llm)")
+            elif not by_type:
+                table.add_row("Typed relationships", "0 (build completed; none found)")
+        if "actor_count" in summary:
+            table.add_row("Actors", str(summary["actor_count"]))
+        if "community_count" in summary:
+            table.add_row("Communities", str(summary["community_count"]))
         if "c2_ips" in summary:
             table.add_row("C2 IPs", f"{summary['c2_ips']} confirmed")
         table.add_row("Sources", str(summary.get("sources_used", "—")))
+        source_details = summary.get("source_details") or {}
+        if source_details:
+            source_table = Table(show_header=True, header_style="bold")
+            source_table.add_column("Source")
+            source_table.add_column("Status")
+            source_table.add_column("Detail")
+            for name, info in sorted(source_details.items()):
+                status = str(info.get("status") or "unknown")
+                if status.startswith("ok"):
+                    status_text = "[green]ran[/green]"
+                    detail = f"{info.get('count', 0)} results"
+                elif status.startswith("skipped") or status == "skipped":
+                    status_text = "[yellow]skipped[/yellow]"
+                    detail = status.removeprefix("skipped_").replace("_", " ") or "disabled"
+                else:
+                    status_text = "[red]failed[/red]"
+                    detail = str(info.get("error") or status)
+                source_table.add_row(name, status_text, detail)
+            table.add_row("Source details", source_table)
         if summary.get("report_path"):
             table.add_row("Report", str(summary["report_path"]))
         if summary.get("data_path"):

@@ -31,15 +31,22 @@ from sqlalchemy import create_engine
 
 
 @pytest.fixture
-def db_engine(tmp_path):
-    """Isolated SQLite engine for database/settings/export tests."""
-    engine = create_engine(
-        f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
-        connect_args={"check_same_thread": False},
-    )
+def db_engine(tmp_path, monkeypatch):
+    """Isolated SQLite engine shared with production ``get_session()`` calls."""
+    db_url = f"sqlite:///{(tmp_path / 'test.db').as_posix()}"
+    engine = create_engine(db_url, connect_args={"check_same_thread": False})
     from db.models import Base
     Base.metadata.create_all(engine)
-    return engine
+
+    # db.session snapshots config.DATABASE_URL at import time. Override both
+    # sources so code under test using get_session() sees this same file.
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    import db.session as session_module
+    monkeypatch.setattr(session_module, "DATABASE_URL", db_url)
+    session_module._get_engine_cached.cache_clear()
+    yield engine
+    engine.dispose()
+    session_module._get_engine_cached.cache_clear()
 
 from utils.enrichment_cache import EnrichmentCache, reset_default_cache
 

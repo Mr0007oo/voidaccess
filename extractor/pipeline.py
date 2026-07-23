@@ -750,10 +750,12 @@ def apply_entity_cap(
         ent._occurrence = occ_pages
         source_quality = float(getattr(ent, "source_quality", 1.0) or 1.0)
         quality_boost = max(0.0, (source_quality - 0.5) * 0.06)
-        ent.confidence = min(
-            ent.confidence + _conf.corroboration_boost(occ_pages) + quality_boost,
-            0.99,
+        _conf.apply_evidence(
+            ent,
+            _conf.corroboration_boost(occ_pages),
+            quality_boost,
         )
+        ent.confidence = min(ent.confidence, 0.99)
 
     # Step a: confidence floor (after corroboration).
     filtered = [e for e in candidates if e.confidence >= _CONFIDENCE_FLOOR]

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from utils.enrichment_cache import DEFAULT_TTL, get_enrichment_cache
+from extractor.identity import entity_canonical_id
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class DNSEnrichment:
 
         for entity in entities:
             etype = entity.get("entity_type", "")
-            value = entity.get("canonical_value", "") or entity.get("value", "")
+            value = entity_canonical_id(entity)
 
             if not value:
                 continue

@@ -37,6 +37,26 @@ raw page text
    ExtractionResult
 ```
 
+## Entity identity strings (`identity.py`)
+
+`identity.py` is the single source of truth for the three distinct identity
+strings the rest of the codebase asks about an entity — replacing the six-plus
+places that each derived their own (subtly disagreeing) answer:
+
+- **`entity_graph_id(entity)`** — the key used to identify the entity as a node
+  in the relationship graph. Based on the *canonical* value (so `LockBit` and
+  `lockbit` resolve to the same node), with the `handle@domain` disambiguation
+  preserved for `THREAT_ACTOR_HANDLE`.
+- **`entity_canonical_id(entity)`** — the deduplication-safe canonical form used
+  for identity comparison, DB uniqueness, and cross-source corroboration. Calls
+  `canonicalize_entity_value()` directly on the raw value.
+- **`entity_display_id(entity)`** — the human-readable form, preserving original
+  casing (whitespace-stripped only).
+
+All three accept either the DB `Entity` ORM object or the in-pipeline
+`NormalizedEntity` dataclass and return the identical answer for the same
+conceptual entity regardless of source or casing.
+
 ## Shape-aware validation & the gazetteer (not a denylist)
 
 Name-type candidates (`THREAT_ACTOR_HANDLE`, `ORGANIZATION_NAME`,

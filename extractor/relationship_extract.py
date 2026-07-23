@@ -44,6 +44,8 @@ import logging
 from contextlib import redirect_stdout
 from typing import Any, Optional
 
+from graph.model import EDGE_TYPES, RELATIONSHIP_TYPE_COMPATIBILITY
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CHUNK_CHARS = 12000
@@ -60,14 +62,10 @@ _DEFAULT_MAX_RELATIONSHIPS_PER_PAGE = 60
 # EDGE_TYPES).  Passive forms map to the same stored type but flip the edge
 # direction (handled below) so the stored edge always reads source -> target.
 _LLM_REL_VOCAB: dict[str, str] = {
-    "uses": "USES",
-    "used": "USES",
-    "drops": "DROPS",
-    "controls": "CONTROLS",
-    "targets": "TARGETS",
-    "exploits": "EXPLOITS",
-    "communicates_with": "COMMUNICATES_WITH",
+    relationship_type.lower(): relationship_type
+    for relationship_type in RELATIONSHIP_TYPE_COMPATIBILITY
 }
+_LLM_REL_VOCAB["used"] = EDGE_TYPES.USES
 
 # Tokens whose natural reading reverses source/target (passive voice).  E.g.
 # "org targeted_by actor" means the *actor* TARGETS the *org*.
@@ -80,46 +78,7 @@ _PASSIVE_REL_VOCAB: dict[str, str] = {
 # so the prompt and the independent post-LLM gate share one source of truth.
 # The sets are intentionally permissive for the project's current normalized
 # entity vocabulary; unknown types are not accepted for typed edges.
-_RELATIONSHIP_TYPE_COMPATIBILITY: dict[str, tuple[set[str], set[str]]] = {
-    "USES": (
-        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE"},
-        {"MALWARE_FAMILY", "MALWARE", "TOOL", "SOFTWARE"},
-    ),
-    "DROPS": (
-        {"MALWARE_FAMILY", "MALWARE"},
-        {
-            "MALWARE_FAMILY", "MALWARE", "FILE_HASH_MD5", "FILE_HASH_SHA1",
-            "FILE_HASH_SHA256",
-        },
-    ),
-    "CONTROLS": (
-        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE"},
-        {
-            "CRYPTO_WALLET", "BITCOIN_ADDRESS", "MONERO_ADDRESS", "ETH_ADDRESS",
-            "ETHEREUM_ADDRESS", "LITECOIN_ADDRESS", "ZCASH_ADDRESS",
-            "DOGECOIN_ADDRESS", "XRP_ADDRESS", "SOLANA_ADDRESS", "TRON_ADDRESS",
-            "BITCOIN_CASH_ADDRESS", "DASH_ADDRESS", "IP_ADDRESS", "IPV6_ADDRESS",
-            "DOMAIN", "ENS_DOMAIN", "ONION_URL",
-        },
-    ),
-    "TARGETS": (
-        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE", "MALWARE_FAMILY", "MALWARE"},
-        {"ORGANIZATION_NAME"},
-    ),
-    "EXPLOITS": (
-        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE", "MALWARE_FAMILY", "MALWARE"},
-        {"CVE", "CVE_NUMBER", "EXPLOIT_DB_ID"},
-    ),
-    "COMMUNICATES_WITH": (
-        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE", "MALWARE_FAMILY", "MALWARE"},
-        {
-            "IP_ADDRESS", "IPV6_ADDRESS", "DOMAIN", "ENS_DOMAIN", "ONION_URL",
-            "TELEGRAM_HANDLE", "DISCORD_HANDLE", "XMPP_JID", "TOX_ID",
-            "MATRIX_HANDLE", "WIRE_HANDLE", "ICQ_NUMBER", "WICKR_ID",
-            "PHONE_NUMBER", "EMAIL_ADDRESS",
-        },
-    ),
-}
+_RELATIONSHIP_TYPE_COMPATIBILITY = RELATIONSHIP_TYPE_COMPATIBILITY
 
 
 def _entity_type(entity: dict) -> str:
@@ -158,8 +117,7 @@ _PROMPT_TEMPLATE = (
     '"type": "<type>", "confidence": <float 0.0-1.0>}}]}}\n\n'
     "Rules:\n"
     "- `source` and `target` are indices from the entity list below.\n"
-    "- `type` MUST be exactly one of: uses, drops, controls, targets, "
-    "exploits, communicates_with, targeted_by, controlled_by. "
+    "- `type` MUST be exactly one of: {relationship_types}. "
     "If no listed type fits a pair, DO NOT include that pair.\n"
     "- Direction matters. Read source->target as: an actor `uses`/`controls` a "
     "tool or wallet; a malware family `drops` another payload; a malware "
@@ -176,6 +134,11 @@ _PROMPT_TEMPLATE = (
     "Only emit a relationship when BOTH endpoint types match this guide.\n\n"
     "Entities:\n{entities}\n\n"
     "Content:\n{content}"
+)
+
+_PROMPT_TEMPLATE = _PROMPT_TEMPLATE.replace(
+    "{relationship_types}",
+    ", ".join(sorted(set(_LLM_REL_VOCAB) | set(_PASSIVE_REL_VOCAB))),
 )
 
 
