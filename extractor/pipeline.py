@@ -574,6 +574,23 @@ async def extract_entities_from_pages(
                     )
                     page_id_by_url[_url] = _p.get("page_id")
 
+                # Some clearnet/side-source pages are materialized in the DB
+                # during entity persistence, after the CLI's initial page-id
+                # lookup.  Resolve those URLs again before relationship
+                # extraction so provenance is never lost to that ordering.
+                missing_urls = [url for url, page_id in page_id_by_url.items() if page_id is None]
+                if missing_urls:
+                    from db.models import Page  # noqa: PLC0415
+
+                    with get_session() as _page_session:
+                        persisted_pages = (
+                            _page_session.query(Page)
+                            .filter(Page.url.in_(missing_urls))
+                            .all()
+                        )
+                        for _page in persisted_pages:
+                            page_id_by_url[_page.url] = _page.id
+
                 max_rel_pages = int(
                     getattr(_config, "MAX_REL_PAGES_PER_INV", 10) or 10
                 )

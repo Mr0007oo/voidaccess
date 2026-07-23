@@ -915,6 +915,17 @@ async def _run_investigation(
     display.update_step("Finalizing results", "active")
     final_entities = sqlite_adapter.get_entities(investigation_id)
     final_relationships = sqlite_adapter.get_relationships(investigation_id)
+    # Entity persistence may create Page rows for side-source pages after the
+    # initial pre-extraction lookup. Refresh the lightweight manifest so it
+    # agrees with relationship provenance and the persisted DB state.
+    refreshed_page_ids = await asyncio.to_thread(
+        _lookup_page_ids, [p["url"] for p in scraped_pages]
+    )
+    for page in scraped_pages:
+        if page.get("page_id") is None:
+            page_id = refreshed_page_ids.get(page["url"])
+            if page_id is not None:
+                page["page_id"] = page_id
     sqlite_adapter.update_investigation(
         investigation_id,
         {
@@ -958,7 +969,18 @@ async def _run_investigation(
         "sources_used": sources_used,
         "entities": final_entities,
         "relationships": final_relationships,
-        "pages_scraped": [{"url": p["url"], "source": p.get("source", "")} for p in scraped_pages],
+        # Keep the lightweight output manifest needed to resolve relationship
+        # provenance.  Text is intentionally omitted; the DB remains the
+        # source of page content while each relationship can point to a real
+        # page in this investigation.
+        "pages_scraped": [
+            {
+                "page_id": p.get("page_id"),
+                "url": p["url"],
+                "source": p.get("source", ""),
+            }
+            for p in scraped_pages
+        ],
         "communities": communities,
         "community_count": len(set(communities.values())) if communities else 0,
         "seeds_discovered": _discovered_count,

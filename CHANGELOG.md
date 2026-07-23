@@ -4,6 +4,13 @@ All notable changes to VoidAccess are documented here.
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-07-23
+
+- Preserve `page_id` in the CLI's lightweight `pages_scraped` manifest so
+  typed relationship provenance resolves to the source page.
+- Add prompt-level and post-LLM endpoint-type compatibility validation for
+  typed relationships; structurally invalid pairs are excluded.
+
 ## [1.8.1] - 2026-07-22
 ### Fixed
 - `--no-tor` now generates **zero** Tor traffic for the entire run. Previously the flag only skipped the primary Tor search branch; the Torch/Haystack onion search engines still ran and fed real `.onion` result URLs into the scrape list, which were then routed back through Tor. The onion search engines are now skipped when `--no-tor` is set, and any `.onion` link from any source is stripped before the scraper sees it — so no outbound connection to the Tor SOCKS proxy is ever attempted and no onion-sourced pages appear in the output.

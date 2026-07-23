@@ -76,6 +76,77 @@ _PASSIVE_REL_VOCAB: dict[str, str] = {
     "controlled_by": "CONTROLS",
 }
 
+# Endpoint-type validation is deliberately kept in the relationship extractor
+# so the prompt and the independent post-LLM gate share one source of truth.
+# The sets are intentionally permissive for the project's current normalized
+# entity vocabulary; unknown types are not accepted for typed edges.
+_RELATIONSHIP_TYPE_COMPATIBILITY: dict[str, tuple[set[str], set[str]]] = {
+    "USES": (
+        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE"},
+        {"MALWARE_FAMILY", "MALWARE", "TOOL", "SOFTWARE"},
+    ),
+    "DROPS": (
+        {"MALWARE_FAMILY", "MALWARE"},
+        {
+            "MALWARE_FAMILY", "MALWARE", "FILE_HASH_MD5", "FILE_HASH_SHA1",
+            "FILE_HASH_SHA256",
+        },
+    ),
+    "CONTROLS": (
+        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE"},
+        {
+            "CRYPTO_WALLET", "BITCOIN_ADDRESS", "MONERO_ADDRESS", "ETH_ADDRESS",
+            "ETHEREUM_ADDRESS", "LITECOIN_ADDRESS", "ZCASH_ADDRESS",
+            "DOGECOIN_ADDRESS", "XRP_ADDRESS", "SOLANA_ADDRESS", "TRON_ADDRESS",
+            "BITCOIN_CASH_ADDRESS", "DASH_ADDRESS", "IP_ADDRESS", "IPV6_ADDRESS",
+            "DOMAIN", "ENS_DOMAIN", "ONION_URL",
+        },
+    ),
+    "TARGETS": (
+        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE", "MALWARE_FAMILY", "MALWARE"},
+        {"ORGANIZATION_NAME"},
+    ),
+    "EXPLOITS": (
+        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE", "MALWARE_FAMILY", "MALWARE"},
+        {"CVE", "CVE_NUMBER", "EXPLOIT_DB_ID"},
+    ),
+    "COMMUNICATES_WITH": (
+        {"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE", "MALWARE_FAMILY", "MALWARE"},
+        {
+            "IP_ADDRESS", "IPV6_ADDRESS", "DOMAIN", "ENS_DOMAIN", "ONION_URL",
+            "TELEGRAM_HANDLE", "DISCORD_HANDLE", "XMPP_JID", "TOX_ID",
+            "MATRIX_HANDLE", "WIRE_HANDLE", "ICQ_NUMBER", "WICKR_ID",
+            "PHONE_NUMBER", "EMAIL_ADDRESS",
+        },
+    ),
+}
+
+
+def _entity_type(entity: dict) -> str:
+    return str(entity.get("type", "") or "").strip().upper()
+
+
+def _is_compatible_relationship(rel_type: str, source: dict, target: dict) -> bool:
+    """Validate endpoint types independently of the LLM's claimed verb."""
+    allowed = _RELATIONSHIP_TYPE_COMPATIBILITY.get(rel_type)
+    if allowed is None:
+        return False
+    source_types, target_types = allowed
+    return _entity_type(source) in source_types and _entity_type(target) in target_types
+
+
+def _compatibility_guide() -> str:
+    lines = []
+    for rel_type, (sources, targets) in _RELATIONSHIP_TYPE_COMPATIBILITY.items():
+        lines.append(
+            f"- {rel_type}: source {{{', '.join(sorted(sources))}}} -> "
+            f"target {{{', '.join(sorted(targets))}}}"
+        )
+    return "\n".join(lines)
+
+
+_COMPATIBILITY_GUIDE = _compatibility_guide()
+
 _PROMPT_TEMPLATE = (
     "You are a threat intelligence analyst. Below is a numbered list of "
     "entities that were already extracted from a single dark-web page, "
@@ -100,6 +171,9 @@ _PROMPT_TEMPLATE = (
     "Plain co-occurrence is captured elsewhere — omit pairs that have no "
     "specific relationship.\n"
     "- Do not output any text outside the JSON object.\n\n"
+    "Entity-type compatibility guide (source -> target):\n"
+    "{compatibility_guide}\n"
+    "Only emit a relationship when BOTH endpoint types match this guide.\n\n"
     "Entities:\n{entities}\n\n"
     "Content:\n{content}"
 )
@@ -216,7 +290,11 @@ async def extract_relationships_for_page(
         for i, e in enumerate(trimmed)
     )
     content = page_text[:max_chunk_chars]
-    prompt = _PROMPT_TEMPLATE.format(entities=entity_lines, content=content)
+    prompt = _PROMPT_TEMPLATE.format(
+        entities=entity_lines,
+        content=content,
+        compatibility_guide=_COMPATIBILITY_GUIDE,
+    )
 
     try:
         raw = await _invoke_llm(prompt, llm)
@@ -261,6 +339,12 @@ async def extract_relationships_for_page(
         else:
             # Unknown / free-text label — do NOT invent a type.  The pair keeps
             # its plain co-occurrence edge, generated elsewhere.
+            continue
+
+        if not _is_compatible_relationship(rel_type, a_ent, b_ent):
+            # Structural validation is independent of the model's claim.  Do
+            # not downgrade invalid pairs to co-occurrence: the pair may be
+            # spurious even though both entities appeared on the page.
             continue
 
         a_id = a_ent.get("id")
