@@ -26,6 +26,10 @@ in later, at the batch cap stage, because it isn't known per-page — see
 
 The result is a genuinely differentiated value per extraction, not a category.
 Every function is total and never raises.
+
+Confidence is monotonic after extraction: new evidence may raise an entity's
+stored confidence, but never lowers it.  ``get_entity_confidence`` is the
+single read/merge helper for persisted or in-memory entity objects.
 """
 
 from __future__ import annotations
@@ -123,6 +127,33 @@ def compute_confidence(
         return max(0.05, min(0.99, score))
     except Exception:  # noqa: BLE001
         return 0.6
+
+
+def get_entity_confidence(entity, candidate: float | None = None) -> float:
+    """Return the canonical confidence, optionally merging new evidence.
+
+    The monotonic max rule is shared by extraction batches, database upserts,
+    and downstream consumers.  Values are always clamped to ``[0.0, 1.0]``.
+    """
+    try:
+        current = float(getattr(entity, "confidence", entity) or 0.0)
+        current = max(0.0, min(1.0, current))
+        if candidate is None:
+            return current
+        return max(current, max(0.0, min(1.0, float(candidate))))
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def apply_evidence(entity, *signals: float) -> float:
+    """Raise an entity confidence from additive evidence without compounding."""
+    try:
+        evidence = sum(max(0.0, float(signal)) for signal in signals)
+    except (TypeError, ValueError):
+        evidence = 0.0
+    value = min(1.0, get_entity_confidence(entity) + evidence)
+    entity.confidence = get_entity_confidence(entity, value)
+    return entity.confidence
 
 
 def corroboration_boost(distinct_sources: int) -> float:

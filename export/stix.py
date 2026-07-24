@@ -18,9 +18,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import warnings
 from typing import Any, Optional
 import uuid
+
+from extractor.confidence import get_entity_confidence
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,114 @@ _STIX_PATTERNS: dict[str, str] = {
 # Entity types that map to STIX Malware objects
 _MALWARE_TYPES = frozenset({"MALWARE_FAMILY", "RANSOMWARE_GROUP"})
 
+# STIX 2.1's malware-type vocabulary is intentionally small.  Keep the
+# mapping here instead of treating every MALWARE_FAMILY as the generic
+# ``malware`` type: family names and enrichment metadata often carry enough
+# information for SIEM consumers to filter useful categories.
+_STIX_MALWARE_TYPE_ALIASES = {
+    "infostealer": "spyware",
+    "stealer": "spyware",
+    "remote_access_trojan": "remote-access-trojan",
+    "remote access trojan": "remote-access-trojan",
+    "rat": "remote-access-trojan",
+    "coinminer": "resource-exploitation",
+    "cryptominer": "resource-exploitation",
+    "crypto-miner": "resource-exploitation",
+    "miner": "resource-exploitation",
+}
+_STIX_MALWARE_TYPES = frozenset({
+    "adware",
+    "backdoor",
+    "bot",
+    "ddos",
+    "dropper",
+    "exploit-kit",
+    "keylogger",
+    "ransomware",
+    "remote-access-trojan",
+    "resource-exploitation",
+    "rootkit",
+    "screen-capture",
+    "spyware",
+    "wiper",
+    "malware",
+})
+
+# These are conservative, high-signal family/name hints.  Unknown families
+# retain the valid generic STIX type rather than being assigned a speculative
+# category.
+_MALWARE_NAME_PATTERNS = (
+    ("ransomware", re.compile(
+        r"\b(?:ransomware|lockbit|blackcat|alphv|clop|conti|ryuk|hive|revil|darkside|wannacry)\b",
+        re.IGNORECASE,
+    )),
+    ("remote-access-trojan", re.compile(
+        r"\b(?:remote\s+access\s+trojan|remcos|njrat|nanocore|quasar|darkcomet|xrat)\b",
+        re.IGNORECASE,
+    )),
+    ("spyware", re.compile(
+        r"\b(?:spyware|infostealer|stealer|redline|vidar|lumma|raccoon|agent\s+tesla|formbook)\b",
+        re.IGNORECASE,
+    )),
+    ("bot", re.compile(
+        r"\b(?:botnet|emotet|qakbot|qbot|trickbot|mirai|zeus|mozi)\b",
+        re.IGNORECASE,
+    )),
+    ("keylogger", re.compile(r"\bkeylogger\b", re.IGNORECASE)),
+    ("exploit-kit", re.compile(r"\bexploit[\s-]+kit\b", re.IGNORECASE)),
+    ("rootkit", re.compile(r"\brootkit\b", re.IGNORECASE)),
+    ("screen-capture", re.compile(r"\bscreen[\s-]+capture\b", re.IGNORECASE)),
+    ("dropper", re.compile(r"\bdropper\b", re.IGNORECASE)),
+    ("wiper", re.compile(r"\bwiper\b", re.IGNORECASE)),
+    ("adware", re.compile(r"\badware\b", re.IGNORECASE)),
+    ("resource-exploitation", re.compile(
+        r"\b(?:cryptominer|crypto[\s-]+miner|coinminer|cryptojacking)\b",
+        re.IGNORECASE,
+    )),
+    ("backdoor", re.compile(r"\bbackdoor\b", re.IGNORECASE)),
+)
+
+
+def _entity_attribute(entity: Any, name: str) -> Any:
+    """Read optional classification metadata from dicts and ORM-like rows."""
+    if isinstance(entity, dict):
+        return entity.get(name)
+    return getattr(entity, name, None)
+
+
+def _normalise_malware_type(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    key = value.strip().lower().replace("_", " ")
+    key = _STIX_MALWARE_TYPE_ALIASES.get(key, key)
+    key = key.replace(" ", "-")
+    return key if key in _STIX_MALWARE_TYPES else None
+
+
+def _classify_malware(entity: Any) -> list[str]:
+    """Return evidence-backed STIX malware types for an entity."""
+    entity_type = str(getattr(entity, "entity_type", "") or "").upper()
+    if isinstance(entity, dict):
+        entity_type = str(entity.get("entity_type") or "").upper()
+    if entity_type == "RANSOMWARE_GROUP":
+        return ["ransomware"]
+
+    for field_name in ("malware_types", "malware_type", "malware_category", "category", "family_type"):
+        raw = _entity_attribute(entity, field_name)
+        values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+        classified = [item for item in (_normalise_malware_type(v) for v in values) if item]
+        if classified:
+            return list(dict.fromkeys(classified))
+
+    evidence = " ".join(
+        str(_entity_attribute(entity, field) or "")
+        for field in ("value", "context_snippet")
+    )
+    for malware_type, pattern in _MALWARE_NAME_PATTERNS:
+        if pattern.search(evidence):
+            return [malware_type]
+    return ["malware"]
+
 # ---------------------------------------------------------------------------
 # Confidence mapping: VoidAccess float → STIX integer (0-100)
 # ---------------------------------------------------------------------------
@@ -127,7 +238,7 @@ def entity_to_stix_indicator(entity: Any) -> Optional[Any]:
             pattern=pattern,
             pattern_type="stix",
             indicator_types=indicator_types,
-            confidence=_to_stix_confidence(entity.confidence),
+            confidence=_to_stix_confidence(get_entity_confidence(entity)),
             allow_custom=True,
             x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),
             external_references=(
@@ -158,7 +269,8 @@ def entity_to_stix_malware(entity: Any) -> Optional[Any]:
         malware = stix2.Malware(
             name=entity.value,
             is_family=True,
-            confidence=_to_stix_confidence(entity.confidence),
+            malware_types=_classify_malware(entity),
+            confidence=_to_stix_confidence(get_entity_confidence(entity)),
             allow_custom=True,
             x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),
             external_references=(
@@ -170,6 +282,28 @@ def entity_to_stix_malware(entity: Any) -> Optional[Any]:
         return malware
     except Exception as exc:
         logger.warning("entity_to_stix_malware failed for %r: %s", entity.value, exc)
+        return None
+
+
+def entity_to_stix_identity(entity: Any) -> Optional[Any]:
+    """Convert an organization entity to a STIX Identity object."""
+    if not _STIX2_AVAILABLE or entity.entity_type != "ORGANIZATION_NAME":
+        return None
+    try:
+        return stix2.Identity(
+            name=entity.value,
+            identity_class="organization",
+            confidence=_to_stix_confidence(get_entity_confidence(entity)),
+            allow_custom=True,
+            x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),
+            external_references=(
+                [{"source_name": "voidaccess", "url": entity.source_url}]
+                if entity.source_url
+                else []
+            ),
+        )
+    except Exception as exc:
+        logger.warning("entity_to_stix_identity failed for %r: %s", entity.value, exc)
         return None
 
 
@@ -189,7 +323,7 @@ def entity_to_stix_threat_actor(entity: Any) -> Optional[Any]:
         threat_actor = stix2.ThreatActor(
             name=entity.value,
             aliases=[entity.value],
-            confidence=_to_stix_confidence(entity.confidence),
+            confidence=_to_stix_confidence(get_entity_confidence(entity)),
             allow_custom=True,
             x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),
             external_references=(
@@ -241,30 +375,28 @@ def investigation_to_stix_bundle(
     if not entities:
         return _empty_bundle()
 
-    try:
-        from graph.builder import _make_node_id  # noqa: PLC0415
-    except Exception:  # pragma: no cover — graph layer optional
-        def _make_node_id(entity_type, value, source_url):  # type: ignore
-            return value
+    from extractor.identity import entity_canonical_id, entity_graph_id  # noqa: PLC0415
 
     stix_objects: list[Any] = []
-    # Maps BOTH the raw entity.value AND the graph node_id → stix_object.id.
-    # Graph edges are keyed by node_id (which for THREAT_ACTOR_HANDLE is
-    # "value@domain", not the bare value), so registering only entity.value
-    # here silently dropped every threat-actor relationship — the exact
-    # "silently dropped relationships" failure mode the CHANGELOG keeps
-    # re-fixing.  Registering the node_id alias lets typed edges (which very
-    # often have a threat-actor endpoint) survive into the bundle.
+    # Maps BOTH the graph node id AND the bare canonical value → stix_object.id.
+    # Graph edges are keyed by the graph node id (which for THREAT_ACTOR_HANDLE
+    # is "<canonical>@domain", not the bare value); registering only the bare
+    # value silently dropped every threat-actor relationship — the exact
+    # "silently dropped relationships" failure the CHANGELOG keeps re-fixing.
+    #
+    # Both keys are now derived through extractor.identity, the *same* module
+    # the graph builder uses to generate node ids.  The two sides can no longer
+    # diverge (e.g. "LockBit" vs "lockbit") because they are literally the same
+    # function call, not two functions that happen to agree today.
     stix_id_map: dict[str, str] = {}
 
     def _register(entity: Any, stix_id: str) -> None:
-        stix_id_map.setdefault(entity.value, stix_id)
         try:
-            node_id = _make_node_id(
-                entity.entity_type,
-                entity.value,
-                getattr(entity, "source_url", "") or "",
-            )
+            stix_id_map.setdefault(entity_canonical_id(entity), stix_id)
+        except Exception:
+            stix_id_map.setdefault(entity.value, stix_id)
+        try:
+            node_id = entity_graph_id(entity)
         except Exception:
             node_id = entity.value
         if node_id:
@@ -285,6 +417,11 @@ def investigation_to_stix_bundle(
         if actor:
             stix_objects.append(actor)
             _register(entity, actor.id)
+
+        identity = entity_to_stix_identity(entity)
+        if identity:
+            stix_objects.append(identity)
+            _register(entity, identity.id)
 
     if include_relationships and stix_objects:
         relationships, relationship_warning = _build_stix_relationships(
@@ -381,6 +518,7 @@ def _load_entities_for_investigation(
         from db.queries import get_investigation_by_id_or_run  # noqa: PLC0415
         from db.models import Entity, InvestigationEntityLink  # noqa: PLC0415
         from extractor.normalizer import NormalizedEntity  # noqa: PLC0415
+        from export._entity_loading import normalized_entity_from_db_row  # noqa: PLC0415
 
         inv_uuid = _coerce_uuid(investigation_id)
         if inv_uuid is None:
@@ -407,24 +545,9 @@ def _load_entities_for_investigation(
                 want = frozenset(entity_ids)
                 db_entities = [e for e in db_entities if e.id in want]
 
-            result: list[NormalizedEntity] = []
-            for e in db_entities:
-                source_url = ""
-                try:
-                    if e.page:
-                        source_url = e.page.url or ""
-                except Exception:
-                    pass
-                result.append(NormalizedEntity(
-                    entity_type=e.entity_type,
-                    value=e.canonical_value or e.value,
-                    confidence=e.confidence,
-                    source_url=source_url,
-                    page_id=e.page_id,
-                    context_snippet=e.context_snippet or "",
-                    extraction_method="db",
-                    source_quality=getattr(e, "source_quality", 1.0),
-                ))
+            result: list[NormalizedEntity] = [
+                normalized_entity_from_db_row(e) for e in db_entities
+            ]
             return result
 
         if session is not None:
@@ -449,32 +572,22 @@ def _build_stix_relationships(
     if not _STIX2_AVAILABLE:
         return [], "stix2 is not installed"
     try:
-        from graph.builder import build_graph_from_db  # noqa: PLC0415
+        from export.relationships import load_export_relationships  # noqa: PLC0415
 
-        inv_uuid = _coerce_uuid(investigation_id)
-        graph = build_graph_from_db(investigation_id=inv_uuid)
-
+        graph_relationships, warning = load_export_relationships(
+            investigation_id, stix_id_map
+        )
+        if warning:
+            return [], warning
         relationships: list[Any] = []
-        seen_relationships: set[tuple[str, str, str]] = set()
-        for source_node, target_node, data in graph.edges(data=True):
-            src_stix_id = stix_id_map.get(source_node)
-            tgt_stix_id = stix_id_map.get(target_node)
-            if not src_stix_id or not tgt_stix_id:
-                continue
-            edge_type = data.get("edge_type", "related-to")
-            # Map VoidAccess edge types to STIX relationship types
-            rel_type = _edge_type_to_stix(edge_type)
-            relationship_key = (rel_type, src_stix_id, tgt_stix_id)
-            if relationship_key in seen_relationships:
-                continue
-            seen_relationships.add(relationship_key)
+        for data in graph_relationships:
             # Carry the edge's own confidence onto the SRO.  Typed relationships
             # have a claim-specific confidence distinct from co-occurrence's
             # flat value; STIX 2.1 confidence is an int 0-100.
             rel_kwargs: dict[str, Any] = {
-                "relationship_type": rel_type,
-                "source_ref": src_stix_id,
-                "target_ref": tgt_stix_id,
+                "relationship_type": data["stix_relationship_type"],
+                "source_ref": data["source_ref"],
+                "target_ref": data["target_ref"],
                 "allow_custom": True,
             }
             try:
@@ -501,29 +614,9 @@ def _build_stix_relationships(
 
 def _edge_type_to_stix(edge_type: str) -> str:
     """Map VoidAccess graph edge types to STIX relationship type strings."""
-    mapping = {
-        "CO_APPEARED_ON": "related-to",
-        "CO_INVESTIGATION": "related-to",
-        "POSTED_BY": "attributed-to",
-        "LINKED_TO": "related-to",
-        "PAID_TO": "related-to",
-        "MEMBER_OF": "member-of",
-        "USES": "uses",
-        "CLAIMED": "attributed-to",
-        "LIKELY_SAME_ACTOR": "related-to",
-        "CONFIRMED_SAME_ACTOR": "related-to",
-        "FUNDED_BY": "related-to",
-        # Typed relationships from the LLM relationship-extraction pass.  These
-        # map to documented STIX 2.1 common relationship types where one
-        # exists; CONTROLS has no standard STIX verb so it degrades to the
-        # safe "related-to" default rather than emitting a non-spec type.
-        "DROPS": "drops",
-        "TARGETS": "targets",
-        "EXPLOITS": "exploits",
-        "COMMUNICATES_WITH": "communicates-with",
-        "CONTROLS": "related-to",
-    }
-    return mapping.get(edge_type, "related-to")
+    from export.relationships import _normalise_edge_type  # noqa: PLC0415
+    from graph.model import RELATIONSHIP_TYPE_STIX  # noqa: PLC0415
+    return RELATIONSHIP_TYPE_STIX.get(_normalise_edge_type(edge_type), "related-to")
 
 
 def _coerce_uuid(value: Any) -> Optional[uuid.UUID]:

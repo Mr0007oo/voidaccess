@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -76,6 +77,11 @@ _MISP_ATTR_MAP: dict[str, dict] = {
         "category": "Attribution",
         "to_ids": False,
     },
+    "ORGANIZATION_NAME": {
+        "type": "target-org",
+        "category": "Targeting data",
+        "to_ids": False,
+    },
 }
 
 
@@ -94,7 +100,7 @@ def investigation_to_misp_event(
     Returns a valid (but empty-attribute) event if the investigation is not found.
     Never raises.
     """
-    investigation, entities = _load_investigation_and_entities(
+    investigation, entity_rows = _load_investigation_and_entity_rows(
         investigation_id, entity_ids=entity_ids
     )
 
@@ -110,7 +116,14 @@ def investigation_to_misp_event(
     query = getattr(investigation, "query", "") or ""
 
     attributes: list[dict] = []
-    for entity in entities:
+    graph_endpoint_map: dict[str, str] = {}
+    objects: list[dict] = []
+
+    from extractor.identity import entity_graph_id  # noqa: PLC0415
+    from export._entity_loading import normalized_entity_from_db_row  # noqa: PLC0415
+
+    for row in entity_rows:
+        entity = normalized_entity_from_db_row(row)
         mapping = _MISP_ATTR_MAP.get(entity.entity_type)
         if mapping is None:
             continue
@@ -123,6 +136,40 @@ def investigation_to_misp_event(
         }
         attributes.append(attr)
 
+        object_uuid = str(row.id)
+        graph_endpoint_map[entity_graph_id(entity)] = object_uuid
+        objects.append(
+            {
+                "name": "voidaccess-entity",
+                "meta-category": "threat-intelligence",
+                "uuid": object_uuid,
+                "Attribute": [dict(attr, uuid=str(uuid.uuid4()))],
+                "ObjectReference": [],
+            }
+        )
+
+    # Use the same graph relationship enumeration as STIX.  This includes
+    # typed persisted edges and applies the same endpoint/deduplication rules.
+    from export.relationships import load_export_relationships  # noqa: PLC0415
+    graph_relationships, relationship_warning = load_export_relationships(
+        investigation_id, graph_endpoint_map
+    )
+    if relationship_warning:
+        logger.warning("MISP relationships were not included: %s", relationship_warning)
+
+    object_by_uuid = {obj["uuid"]: obj for obj in objects}
+    for relationship in graph_relationships:
+        source_object = object_by_uuid.get(relationship["source_ref"])
+        if source_object is None or relationship["target_ref"] not in object_by_uuid:
+            continue
+        source_object["ObjectReference"].append(
+            {
+                "object_uuid": relationship["source_ref"],
+                "referenced_uuid": relationship["target_ref"],
+                "relationship_type": relationship["edge_type"],
+            }
+        )
+
     return {
         "Event": {
             "info": f"VoidAccess Investigation: {query}",
@@ -131,6 +178,7 @@ def investigation_to_misp_event(
             "analysis": "2",           # Completed
             "distribution": "0",       # Your organisation only
             "Attribute": attributes,
+            "Object": objects,
         }
     }
 
@@ -163,8 +211,21 @@ def _load_investigation_and_entities(
 
     Returns (investigation, entities) or (None, []) on error / not found.
     """
-    import uuid as _uuid
+    investigation, rows = _load_investigation_and_entity_rows(
+        investigation_id, entity_ids=entity_ids
+    )
+    if investigation is None:
+        return None, []
 
+    from export._entity_loading import normalized_entity_from_db_row  # noqa: PLC0415
+    return investigation, [normalized_entity_from_db_row(row) for row in rows]
+
+
+def _load_investigation_and_entity_rows(
+    investigation_id: Any,
+    entity_ids: Optional[list[str]] = None,
+):
+    """Load an investigation and its ORM entity rows for export rendering."""
     if not os.getenv("DATABASE_URL"):
         return None, []
 
@@ -172,7 +233,7 @@ def _load_investigation_and_entities(
         from db.session import get_session  # noqa: PLC0415
         from db.queries import get_investigation_by_id_or_run  # noqa: PLC0415
         from db.models import Entity, InvestigationEntityLink  # noqa: PLC0415
-        from extractor.normalizer import NormalizedEntity  # noqa: PLC0415
+        from sqlalchemy.orm import joinedload  # noqa: PLC0415
 
         inv_uuid = _coerce_uuid(investigation_id)
         if inv_uuid is None:
@@ -192,15 +253,16 @@ def _load_investigation_and_entities(
             if investigation is None:
                 return None, []
 
-            linked_ids_select = (
-                session.query(InvestigationEntityLink.entity_id)
-                .filter(InvestigationEntityLink.investigation_id == investigation.id)
-            )
             db_entities = (
                 session.query(Entity)
+                .outerjoin(
+                    InvestigationEntityLink,
+                    InvestigationEntityLink.entity_id == Entity.id,
+                )
+                .options(joinedload(Entity.page))
                 .filter(
                     (Entity.investigation_id == investigation.id)
-                    | Entity.id.in_(linked_ids_select)
+                    | (InvestigationEntityLink.investigation_id == investigation.id)
                 )
                 .all()
             )
@@ -209,26 +271,8 @@ def _load_investigation_and_entities(
                 want = frozenset(filter_uuids)
                 db_entities = [e for e in db_entities if e.id in want]
 
-            normalized: list[NormalizedEntity] = []
-            for e in db_entities:
-                source_url = ""
-                try:
-                    if e.page:
-                        source_url = e.page.url or ""
-                except Exception:
-                    pass
-                ne = NormalizedEntity(
-                    entity_type=e.entity_type,
-                    value=e.canonical_value or e.value,
-                    confidence=e.confidence,
-                    source_url=source_url,
-                    page_id=e.page_id,
-                    context_snippet=e.context_snippet or "",
-                )
-                normalized.append(ne)
-
             session.expunge_all()
-            return investigation, normalized
+            return investigation, db_entities
 
     except Exception as exc:
         logger.warning("_load_investigation_and_entities failed: %s", exc)

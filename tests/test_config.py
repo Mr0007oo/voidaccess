@@ -3,6 +3,7 @@
 import os
 import sys
 import unittest
+import logging
 from unittest.mock import patch, MagicMock
 
 
@@ -51,6 +52,28 @@ class TestConfigValidation(unittest.TestCase):
                 self.assertTrue(mock_logger.warning.called)
                 warning_calls = str(mock_logger.warning.call_args_list)
                 self.assertIn("OPENAI_API_KEY", warning_calls)
+
+    def test_optional_config_warning_is_once_per_process(self):
+        """Repeated validation must not spam the same process with warnings."""
+        import config
+
+        with patch.dict(os.environ, {"JWT_SECRET": "test-secret-key-123"}, clear=True):
+            # The guard intentionally lives on logging so compatibility-module
+            # reloads cannot reset it; reset it explicitly for this isolated
+            # regression test.
+            setattr(logging, "_voidaccess_optional_config_warning_shown", False)
+            try:
+                with patch.object(config, "logger") as mock_logger:
+                    config.validate_config()
+                    config.validate_config()
+
+                    warning_calls = [
+                        call for call in mock_logger.warning.call_args_list
+                        if call.args and "Optional configuration keys not set" in str(call.args[0])
+                    ]
+                    self.assertEqual(len(warning_calls), 1)
+            finally:
+                setattr(logging, "_voidaccess_optional_config_warning_shown", False)
 
 
 if __name__ == "__main__":

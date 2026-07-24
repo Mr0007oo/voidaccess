@@ -307,22 +307,12 @@ def _load_entities_for_investigation(investigation_id: Any) -> list[Any]:
                 .all()
             )
 
-            result: list[NormalizedEntity] = []
-            for e in db_entities:
-                source_url = ""
-                try:
-                    if e.page:
-                        source_url = e.page.url or ""
-                except Exception:
-                    pass
-                result.append(NormalizedEntity(
-                    entity_type=e.entity_type,
-                    value=e.canonical_value or e.value,
-                    confidence=e.confidence,
-                    source_url=source_url,
-                    page_id=e.page_id,
-                    context_snippet=e.context_snippet or "",
-                ))
+            from export._entity_loading import normalized_entity_from_db_row  # noqa: PLC0415
+
+            # Shared row→NormalizedEntity mapping (same one STIX/MISP use).
+            result: list[NormalizedEntity] = [
+                normalized_entity_from_db_row(e) for e in db_entities
+            ]
             return result
 
     except Exception as exc:

@@ -48,7 +48,7 @@ def test_hash_rule_generated():
     entities = [
         {
             "entity_type": "FILE_HASH_SHA256",
-            "canonical_value": "a" * 64,
+            "value": "a" * 64,
             "confidence": 0.9,
         }
     ]
@@ -65,12 +65,12 @@ def test_md5_and_sha1_hash_rules():
     entities = [
         {
             "entity_type": "FILE_HASH_MD5",
-            "canonical_value": "b" * 32,
+            "value": "b" * 32,
             "confidence": 0.8,
         },
         {
             "entity_type": "FILE_HASH_SHA1",
-            "canonical_value": "c" * 40,
+            "value": "c" * 40,
             "confidence": 0.85,
         },
     ]
@@ -89,7 +89,7 @@ def test_invalid_hash_value_skipped():
     entities = [
         {
             "entity_type": "FILE_HASH_SHA256",
-            "canonical_value": "not-a-hash",
+            "value": "not-a-hash",
             "confidence": 0.5,
         }
     ]
@@ -110,7 +110,7 @@ def test_malware_string_rule():
     entities = [
         {
             "entity_type": "MALWARE_FAMILY",
-            "canonical_value": "LockBit",
+            "value": "LockBit",
             "confidence": 0.95,
         }
     ]
@@ -119,7 +119,7 @@ def test_malware_string_rule():
     assert "fullword nocase" in out
     assert "any of them" in out
     names = _rule_names(out)
-    assert any("LockBit" in n and n.startswith("VoidAccess_Malware_") for n in names), names
+    assert any("lockbit" in n and n.startswith("VoidAccess_Malware_") for n in names), names
 
 
 def test_ransomware_group_string_rule():
@@ -127,7 +127,7 @@ def test_ransomware_group_string_rule():
     entities = [
         {
             "entity_type": "RANSOMWARE_GROUP",
-            "canonical_value": "BlackCat",
+            "value": "BlackCat",
             "confidence": 0.9,
         }
     ]
@@ -146,7 +146,7 @@ def test_onion_network_rule():
     entities = [
         {
             "entity_type": "ONION_URL",
-            "canonical_value": "lockbit-pay.onion",
+            "value": "lockbit-pay.onion",
             "confidence": 0.85,
         }
     ]
@@ -162,7 +162,7 @@ def test_high_confidence_domain_rule():
     entities = [
         {
             "entity_type": "DOMAIN",
-            "canonical_value": "evil.example",
+            "value": "evil.example",
             "confidence": 0.9,
         }
     ]
@@ -176,7 +176,7 @@ def test_low_confidence_domain_skipped():
     entities = [
         {
             "entity_type": "DOMAIN",
-            "canonical_value": "maybe-evil.example",
+            "value": "maybe-evil.example",
             "confidence": 0.3,
         }
     ]
@@ -235,7 +235,7 @@ def test_no_special_chars_in_rule_name():
     entities = [
         {
             "entity_type": "MALWARE_FAMILY",
-            "canonical_value": "LockBit 3.0 (Black)!!!",
+            "value": "LockBit 3.0 (Black)!!!",
             "confidence": 0.9,
         }
     ]
@@ -282,17 +282,17 @@ def test_yara_syntax_valid():
     entities = [
         {
             "entity_type": "FILE_HASH_SHA256",
-            "canonical_value": "a" * 64,
+            "value": "a" * 64,
             "confidence": 0.9,
         },
         {
             "entity_type": "MALWARE_FAMILY",
-            "canonical_value": "LockBit",
+            "value": "LockBit",
             "confidence": 0.95,
         },
         {
             "entity_type": "ONION_URL",
-            "canonical_value": "lockbit-pay.onion",
+            "value": "lockbit-pay.onion",
             "confidence": 0.85,
         },
     ]
@@ -318,7 +318,7 @@ def test_yara_includes_investigation_metadata():
     entities = [
         {
             "entity_type": "MALWARE_FAMILY",
-            "canonical_value": "LockBit",
+            "value": "LockBit",
             "confidence": 0.9,
         }
     ]
@@ -337,12 +337,12 @@ def test_yara_section_headers():
     entities = [
         {
             "entity_type": "FILE_HASH_SHA256",
-            "canonical_value": "a" * 64,
+            "value": "a" * 64,
             "confidence": 0.9,
         },
         {
             "entity_type": "MALWARE_FAMILY",
-            "canonical_value": "LockBit",
+            "value": "LockBit",
             "confidence": 0.95,
         },
     ]

@@ -82,6 +82,11 @@ def get_embedding_model() -> "SentenceTransformer | None":
             logger.info("Loaded embedding model all-MiniLM-L6-v2 (singleton)")
         except Exception as exc:
             logger.warning("Failed to load embedding model: %s", exc)
+            logger.warning(
+                "Deterministic embedding fallback is active; install "
+                "voidaccess[nlp] (torch + sentence-transformers) for full "
+                "vector embeddings."
+            )
             _model = _FallbackEmbeddingModel()
 
     return _model

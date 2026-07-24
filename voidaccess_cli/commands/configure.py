@@ -418,7 +418,7 @@ def configure_proxy(
         api_label = "[green]enabled[/green]" if api_transport else "[red]disabled[/red]"
         proxy_label = "[green]enabled[/green]" if proxy_transport else "[red]disabled[/red]"
         console.print(f"  REST API transport      : {api_label}")
-        console.print(f"  Residential proxy       : {proxy_label}")
+        console.print(f"  Proxy transport         : {proxy_label}")
         console.print("  Scope           : paste + RSS only, never Tor")
         if proxy_transport and (not proxy_username or not proxy_password):
             console.print(
@@ -457,7 +457,7 @@ def configure_proxy(
         console.print(f"ScrapingAnt proxy transport [green]{state}[/green]")
         if enable_proxy and not cfg.get("enrichment_keys", {}).get("SCRAPINGANT_API_KEY"):
             console.print(
-                "[yellow]Note:[/yellow] verify that the separate proxy username/password pair is configured — "
+                "[yellow]Note:[/yellow] no SCRAPINGANT_API_KEY configured yet — "
                 "set one with `voidaccess configure proxy` (interactive) or "
                 "`voidaccess configure keys`."
             )
@@ -467,4 +467,3 @@ def configure_proxy(
     _prompt_scrapingant(cfg)
     cli_config.save_config(cfg)
     console.print(f"[green]Saved to[/green] {cli_config.CONFIG_PATH}")
-

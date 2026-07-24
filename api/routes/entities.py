@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from api.auth import CurrentUser, get_current_user
 from api.errors import GENERIC_ERROR_MESSAGE, log_exception
+from extractor.identity import entity_canonical_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -321,7 +322,9 @@ async def get_stylometry_analysis(
             if entity is None:
                 raise HTTPException(status_code=404, detail="Entity not found")
 
-            canonical = entity.canonical_value or entity.value.lower()
+            # Canonical dedup key via the shared identity module (was an inline
+            # `entity.canonical_value or entity.value.lower()` re-derivation).
+            canonical = entity_canonical_id(entity)
 
             related = (
                 session.query(Entity)
@@ -406,7 +409,7 @@ async def get_stylometry_analysis(
                     similar_actors = await asyncio.to_thread(
                         _find_similar_actors,
                         profile=profile,
-                        canonical_value=entity.canonical_value or entity.value.lower(),
+                        canonical_value=entity_canonical_id(entity),
                         entity_type=entity.entity_type,
                     )
             except Exception as e:
@@ -474,7 +477,9 @@ async def get_opsec_analysis(
             if entity is None:
                 raise HTTPException(status_code=404, detail="Entity not found")
 
-            canonical = entity.canonical_value or entity.value.lower()
+            # Canonical dedup key via the shared identity module (was an inline
+            # `entity.canonical_value or entity.value.lower()` re-derivation).
+            canonical = entity_canonical_id(entity)
             related = (
                 session.query(Entity)
                 .filter(
@@ -827,17 +832,44 @@ def _get_entity_value(entity_id: str) -> Optional[str]:
         return None
 
 
-def _resolve_graph_node_id(graph, entity_value: str) -> Optional[str]:
-    """Resolve graph node by exact value, then by handle@domain prefix."""
+def _resolve_graph_node_id(
+    graph, entity_value: str, entity_type: Optional[str] = None
+) -> Optional[str]:
+    """Resolve a graph node id for an entity value.
+
+    The graph is keyed by canonical identity (extractor.identity.entity_graph_id).
+    When ``entity_type`` is known, the lookup value is canonicalised through the
+    same shared module so it matches the node regardless of the casing the value
+    was observed in — closing the case-sensitivity gap the audit flagged.
+    Without a type it falls back to the historical exact-then-``handle@domain``
+    prefix behaviour.
+    """
     if graph is None:
         return None
-    if graph.has_node(entity_value):
-        return entity_value
 
-    prefix = f"{entity_value}@"
-    for node_id in graph.nodes:
-        if isinstance(node_id, str) and node_id.startswith(prefix):
-            return node_id
+    candidates = [entity_value]
+    if entity_type:
+        try:
+            from types import SimpleNamespace  # noqa: PLC0415
+
+            canon = entity_canonical_id(
+                SimpleNamespace(entity_type=entity_type, value=entity_value)
+            )
+            if canon and canon not in candidates:
+                candidates.append(canon)
+        except Exception:
+            pass
+
+    # 1) exact match on any candidate
+    for cand in candidates:
+        if graph.has_node(cand):
+            return cand
+    # 2) handle@domain prefix match on any candidate
+    for cand in candidates:
+        prefix = f"{cand}@"
+        for node_id in graph.nodes:
+            if isinstance(node_id, str) and node_id.startswith(prefix):
+                return node_id
     return None
 
 

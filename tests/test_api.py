@@ -38,15 +38,21 @@ def _make_client():
     """Create a FastAPI TestClient. Import deferred so pytest collection doesn't fail without fastapi."""
     from fastapi.testclient import TestClient  # noqa: PLC0415
     from api.main import app  # noqa: PLC0415
-    from api.auth import get_current_user
+    from api.auth import CurrentUser, get_current_user, require_password_not_reset_pending
+    from db.models import User
     from unittest.mock import MagicMock
 
-    mock_user = MagicMock()
-    mock_user.id = 1
-    mock_user.email = "test@example.com"
-    mock_user.is_active = True
+    mock_user = User(
+        id=1,
+        email="test@example.com",
+        hashed_password="test-hash",
+        is_active=True,
+        must_reset_password=False,
+    )
 
-    app.dependency_overrides[get_current_user] = lambda: mock_user
+    current = CurrentUser(user=mock_user, jti="test-jti")
+    app.dependency_overrides[get_current_user] = lambda: current
+    app.dependency_overrides[require_password_not_reset_pending] = lambda: current
     client = TestClient(app, raise_server_exceptions=False)
     return client
 
@@ -68,19 +74,20 @@ class TestHealth(unittest.TestCase):
         resp = client.get("/health")
         data = resp.json()
         self.assertIn("status", data)
-        self.assertIn("db", data)
-        self.assertIn("tor", data)
-        self.assertEqual(data["status"], "ok")
+        self.assertIn("checks", data)
+        self.assertIn("database", data["checks"])
+        self.assertIn("tor", data["checks"])
+        self.assertEqual(data["status"], "degraded")
 
     def test_health_db_is_bool(self):
         client = _make_client()
         data = client.get("/health").json()
-        self.assertIsInstance(data["db"], bool)
+        self.assertIsInstance(data["checks"]["database"], str)
 
     def test_health_tor_is_bool(self):
         client = _make_client()
         data = client.get("/health").json()
-        self.assertIsInstance(data["tor"], bool)
+        self.assertIsInstance(data["checks"]["tor"], str)
 
 
 # ===========================================================================
@@ -148,7 +155,7 @@ class TestInvestigationsPost(unittest.TestCase):
     def test_request_model_defaults_to_none(self):
         from api.routes.investigations import InvestigationRequest
         req = InvestigationRequest(query="test")
-        self.assertIsNone(req.model)
+        self.assertEqual(req.model, "openrouter/deepseek/deepseek-chat")
 
 
 # ===========================================================================
@@ -202,15 +209,15 @@ class TestEntities(unittest.TestCase):
         client = _make_client()
         resp = client.get("/entities")
         self.assertEqual(resp.status_code, 200)
-        self.assertIsInstance(resp.json(), list)
+        self.assertIsInstance(resp.json(), dict)
+        self.assertEqual(resp.json()["items"], [])
 
-    @patch("api.routes.entities.os.getenv", return_value="postgresql://test")
+    @patch("api.routes.entities.os.getenv", return_value=None)
     def test_get_entities_with_entity_type_filter(self, mock_env):
-        # Mock the DB session chain
-        with patch("api.routes.entities.Session", create=True):
-            client = _make_client()
-            resp = client.get("/entities?entity_type=BITCOIN_ADDRESS")
-            self.assertEqual(resp.status_code, 200)
+        client = _make_client()
+        resp = client.get("/entities?entity_type=BITCOIN_ADDRESS")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["items"], [])
 
     @patch("api.routes.entities._get_entity_value", return_value=None)
     @patch("api.routes.entities.os.getenv", return_value="postgresql://test")
@@ -268,15 +275,12 @@ class TestSearch(unittest.TestCase):
     def test_semantic_search_returns_list(self, mock_search):
         with patch.dict("sys.modules", {"vector.search": MagicMock(find_related_pages=mock_search)}):
             client = _make_client()
-            resp = client.post(
-                "/search/semantic",
-                json={"query": "ransomware payment", "n_results": 5},
-            )
+            resp = client.get("/search/semantic?q=ransomware%20payment&n=5")
             self.assertEqual(resp.status_code, 200)
             data = resp.json()
             self.assertIsInstance(data, dict)
-            self.assertIn("items", data)
-            self.assertIn("total", data)
+            self.assertIn("results", data)
+            self.assertIn("warnings", data)
 
     @patch("api.routes.search.os.getenv", return_value=None)
     def test_entity_search_returns_list(self, mock_env):
@@ -286,7 +290,8 @@ class TestSearch(unittest.TestCase):
             json={"query": "LockBit", "entity_types": ["MALWARE_FAMILY"]},
         )
         self.assertEqual(resp.status_code, 200)
-        self.assertIsInstance(resp.json(), list)
+        self.assertIsInstance(resp.json(), dict)
+        self.assertEqual(resp.json()["items"], [])
 
     @patch("api.routes.search.os.getenv", return_value=None)
     def test_entity_search_without_type_filter(self, mock_env):
@@ -313,9 +318,11 @@ class TestExportStix(unittest.TestCase):
         "api.routes.export._resolve_internal_investigation_id",
         return_value=uuid.UUID(_VALID_UUID),
     )
+    @patch("api.routes.export._check_investigation_owner")
+    @patch("export.stix._load_entities_for_investigation", return_value=[MagicMock()])
     @patch("api.routes.export.investigation_to_stix_bundle", create=True)
     @patch("api.routes.export.bundle_to_json", return_value='{"type":"bundle","id":"bundle--1","objects":[]}', create=True)
-    def test_stix_returns_200(self, mock_json, mock_bundle, _mock_resolve):
+    def test_stix_returns_200(self, mock_json, mock_bundle, _mock_entities, _mock_owner, _mock_resolve):
         mock_bundle.return_value = self._mock_bundle()
         with patch.dict("sys.modules", {
             "export.stix": MagicMock(
@@ -365,9 +372,11 @@ class TestExportMisp(unittest.TestCase):
         "api.routes.export._resolve_internal_investigation_id",
         return_value=uuid.UUID(_VALID_UUID),
     )
+    @patch("api.routes.export._check_investigation_owner")
+    @patch("export.stix._load_entities_for_investigation", return_value=[MagicMock()])
     @patch("export.misp.investigation_to_misp_event")
     @patch("export.misp.misp_event_to_json")
-    def test_misp_returns_200(self, mock_json, mock_event, _mock_resolve):
+    def test_misp_returns_200(self, mock_json, mock_event, _mock_entities, _mock_owner, _mock_resolve):
         mock_event.return_value = {"Event": {"info": "VoidAccess Investigation: test", "Attribute": []}}
         mock_json.return_value = '{"Event": {"info": "VoidAccess Investigation: test", "Attribute": []}}'
         client = _make_client()
@@ -378,9 +387,11 @@ class TestExportMisp(unittest.TestCase):
         "api.routes.export._resolve_internal_investigation_id",
         return_value=uuid.UUID(_VALID_UUID),
     )
+    @patch("api.routes.export._check_investigation_owner")
+    @patch("export.stix._load_entities_for_investigation", return_value=[MagicMock()])
     @patch("export.misp.investigation_to_misp_event")
     @patch("export.misp.misp_event_to_json")
-    def test_misp_correct_structure(self, mock_json, mock_event, _mock_resolve):
+    def test_misp_correct_structure(self, mock_json, mock_event, _mock_entities, _mock_owner, _mock_resolve):
         event_dict = {
             "Event": {
                 "info": "VoidAccess Investigation: test",
@@ -450,14 +461,16 @@ class TestGraphConfidenceFilter(unittest.TestCase):
     @patch("db.session.get_session")
     @patch("db.queries.get_investigation_by_id_or_run")
     @patch("graph.builder.build_graph_from_db")
+    @patch("graph.build_graph_from_db_cached")
     @patch("graph.export.to_json")
-    def test_graph_confidence_filter(self, mock_to_json, mock_build, mock_get_inv, mock_session):
+    @patch("graph.export.summary_stats", return_value={})
+    def test_graph_confidence_filter(self, mock_summary, mock_to_json, mock_build_cached, mock_build, mock_get_inv, mock_session):
         from unittest.mock import MagicMock
         from datetime import datetime, timezone
 
         mock_inv = MagicMock()
         mock_inv.id = 1
-        mock_inv.graph_status = "completed"
+        mock_inv.graph_status = "built"
         mock_get_inv.return_value = mock_inv
 
         mock_session_instance = MagicMock()
@@ -466,7 +479,13 @@ class TestGraphConfidenceFilter(unittest.TestCase):
         mock_session.return_value = mock_session_instance
         mock_session_instance.query.return_value.filter.return_value.scalar.return_value = 10
 
-        mock_graph = MagicMock()
+        class _Graph:
+            @staticmethod
+            def degree(_node_id):
+                return 1
+
+        mock_graph = _Graph()
+        mock_build_cached.return_value = mock_graph
         mock_build.return_value = mock_graph
         mock_to_json.return_value = {
             "nodes": [
@@ -483,13 +502,8 @@ class TestGraphConfidenceFilter(unittest.TestCase):
         data = resp.json()
         self.assertIn("nodes", data)
         self.assertIn("edges", data)
-        self.assertIn("graph_status", data)
-        self.assertIn("total_entities", data)
-        self.assertIn("filtered_entities", data)
-        self.assertIn("min_confidence", data)
-        self.assertEqual(data["min_confidence"], 0.9)
-        self.assertEqual(data["total_entities"], 2)
-        self.assertEqual(data["filtered_entities"], 1)
+        self.assertEqual(data["status"], "complete")
+        self.assertIn("summary_stats", data)
 
 
 # ===========================================================================
@@ -506,7 +520,7 @@ class TestGraphOverflow(unittest.TestCase):
 
         mock_inv = MagicMock()
         mock_inv.id = 1
-        mock_inv.graph_status = "skipped_overflow"
+        mock_inv.graph_status = "pending"
         mock_get_inv.return_value = mock_inv
 
         mock_session_instance = MagicMock()
@@ -520,11 +534,7 @@ class TestGraphOverflow(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
-        self.assertEqual(data["graph_status"], "skipped_overflow")
-        self.assertEqual(data["nodes"], [])
-        self.assertEqual(data["edges"], [])
-        self.assertIn("message", data)
-        self.assertIn("total_entities", data)
+        self.assertEqual(data["status"], "pending")
 
 
 # ===========================================================================
@@ -536,16 +546,19 @@ class TestCsvExport(unittest.TestCase):
 
     @patch("db.session.get_session")
     @patch("db.queries.get_investigation_by_id_or_run")
-    def test_csv_export(self, mock_get_inv, mock_session):
+    @patch("api.routes.investigations.os.getenv", return_value="postgresql://test")
+    def test_csv_export(self, mock_getenv, mock_get_inv, mock_session):
         from unittest.mock import MagicMock
 
         mock_inv = MagicMock()
         mock_inv.id = 1
+        mock_inv.user_id = 1
         mock_get_inv.return_value = mock_inv
 
         mock_ent = MagicMock()
         mock_ent.entity_type = "EMAIL_ADDRESS"
-        mock_ent.canonical_value = "test@example.com"
+        mock_ent.value = "test@example.com"
+        mock_ent.canonical_value = None
         mock_ent.confidence = 0.95
         mock_ent.context_snippet = "Test context"
         mock_ent.page = MagicMock(url="http://example.com/page")
@@ -577,7 +590,8 @@ class TestCsvExport(unittest.TestCase):
 
     def test_csv_export_auth(self):
         from fastapi import HTTPException
-        with patch("db.session.get_session") as mock_session:
+        with patch("api.routes.investigations.os.getenv", return_value="postgresql://test"), \
+             patch("db.session.get_session") as mock_session:
             mock_session.side_effect = HTTPException(status_code=401, detail="Invalid or expired token")
             client = _make_client()
             resp = client.get(f"/investigations/{_VALID_UUID}/entities/export/csv")

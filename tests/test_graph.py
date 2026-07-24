@@ -237,6 +237,29 @@ class TestBuilder(unittest.TestCase):
         self.assertEqual(meta.get("handle"), "hacker99")
         self.assertEqual(meta.get("forum"), "darkforum.onion")
 
+    def test_add_entity_disambiguates_same_handle_by_forum(self):
+        """Real NormalizedEntity inputs keep same-named forum handles distinct."""
+        from graph.builder import add_entity_to_graph
+        first = self._make_entity(source_url="https://forum-one.example/thread/1")
+        second = self._make_entity(source_url="https://forum-two.example/thread/9")
+        graph = nx.MultiDiGraph()
+        add_entity_to_graph(graph, first)
+        add_entity_to_graph(graph, second)
+        self.assertEqual(graph.number_of_nodes(), 2)
+        self.assertEqual(set(graph.nodes), {
+            "darkking99@forum-one.example", "darkking99@forum-two.example",
+        })
+
+    def test_add_entity_canonicalizes_mixed_case_real_entity(self):
+        """Real NormalizedEntity inputs use canonical graph identity."""
+        from graph.builder import add_entity_to_graph
+        first = self._make_entity(entity_type="MALWARE_FAMILY", value="LockBit")
+        second = self._make_entity(entity_type="MALWARE_FAMILY", value="lockbit")
+        graph = nx.MultiDiGraph()
+        add_entity_to_graph(graph, first)
+        add_entity_to_graph(graph, second)
+        self.assertEqual(list(graph.nodes), ["lockbit"])
+
     # --- add_relationship ---
 
     def test_add_relationship_adds_directed_edge(self):

@@ -30,6 +30,8 @@ from textual.widgets import (
     Static,
 )
 
+from extractor.identity import entity_canonical_id, entity_display_id
+
 
 # NOTE: keys are UPPERCASE to match the normalized entity_type returned by
 # voidaccess_cli.adapters.sqlite._entity_row. If you add a new type here,
@@ -160,7 +162,7 @@ class EntityBrowserApp(App):
         table.clear()
         for e in self._filtered():
             glyph, _colour = TYPE_SHORT.get(e["entity_type"], ("?", "white"))
-            val = (e.get("canonical_value") or e.get("value") or "")[:42]
+            val = entity_display_id(e)[:42]
             conn = self.connection_count.get(e["id"], 0)
             badges = " ".join(_badges_for_entity(e))
             # Cm column: community id from the backend partition; blank when
@@ -230,7 +232,7 @@ class EntityBrowserApp(App):
 
     def _render_detail(self, entity: dict) -> None:
         lines: list[str] = []
-        val = entity.get("canonical_value") or entity.get("value") or ""
+        val = entity_display_id(entity)
         lines.append(f"[b]Entity:[/b] {val}")
         lines.append(
             f"Type: {entity['entity_type']}  |  Confidence: "
@@ -260,7 +262,7 @@ class EntityBrowserApp(App):
             for other_id, edge_type, conf in neighbours[:10]:
                 other = next((e for e in self.entities if e["id"] == other_id), None)
                 if other:
-                    other_val = (other.get("canonical_value") or other.get("value") or "")[:48]
+                    other_val = entity_display_id(other)[:48]
                     lines.append(f"  → {other_val:50} {edge_type:18} {conf:.2f}")
         detail: Static = self.query_one("#detail", Static)
         detail.update("\n".join(lines))
@@ -404,13 +406,15 @@ class PathScreen(ModalScreen):
             G.add_node(
                 str(e["id"]),
                 entity_type=e.get("entity_type", ""),
-                canonical_value=e.get("canonical_value") or e.get("value") or "",
+                canonical_value=entity_canonical_id(e),
             )
         # Build a stable lookup from the user-typed value → entity id.
         value_to_id: dict[str, str] = {}
         for e in ents:
-            cv = (e.get("canonical_value") or "").lower()
-            v  = (e.get("value") or "").lower()
+            cv = entity_canonical_id(e)
+            v = entity_display_id(e)
+            if (e.get("entity_type") or "").upper() in {"ETHEREUM_ADDRESS", "ETH_ADDRESS"}:
+                cv = ""
             if cv:
                 value_to_id[cv] = str(e["id"])
             if v and v not in value_to_id:
@@ -433,7 +437,14 @@ class PathScreen(ModalScreen):
         def _resolve(value: str) -> "str | None":
             if value in G:
                 return value  # already an entity id
-            return value_to_id.get(value.lower())
+            if value in value_to_id:
+                return value_to_id[value]
+            for entity in ents:
+                if (entity.get("entity_type") or "").upper() in {"ETHEREUM_ADDRESS", "ETH_ADDRESS"}:
+                    continue
+                if entity_canonical_id({"entity_type": entity.get("entity_type") or "", "value": value}) == entity_canonical_id(entity):
+                    return str(entity["id"])
+            return None
 
         a_id = _resolve(a_val)
         b_id = _resolve(b_val)
@@ -458,7 +469,7 @@ class PathScreen(ModalScreen):
         arrow_values: list[str] = []
         for nid in node_path:
             ent = ents_by_id.get(nid, {})
-            val = ent.get("canonical_value") or ent.get("value") or nid
+            val = entity_display_id(ent) or nid
             arrow_values.append(val)
 
         chain = " → ".join(arrow_values)
@@ -474,7 +485,7 @@ class PathScreen(ModalScreen):
             ent = ents_by_id.get(nid, {})
             etype = ent.get("entity_type", "")
             glyph, colour = TYPE_SHORT.get(etype, ("?", "white"))
-            val = (ent.get("canonical_value") or ent.get("value") or nid)[:32]
+            val = (entity_display_id(ent) or nid)[:32]
             conf = float(ent.get("confidence") or 0.0)
 
             if idx > 0:

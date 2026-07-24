@@ -149,7 +149,13 @@ def select_relevant_pages(
     
     if not valid_pages:
         return []
-    
+
+    # Select the embedding implementation before the size shortcut.  When
+    # torch/sentence-transformers are unavailable this is where the
+    # deterministic fallback is selected and its operator notice is emitted;
+    # small investigations must receive the same notice as large ones.
+    model = _get_embed_model()
+
     # If small enough, return all without ranking
     total_chars = sum(len(p.get("content") or p.get("text") or "") for p in valid_pages)
     if total_chars <= max_chars and len(valid_pages) <= top_k:
@@ -159,7 +165,6 @@ def select_relevant_pages(
         import numpy as np
         from numpy import linalg
 
-        model = _get_embed_model()
         if model is None:
             raise RuntimeError("SentenceTransformer model not available")
         
@@ -256,11 +261,32 @@ def get_llm(model_choice, api_keys: dict | None = None):
         "GOOGLE_API_KEY":     "google_api_key",
         "GROQ_API_KEY":       "groq_api_key",
     }
-    if api_keys:
-        for key_name, key_value in api_keys.items():
-            if key_value and key_name in _ENV_TO_LANGCHAIN:
-                param_name = _ENV_TO_LANGCHAIN[key_name]
-                model_specific_params[param_name] = key_value
+    # Prefer explicitly supplied per-user keys, but also resolve the current
+    # process environment when callers omit api_keys.  The CLI injects its
+    # saved config at runtime, so relying only on import-time llm_utils values
+    # silently drops a valid OPENROUTER_API_KEY.
+    runtime_keys = dict(api_keys or {})
+    base_url = str(model_specific_params.get("base_url") or "").lower()
+    if "openrouter" in base_url:
+        runtime_keys.setdefault("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY", ""))
+    elif "groq.com" in base_url:
+        runtime_keys.setdefault("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+    elif "ChatAnthropic" in getattr(llm_class, "__name__", ""):
+        runtime_keys.setdefault("ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_API_KEY", ""))
+    elif "ChatGoogle" in getattr(llm_class, "__name__", ""):
+        runtime_keys.setdefault("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+    elif "ChatOpenAI" in getattr(llm_class, "__name__", ""):
+        runtime_keys.setdefault("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+
+    for key_name, key_value in runtime_keys.items():
+        if key_value and key_name in _ENV_TO_LANGCHAIN:
+            param_name = _ENV_TO_LANGCHAIN[key_name]
+            model_specific_params[param_name] = key_value
+            # ChatOpenAI uses `api_key` as the canonical constructor field;
+            # keep it synchronized with the mapped alias when a model config
+            # was created from stale import-time defaults.
+            if param_name == "openai_api_key":
+                model_specific_params["api_key"] = key_value
 
     # Combine common parameters with model-specific parameters
     # Model-specific parameters will override common ones if there are any conflicts

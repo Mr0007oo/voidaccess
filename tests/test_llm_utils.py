@@ -91,7 +91,7 @@ def test_get_llm_unknown_prefix_fallback(caplog):
     from voidaccess.llm_utils import resolve_model_config
     from langchain_openai import ChatOpenAI
 
-    with caplog.at_level(logging.WARNING, logger="llm_utils"):
+    with caplog.at_level(logging.WARNING):
         config = resolve_model_config("totally-unknown-provider/some-model")
 
     assert config is not None

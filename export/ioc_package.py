@@ -45,7 +45,10 @@ import logging
 import re
 import zipfile
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Iterable, Optional
+
+from extractor.identity import entity_canonical_id
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +57,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PACKAGE_FORMAT = "voidaccess-ioc-v1"
-PACKAGE_VERSION = "1.8.2"
+PACKAGE_VERSION = "1.9.3"
 SNORT_SID_BASE = 9000001  # 9xxxxxx reserved for VoidAccess-generated rules
 
 # Map extractor upper-case entity types to the per-file bucket they belong to.
@@ -138,19 +141,28 @@ def _entity_type(e: Any) -> str:
 
 
 def _entity_value(e: Any) -> str:
-    """Return the entity's primary value, preferring canonical_value."""
+    """Return the entity's canonical value via the shared identity module.
+
+    Migrated (audit finding 1.3 / 3.9 item 2) from the old
+    ``entity.canonical_value or entity.value`` pattern to call
+    ``extractor.identity.entity_canonical_id`` directly.  Phase 1 already fixed
+    ``NormalizedEntity.canonical_value`` so that old pattern no longer returned
+    the raw value for pipeline-stage entities — but this makes the choice
+    explicit at the call site (one shared function, not an assumption about
+    what a property returns), so DB-backed and pipeline-stage versions of the
+    same entity can never produce inconsistent casing here again.
+    """
+    etype = _entity_type(e)
     if isinstance(e, dict):
-        return (
-            e.get("canonical_value")
-            or e.get("value")
-            or e.get("canonical")
-            or ""
-        ) or ""
-    return (
-        getattr(e, "canonical_value", None)
-        or getattr(e, "value", None)
-        or ""
-    ) or ""
+        raw = e.get("value") or e.get("canonical_value") or e.get("canonical") or ""
+    else:
+        raw = getattr(e, "value", None) or getattr(e, "canonical_value", None) or ""
+    if not raw:
+        return ""
+    try:
+        return entity_canonical_id(SimpleNamespace(entity_type=etype, value=raw))
+    except Exception:
+        return raw
 
 
 def _entity_confidence(e: Any) -> float:
@@ -730,9 +742,7 @@ class _DictEntityAdapter:
 
     @property
     def canonical_value(self) -> str:
-        if isinstance(self._d, dict):
-            return self._d.get("canonical_value") or self._d.get("value") or ""
-        return ""
+        return entity_canonical_id(self._d)
 
     @property
     def confidence(self) -> float:

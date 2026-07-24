@@ -22,6 +22,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from extractor.identity import entity_canonical_id
+
 console = Console()
 
 
@@ -98,8 +100,15 @@ def _print_path(data: dict, from_value: str, to_value: str) -> None:
     ents_by_id = {str(e["id"]): e for e in entities}
     value_to_id: dict[str, str] = {}
     for e in entities:
-        cv = (e.get("canonical_value") or "").lower()
-        v = (e.get("value") or "").lower()
+        cv = entity_canonical_id(e)
+        v = (e.get("value") or "").strip()
+        # EIP-55 checksums are case-sensitive.  Keep only the exact observed
+        # spelling for Ethereum addresses; canonical fallback is intentionally
+        # reserved for case-insensitive identity types.
+        if (e.get("entity_type") or "").upper() in {
+            "ETHEREUM_ADDRESS", "ETH_ADDRESS"
+        }:
+            cv = ""
         if cv:
             value_to_id[cv] = str(e["id"])
         if v and v not in value_to_id:
@@ -110,7 +119,7 @@ def _print_path(data: dict, from_value: str, to_value: str) -> None:
         G.add_node(
             str(e["id"]),
             entity_type=e.get("entity_type", ""),
-            canonical_value=e.get("canonical_value") or e.get("value") or "",
+            canonical_value=entity_canonical_id(e),
         )
     for r in relationships:
         src = str(r.get("entity_a_id", ""))
@@ -129,7 +138,19 @@ def _print_path(data: dict, from_value: str, to_value: str) -> None:
     def _resolve(value: str) -> Optional[str]:
         if value in G:
             return value
-        return value_to_id.get(value.lower())
+        if value in value_to_id:
+            return value_to_id[value]
+        for entity in entities:
+            if (entity.get("entity_type") or "").upper() in {
+                "ETHEREUM_ADDRESS", "ETH_ADDRESS"
+            }:
+                continue
+            if entity_canonical_id({
+                "entity_type": entity.get("entity_type") or "",
+                "value": value,
+            }) == entity_canonical_id(entity):
+                return str(entity["id"])
+        return None
 
     a_id = _resolve(from_value)
     b_id = _resolve(to_value)
@@ -163,12 +184,14 @@ def _print_path(data: dict, from_value: str, to_value: str) -> None:
 def _print_summary(data: dict) -> None:
     inv = data.get("investigation") or data
     entities = data.get("entities", [])
+    relationships = data.get("relationships", []) or []
     table = Table(title="Investigation summary")
     table.add_column("Field", style="bold")
     table.add_column("Value")
     table.add_row("Query", str(inv.get("query") or ""))
     table.add_row("Status", str(inv.get("status") or ""))
     table.add_row("Entities", str(len(entities)))
+    table.add_row("Relationships", str(len(relationships)))
     table.add_row("Created", str(inv.get("created_at") or "")[:19])
     table.add_row("Summary", (str(inv.get("summary") or "—"))[:120])
     console.print(table)

@@ -510,6 +510,7 @@ class TestSessionFactory:
         """get_engine() with no URL and no DATABASE_URL env var must raise clearly."""
         import db.session as sess_module
 
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         monkeypatch.setattr(sess_module, "DATABASE_URL", None)
         with pytest.raises(RuntimeError, match="DATABASE_URL"):
             sess_module.get_engine(url=None)

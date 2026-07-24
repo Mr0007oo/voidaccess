@@ -85,12 +85,29 @@ def run(
         target, suffix, fmt=fmt, query=(data.get("investigation") or {}).get("query")
     )
     out_path = Path(out_path).expanduser()
+    if out_path.exists():
+        safe_path = _collision_safe_output_path(out_path, fmt)
+        console.print(
+            f"[yellow]Warning:[/yellow] {out_path} already exists; "
+            f"writing {safe_path} to avoid overwriting it."
+        )
+        out_path = safe_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(payload, bytes):
         out_path.write_bytes(payload)
     else:
         out_path.write_text(payload, encoding="utf-8")
     console.print(f"[green]Wrote[/green] {out_path}")
+
+
+def _collision_safe_output_path(path: Path, fmt: str) -> Path:
+    """Return a format-aware unused path without overwriting an export."""
+    candidate = path.with_name(f"{path.stem}-{fmt}{path.suffix}")
+    counter = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}-{fmt}-{counter}{path.suffix}")
+        counter += 1
+    return candidate
 
 
 def _load_target(target: str) -> tuple[Optional[str], Optional[dict]]:

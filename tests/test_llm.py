@@ -19,11 +19,34 @@ def test_select_relevant_pages_empty():
     assert result == []
 
 
+def test_get_llm_uses_runtime_provider_key_when_api_keys_omitted(monkeypatch):
+    """A key injected after module import must reach the LangChain client."""
+    from unittest.mock import patch
+    from langchain_openai import ChatOpenAI
+    from voidaccess.llm import get_llm
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "runtime-openrouter-key")
+    with patch.object(ChatOpenAI, "__init__", return_value=None) as init:
+        get_llm("openrouter/test-model")
+
+    assert init.call_args.kwargs["api_key"] == "runtime-openrouter-key"
+
+
 def test_select_relevant_pages_fits_budget():
     """Pages that fit in budget are all returned."""
     pages = [make_page("a" * 100, f"http://{i}.onion") for i in range(5)]
     result = select_relevant_pages("test query", pages, max_chars=10000)
     assert len(result) == 5
+
+
+def test_select_relevant_pages_selects_embedding_model_before_small_run_shortcut():
+    """The fallback notice path is reached even when ranking is unnecessary."""
+    from unittest.mock import MagicMock, patch
+
+    pages = [make_page("x" * 100)]
+    with patch("voidaccess.llm._get_embed_model", return_value=MagicMock()) as get_model:
+        assert select_relevant_pages("test query", pages, max_chars=10000) == pages
+    get_model.assert_called_once()
 
 
 def test_select_relevant_pages_trims_to_budget():

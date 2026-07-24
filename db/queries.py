@@ -348,8 +348,8 @@ def upsert_entity_canonical(
     
     if existing:
         # Update confidence if new extraction is more confident
-        if confidence > existing.confidence:
-            existing.confidence = confidence
+        from extractor.confidence import get_entity_confidence
+        existing.confidence = get_entity_confidence(existing, confidence)
         # Update context if we have a better snippet
         if context_snippet and len(context_snippet) > len(existing.context_snippet or ""):
             existing.context_snippet = context_snippet

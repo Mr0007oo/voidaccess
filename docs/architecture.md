@@ -1288,6 +1288,16 @@ GET    /debug/search-test                      — test search engine (JWT requi
 
 ## 13. Configuration Reference
 
+### 13.0 Optional vector embeddings
+
+PyTorch and sentence-transformers are optional. Without them, the embedding
+pipeline logs a one-time notice and uses a deterministic SHA-256 fallback
+encoder. Install the full vector stack with:
+
+```bash
+pip install "voidaccess[nlp]"
+```
+
 Copy `.env.example` to `.env`. The API reads all values at startup via `config.py`, which strips accidentally-quoted values and provides typed defaults.
 
 ### 13.1 Required
@@ -1506,4 +1516,3 @@ Rationale: single-operator self-hosted tool with 8-hour (not short-lived) tokens
 ### proxy transport Over Plain HTTP Can Return 502
 
 When `VOIDACCESS_USE_PROXY=true` is set and the target URL is plain HTTP (not HTTPS), the ScrapingAnt proxy transport endpoint occasionally returns HTTP 502 instead of the target's content. HTTPS targets succeed reliably. Because real-world paste sites and the curated RSS feed list are nearly universally HTTPS, this only surfaces against an unusual plain-HTTP target and the silent fallback to direct (`sources/proxy_client.py::_fetch_via_proxy_mode` returns `None` on `resp.status >= 500`, then the chokepoint retries without the proxy) still returns usable content. The REST API transport (`VOIDACCESS_USE_PROXIES=true`) is not affected — the same chokepoint has no observed flakiness on plain HTTP via the `/v2/general` endpoint. If a future investigation produces unexpectedly few results from a plain-HTTP source, the cause is this; switching to REST API or to direct is a workaround.
-

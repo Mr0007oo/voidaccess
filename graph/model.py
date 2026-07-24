@@ -95,6 +95,58 @@ class EDGE_TYPES:
     COMMUNICATES_WITH = "COMMUNICATES_WITH"     # C2 / host communication
 
 
+# Metadata for typed relationships lives with the canonical graph vocabulary.
+# Consumers should derive their prompt and export representations from these
+# definitions rather than maintaining parallel lists.
+RELATIONSHIP_TYPE_STIX: dict[str, str] = {
+    EDGE_TYPES.CO_APPEARED_ON: "related-to",
+    EDGE_TYPES.CO_INVESTIGATION: "related-to",
+    EDGE_TYPES.POSTED_BY: "attributed-to",
+    EDGE_TYPES.LINKED_TO: "related-to",
+    EDGE_TYPES.PAID_TO: "related-to",
+    EDGE_TYPES.MEMBER_OF: "member-of",
+    EDGE_TYPES.USES: "uses",
+    EDGE_TYPES.CLAIMED: "attributed-to",
+    EDGE_TYPES.LIKELY_SAME_ACTOR: "related-to",
+    EDGE_TYPES.CONFIRMED_SAME_ACTOR: "related-to",
+    EDGE_TYPES.FUNDED_BY: "related-to",
+    EDGE_TYPES.DROPS: "drops",
+    EDGE_TYPES.TARGETS: "targets",
+    EDGE_TYPES.EXPLOITS: "exploits",
+    EDGE_TYPES.COMMUNICATES_WITH: "communicates-with",
+    EDGE_TYPES.CONTROLS: "related-to",
+}
+
+# Only typed LLM relationships need endpoint compatibility validation.  The
+# key set is also the canonical set exposed to the LLM parser.
+RELATIONSHIP_TYPE_COMPATIBILITY: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    EDGE_TYPES.USES: (
+        frozenset({"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE"}),
+        frozenset({"MALWARE_FAMILY", "MALWARE", "TOOL", "SOFTWARE"}),
+    ),
+    EDGE_TYPES.DROPS: (
+        frozenset({"MALWARE_FAMILY", "MALWARE"}),
+        frozenset({"MALWARE_FAMILY", "MALWARE", "FILE_HASH_MD5", "FILE_HASH_SHA1", "FILE_HASH_SHA256"}),
+    ),
+    EDGE_TYPES.CONTROLS: (
+        frozenset({"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE"}),
+        frozenset({"CRYPTO_WALLET", "BITCOIN_ADDRESS", "MONERO_ADDRESS", "ETH_ADDRESS", "ETHEREUM_ADDRESS", "LITECOIN_ADDRESS", "ZCASH_ADDRESS", "DOGECOIN_ADDRESS", "XRP_ADDRESS", "SOLANA_ADDRESS", "TRON_ADDRESS", "BITCOIN_CASH_ADDRESS", "DASH_ADDRESS", "IP_ADDRESS", "IPV6_ADDRESS", "DOMAIN", "ENS_DOMAIN", "ONION_URL"}),
+    ),
+    EDGE_TYPES.TARGETS: (
+        frozenset({"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE", "MALWARE_FAMILY", "MALWARE"}),
+        frozenset({"ORGANIZATION_NAME"}),
+    ),
+    EDGE_TYPES.EXPLOITS: (
+        frozenset({"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE", "MALWARE_FAMILY", "MALWARE"}),
+        frozenset({"CVE", "CVE_NUMBER", "EXPLOIT_DB_ID"}),
+    ),
+    EDGE_TYPES.COMMUNICATES_WITH: (
+        frozenset({"RANSOMWARE_GROUP", "THREAT_ACTOR", "THREAT_ACTOR_HANDLE", "MALWARE_FAMILY", "MALWARE"}),
+        frozenset({"IP_ADDRESS", "IPV6_ADDRESS", "DOMAIN", "ENS_DOMAIN", "ONION_URL", "TELEGRAM_HANDLE", "DISCORD_HANDLE", "XMPP_JID", "TOX_ID", "MATRIX_HANDLE", "WIRE_HANDLE", "ICQ_NUMBER", "WICKR_ID", "PHONE_NUMBER", "EMAIL_ADDRESS"}),
+    ),
+}
+
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses

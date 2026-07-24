@@ -2,7 +2,74 @@
 
 All notable changes to VoidAccess are documented here.
 
-## [Unreleased]
+## [1.9.3] - 2026-07-24
+
+- STIX malware exports classify ransomware groups as `ransomware` and use
+  available malware metadata/family-name signals for additional STIX malware
+  types; unknown families retain the valid generic type rather than receiving
+  a speculative label.
+- Deterministic embedding fallback selection and its operator notice now occur
+  before the small-investigation page-selection shortcut, so missing torch is
+  visible on the first applicable run.
+- Modernized stale test fixtures for canonical values and calibrated
+  confidence output, and made null `DISABLE_RATE_LIMIT` lookups safe.
+- Cross-process optional-configuration warning suppression is explicitly
+  **won't-fix**: the existing process-scoped guard is sufficient for the
+  operator warning, while a persistent marker would add filesystem state,
+  expiry/race handling, and cleanup complexity for a minor UX issue.
+
+## [1.9.2] - 2026-07-24
+
+- Preserve typed graph relationships in MISP object references and map
+  organization targets to STIX `targets` relationships.
+- Prevent export output collisions, document the optional vector dependency,
+  surface deterministic embedding fallback use, and warn once for dropped or
+  legacy configuration keys.
+- Warning deduplication remains process-scoped: separate CLI invocations are
+  separate processes, so repeating a warning across invocations is expected
+  and does not justify persistent state for this minor UX case.
+
+## [1.9.1] - 2026-07-23
+
+- Defer CLI/runtime configuration until after environment injection.
+- Preserve configured LLM credentials through all CLI model construction paths.
+- Surface graph-build row and edge metrics in the live CLI display.
+- Correct rejected-query exit codes and relationship counts in summaries.
+- Restore once-per-process optional-configuration warning behavior.
+- Keep LockBit/LockBit4 observations distinct unless evidence supports a
+  conservative relationship, avoiding unsafe automatic entity merges.
+
+## [1.9.0] - 2026-07-23
+
+### Changed
+- Entity identity is now derived through a single shared module,
+  `extractor/identity.py` (`entity_graph_id` / `entity_canonical_id` /
+  `entity_display_id`). The graph builder (`_make_node_id`), the STIX / MISP /
+  Sigma / IOC-package exporters, and the entity API were migrated off their own
+  independent identity logic onto it, so a graph node key and an exporter's
+  lookup key can no longer silently diverge (the recurring STIX threat-actor
+  "silently dropped relationships" bug class). `NormalizedEntity.canonical_value`
+  now returns the genuine canonical form instead of the raw value.
+
+### Fixed
+- Confidence now follows one monotonic, max-based rule across extraction,
+  corroboration boosts, database upserts, and consumers; relationship type
+  definitions are sourced from `graph/model.py`; and `merge_with_db` now
+  records the page host in `corroborating_sources` for every persisted entity.
+  This resolves the three-times-carried corroboration bug from 1.6.4, 1.7.0,
+  and 1.7.1.
+
+- Consolidated confidence consistency and edge-type vocabulary across
+  extraction, persistence, graph construction, and exports; fixed
+  `corroborating_sources`, closing a three-cycle-old known issue.
+- Completed the seven-phase identity-drift remediation through the canonical
+  identity module and migrated graph, STIX, MISP, IOC package, Snort, YARA,
+  CLI browser, `show`, and investigation consumers.
+- Improved CLI honesty with 500-character query validation, live graph-build
+  progress, explicit zero-relationship distinctions, visible degraded
+  community-detection states, expanded completion metrics, and per-source
+  outcome tables.
+- Verified mixed-case and EIP-55 identity behavior with repo-wide sweeps.
 
 ## [1.8.2] - 2026-07-23
 

@@ -537,7 +537,7 @@ async def _check_cancelled(inv_uuid: uuid.UUID, investigation_id: str) -> bool:
 # Rate limiting (shared key_func with api/main.py; enforcement via app.state.limiter)
 # ---------------------------------------------------------------------------
 
-_DISABLE_RATE_LIMIT = os.getenv("DISABLE_RATE_LIMIT", "false").lower() == "true"
+_DISABLE_RATE_LIMIT = (os.getenv("DISABLE_RATE_LIMIT", "false") or "false").lower() == "true"
 
 if not _DISABLE_RATE_LIMIT:
     try:

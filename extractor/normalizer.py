@@ -5,10 +5,9 @@ The same wallet address may appear in 50 pages; it gets one NormalizedEntity
 per call to normalize_entities() (deduped by canonical value within that call).
 merge_with_db() upserts records to the DB and returns the assigned IDs.
 
-Confidence stacking is additive, not compounded across stages:
-final_confidence = base_tier_score + occurrence_boost.
-The occurrence boost is computed per investigation and capped, so repeated
-mentions can lift an entity within its tier without chaining multiplicatively.
+Confidence is monotonic after extraction: new evidence may raise an entity's
+stored confidence, but never lowers it.  The canonical merge rule is
+``extractor.confidence.get_entity_confidence``.
 
 Public interface
 ----------------
@@ -27,6 +26,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 import uuid
+from urllib.parse import urlparse
 
 from extractor import entity_shape as _shape
 from extractor import confidence as _conf
@@ -1141,7 +1141,14 @@ class NormalizedEntity:
 
     @property
     def canonical_value(self) -> str:
-        return self.value
+        # Return the genuine canonical (deduplication-safe) form of the value,
+        # matching what the DB `Entity.canonical_value` column means.  This used
+        # to return the raw `self.value`, which silently disagreed with the DB
+        # column of the same name — a daily trap and the direct cause of the
+        # IOC-package casing bug.  Canonicalising here makes the two
+        # representations agree.  (Prefer `extractor.identity.entity_canonical_id`
+        # in new code so the choice is explicit at the call site.)
+        return canonicalize_entity_value(self.entity_type, self.value)
 
     @property
     def is_placeholder(self) -> bool:
@@ -1646,6 +1653,17 @@ def normalize_entities(
     return result
 
 
+def _source_label_from_url(url: str) -> str:
+    """Return a stable corroboration label for the page's source host."""
+    try:
+        host = (urlparse(url or "").hostname or "").lower().strip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+    except (TypeError, ValueError):
+        return ""
+
+
 def merge_with_db(
     entities: list[NormalizedEntity],
     investigation_id: Optional[uuid.UUID] = None,
@@ -1683,11 +1701,16 @@ def merge_with_db(
 
     try:
         from db.session import get_session
-        from db.queries import upsert_entity_canonical, create_page, get_page_by_url
+        from db.queries import (
+            upsert_entity_canonical,
+            create_page,
+            get_page_by_url,
+            update_entity_source_count,
+        )
         from sqlalchemy.exc import IntegrityError
 
         def _persist_one(session, entity, page) -> tuple[object, bool]:
-            return upsert_entity_canonical(
+            db_entity, created = upsert_entity_canonical(
                 session=session,
                 investigation_id=investigation_id,
                 entity_type=entity.entity_type,
@@ -1697,6 +1720,10 @@ def merge_with_db(
                 context_snippet=entity.context_snippet,
                 extraction_method=entity.extraction_method or None,
             )
+            source_label = _source_label_from_url(entity.source_url)
+            if source_label:
+                update_entity_source_count(session, db_entity.id, source_label)
+            return db_entity, created
 
         with get_session() as session:
             page_cache: dict[str, object] = {}

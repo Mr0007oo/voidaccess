@@ -12,12 +12,11 @@ from __future__ import annotations
 import json
 import os
 import logging
-import warnings
 from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
-_DEPRECATION_NOTIFIED = False
+_WARNED_CONFIG_KEYS: set[str] = set()
 
 CLI_HOME = Path(os.path.expanduser("~/.voidaccess"))
 CONFIG_PATH = CLI_HOME / "config.json"
@@ -114,9 +113,57 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "output_dir": str(DEFAULT_OUTPUT_DIR),
 }
 
+_CONFIG_KEY_REPLACEMENTS = {
+    "features.use_proxies": "features.rest_api_transport_enabled",
+    "features.use_proxy": "features.residential_proxy_enabled",
+}
+_CONFIG_ALLOWED_KEYS = {
+    "llm": frozenset({"provider", "model", "api_key"}),
+    "enrichment_keys": frozenset(ENRICHMENT_KEYS),
+    "features": frozenset(DEFAULT_CONFIG["features"]),
+    "tor": frozenset({"host", "port"}),
+    "output_dir": None,
+}
+
 
 def _ensure_home() -> None:
     CLI_HOME.mkdir(parents=True, exist_ok=True)
+
+
+def _warn_config_keys(config: Any) -> None:
+    """Warn once for dropped keys and legacy keys during config injection."""
+    if not isinstance(config, dict):
+        return
+
+    for section, values in config.items():
+        if section not in _CONFIG_ALLOWED_KEYS:
+            _warn_config_key(section, None)
+            continue
+        allowed = _CONFIG_ALLOWED_KEYS[section]
+        if allowed is None or not isinstance(values, dict):
+            continue
+        for key in values:
+            full_key = f"{section}.{key}"
+            replacement = _CONFIG_KEY_REPLACEMENTS.get(full_key)
+            # A legacy key is only noteworthy when the replacement is absent;
+            # save_config keeps aliases for compatibility once migrated.
+            if replacement and replacement.split(".", 1)[1] not in values:
+                _warn_config_key(full_key, replacement)
+            elif key not in allowed:
+                _warn_config_key(full_key, None)
+
+
+def _warn_config_key(key: str, replacement: Optional[str]) -> None:
+    if key in _WARNED_CONFIG_KEYS:
+        return
+    if replacement:
+        message = (
+            f"Deprecated config key '{key}' encountered; use '{replacement}' instead."
+        )
+    else:
+        message = f"Unrecognized config key '{key}' ignored."
+    logger.warning(message)
+    _WARNED_CONFIG_KEYS.add(key)
 
 
 def load_config() -> dict[str, Any]:
@@ -128,6 +175,7 @@ def load_config() -> dict[str, Any]:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
     except Exception:
         return json.loads(json.dumps(DEFAULT_CONFIG))
+    _warn_config_keys(cfg)
     # Merge with defaults so missing keys don't crash
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     merged["llm"].update(cfg.get("llm", {}))
@@ -135,23 +183,10 @@ def load_config() -> dict[str, Any]:
     merged["enrichment_keys"].update(cfg.get("enrichment_keys", {}))
     merged["features"].update(cfg.get("features", {}))
     features = merged["features"]
-    global _DEPRECATION_NOTIFIED
-    deprecated_keys = []
     if "rest_api_transport_enabled" not in cfg.get("features", {}) and "use_proxies" in cfg.get("features", {}):
         features["rest_api_transport_enabled"] = bool(cfg["features"].get("use_proxies"))
-        deprecated_keys.append("use_proxies")
     if "residential_proxy_enabled" not in cfg.get("features", {}) and "use_proxy" in cfg.get("features", {}):
         features["residential_proxy_enabled"] = bool(cfg["features"].get("use_proxy"))
-        deprecated_keys.append("use_proxy")
-    if deprecated_keys and not _DEPRECATION_NOTIFIED:
-        message = (
-            "Deprecated config keys "
-            + ", ".join(sorted(deprecated_keys))
-            + " found; prefer 'rest_api_transport_enabled' and 'residential_proxy_enabled'."
-        )
-        logger.warning(message)
-        warnings.warn(message, DeprecationWarning, stacklevel=2)
-    _DEPRECATION_NOTIFIED = True
     if "rest_api_transport_enabled" in cfg.get("features", {}):
         features["use_proxies"] = bool(features.get("rest_api_transport_enabled", False))
     elif "use_proxies" in cfg.get("features", {}):
@@ -198,8 +233,18 @@ def _lock_file(path: Path) -> None:
 
 def save_config(config: dict[str, Any]) -> None:
     features = config.setdefault("features", {})
-    features["rest_api_transport_enabled"] = bool(features.get("rest_api_transport_enabled", features.get("use_proxies", False)))
-    features["residential_proxy_enabled"] = bool(features.get("residential_proxy_enabled", features.get("use_proxy", False)))
+    # Keep the legacy aliases readable for older clients.  When a caller
+    # edits a loaded config, a changed legacy boolean must still migrate into
+    # the preferred key rather than being masked by the default preferred
+    # value that was merged during load.
+    features["rest_api_transport_enabled"] = bool(
+        features.get("rest_api_transport_enabled", False)
+        or features.get("use_proxies", False)
+    )
+    features["residential_proxy_enabled"] = bool(
+        features.get("residential_proxy_enabled", False)
+        or features.get("use_proxy", False)
+    )
     features["use_proxies"] = features["rest_api_transport_enabled"]
     features["use_proxy"] = features["residential_proxy_enabled"]
     _ensure_home()
@@ -317,12 +362,17 @@ def ensure_spacy_model(model_name: str = "en_core_web_sm") -> bool:
 
 def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     """
-    Push saved config into os.environ so that the existing voidaccess
-    modules (config.py, llm.py, sources/*) pick up the values at import.
+    Push saved config into os.environ before importing runtime modules.
 
-    Must be called BEFORE any voidaccess module is imported.
+    This remains the single environment-injection boundary for the CLI;
+    runtime modules must resolve environment-dependent values when they are
+    used rather than freezing them during import.
     """
-    cfg = config or load_config()
+    if config is None:
+        cfg = load_config()
+    else:
+        _warn_config_keys(config)
+        cfg = config
 
     os.environ.setdefault("DATABASE_URL", db_url())
     os.environ.setdefault("JWT_SECRET", "voidaccess-cli-local-no-auth")
@@ -388,6 +438,3 @@ def apply_env(config: Optional[dict[str, Any]] = None) -> None:
     for key in ("ABUSECH_API_KEY", "VT_API_KEY", "OTX_API_KEY"):
         if not (os.environ.get(key) or "").strip():
             os.environ.pop(key, None)
-
-
-

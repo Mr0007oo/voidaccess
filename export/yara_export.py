@@ -35,6 +35,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from extractor.identity import entity_canonical_id
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -115,19 +117,7 @@ def _entity_type(e: Any) -> str:
 
 
 def _entity_value(e: Any) -> str:
-    """Return the entity's primary value, preferring canonical_value."""
-    if isinstance(e, dict):
-        return (
-            e.get("canonical_value")
-            or e.get("value")
-            or e.get("canonical")
-            or ""
-        ) or ""
-    return (
-        getattr(e, "canonical_value", None)
-        or getattr(e, "value", None)
-        or ""
-    ) or ""
+    return entity_canonical_id(e)
 
 
 def _entity_confidence(e: Any) -> float:
