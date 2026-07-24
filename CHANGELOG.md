@@ -2,6 +2,22 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [1.9.3] - 2026-07-24
+
+- STIX malware exports classify ransomware groups as `ransomware` and use
+  available malware metadata/family-name signals for additional STIX malware
+  types; unknown families retain the valid generic type rather than receiving
+  a speculative label.
+- Deterministic embedding fallback selection and its operator notice now occur
+  before the small-investigation page-selection shortcut, so missing torch is
+  visible on the first applicable run.
+- Modernized stale test fixtures for canonical values and calibrated
+  confidence output, and made null `DISABLE_RATE_LIMIT` lookups safe.
+- Cross-process optional-configuration warning suppression is explicitly
+  **won't-fix**: the existing process-scoped guard is sufficient for the
+  operator warning, while a persistent marker would add filesystem state,
+  expiry/race handling, and cleanup complexity for a minor UX issue.
+
 ## [1.9.2] - 2026-07-24
 
 - Preserve typed graph relationships in MISP object references and map

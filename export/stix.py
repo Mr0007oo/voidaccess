@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import warnings
 from typing import Any, Optional
 import uuid
@@ -77,6 +78,114 @@ _STIX_PATTERNS: dict[str, str] = {
 
 # Entity types that map to STIX Malware objects
 _MALWARE_TYPES = frozenset({"MALWARE_FAMILY", "RANSOMWARE_GROUP"})
+
+# STIX 2.1's malware-type vocabulary is intentionally small.  Keep the
+# mapping here instead of treating every MALWARE_FAMILY as the generic
+# ``malware`` type: family names and enrichment metadata often carry enough
+# information for SIEM consumers to filter useful categories.
+_STIX_MALWARE_TYPE_ALIASES = {
+    "infostealer": "spyware",
+    "stealer": "spyware",
+    "remote_access_trojan": "remote-access-trojan",
+    "remote access trojan": "remote-access-trojan",
+    "rat": "remote-access-trojan",
+    "coinminer": "resource-exploitation",
+    "cryptominer": "resource-exploitation",
+    "crypto-miner": "resource-exploitation",
+    "miner": "resource-exploitation",
+}
+_STIX_MALWARE_TYPES = frozenset({
+    "adware",
+    "backdoor",
+    "bot",
+    "ddos",
+    "dropper",
+    "exploit-kit",
+    "keylogger",
+    "ransomware",
+    "remote-access-trojan",
+    "resource-exploitation",
+    "rootkit",
+    "screen-capture",
+    "spyware",
+    "wiper",
+    "malware",
+})
+
+# These are conservative, high-signal family/name hints.  Unknown families
+# retain the valid generic STIX type rather than being assigned a speculative
+# category.
+_MALWARE_NAME_PATTERNS = (
+    ("ransomware", re.compile(
+        r"\b(?:ransomware|lockbit|blackcat|alphv|clop|conti|ryuk|hive|revil|darkside|wannacry)\b",
+        re.IGNORECASE,
+    )),
+    ("remote-access-trojan", re.compile(
+        r"\b(?:remote\s+access\s+trojan|remcos|njrat|nanocore|quasar|darkcomet|xrat)\b",
+        re.IGNORECASE,
+    )),
+    ("spyware", re.compile(
+        r"\b(?:spyware|infostealer|stealer|redline|vidar|lumma|raccoon|agent\s+tesla|formbook)\b",
+        re.IGNORECASE,
+    )),
+    ("bot", re.compile(
+        r"\b(?:botnet|emotet|qakbot|qbot|trickbot|mirai|zeus|mozi)\b",
+        re.IGNORECASE,
+    )),
+    ("keylogger", re.compile(r"\bkeylogger\b", re.IGNORECASE)),
+    ("exploit-kit", re.compile(r"\bexploit[\s-]+kit\b", re.IGNORECASE)),
+    ("rootkit", re.compile(r"\brootkit\b", re.IGNORECASE)),
+    ("screen-capture", re.compile(r"\bscreen[\s-]+capture\b", re.IGNORECASE)),
+    ("dropper", re.compile(r"\bdropper\b", re.IGNORECASE)),
+    ("wiper", re.compile(r"\bwiper\b", re.IGNORECASE)),
+    ("adware", re.compile(r"\badware\b", re.IGNORECASE)),
+    ("resource-exploitation", re.compile(
+        r"\b(?:cryptominer|crypto[\s-]+miner|coinminer|cryptojacking)\b",
+        re.IGNORECASE,
+    )),
+    ("backdoor", re.compile(r"\bbackdoor\b", re.IGNORECASE)),
+)
+
+
+def _entity_attribute(entity: Any, name: str) -> Any:
+    """Read optional classification metadata from dicts and ORM-like rows."""
+    if isinstance(entity, dict):
+        return entity.get(name)
+    return getattr(entity, name, None)
+
+
+def _normalise_malware_type(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    key = value.strip().lower().replace("_", " ")
+    key = _STIX_MALWARE_TYPE_ALIASES.get(key, key)
+    key = key.replace(" ", "-")
+    return key if key in _STIX_MALWARE_TYPES else None
+
+
+def _classify_malware(entity: Any) -> list[str]:
+    """Return evidence-backed STIX malware types for an entity."""
+    entity_type = str(getattr(entity, "entity_type", "") or "").upper()
+    if isinstance(entity, dict):
+        entity_type = str(entity.get("entity_type") or "").upper()
+    if entity_type == "RANSOMWARE_GROUP":
+        return ["ransomware"]
+
+    for field_name in ("malware_types", "malware_type", "malware_category", "category", "family_type"):
+        raw = _entity_attribute(entity, field_name)
+        values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+        classified = [item for item in (_normalise_malware_type(v) for v in values) if item]
+        if classified:
+            return list(dict.fromkeys(classified))
+
+    evidence = " ".join(
+        str(_entity_attribute(entity, field) or "")
+        for field in ("value", "context_snippet")
+    )
+    for malware_type, pattern in _MALWARE_NAME_PATTERNS:
+        if pattern.search(evidence):
+            return [malware_type]
+    return ["malware"]
 
 # ---------------------------------------------------------------------------
 # Confidence mapping: VoidAccess float → STIX integer (0-100)
@@ -160,11 +269,7 @@ def entity_to_stix_malware(entity: Any) -> Optional[Any]:
         malware = stix2.Malware(
             name=entity.value,
             is_family=True,
-            malware_types=(
-                ["ransomware"]
-                if entity.entity_type == "RANSOMWARE_GROUP"
-                else ["malware"]
-            ),
+            malware_types=_classify_malware(entity),
             confidence=_to_stix_confidence(get_entity_confidence(entity)),
             allow_custom=True,
             x_voidaccess_source_quality=getattr(entity, "source_quality", 1.0),

@@ -50,7 +50,7 @@ def test_ip_rule_generated():
     entities = [
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "185.220.101.45",
+            "value": "185.220.101.45",
             "confidence": 0.94,
             "corroborating_sources": "c2_confirmed",
         }
@@ -68,7 +68,7 @@ def test_low_confidence_ip_skipped():
     entities = [
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "1.2.3.4",
+            "value": "1.2.3.4",
             "confidence": 0.3,
             "corroborating_sources": "",
         }
@@ -82,7 +82,7 @@ def test_c2_tag_low_confidence_still_emitted():
     entities = [
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "1.2.3.4",
+            "value": "1.2.3.4",
             "confidence": 0.4,
             "corroborating_sources": "c2,scan",
         }
@@ -101,7 +101,7 @@ def test_domain_dns_rule():
     entities = [
         {
             "entity_type": "DOMAIN",
-            "canonical_value": "evil.example",
+            "value": "evil.example",
             "confidence": 0.85,
         }
     ]
@@ -117,7 +117,7 @@ def test_onion_url_dns_rule():
     entities = [
         {
             "entity_type": "ONION_URL",
-            "canonical_value": "evil.onion",
+            "value": "evil.onion",
             "confidence": 0.9,
         }
     ]
@@ -136,7 +136,7 @@ def test_http_rule_for_onion_path():
     entities = [
         {
             "entity_type": "ONION_URL",
-            "canonical_value": "http://evil.onion/login.php",
+            "value": "http://evil.onion/login.php",
             "confidence": 0.9,
         }
     ]
@@ -150,7 +150,7 @@ def test_http_rule_skipped_for_bare_onion():
     entities = [
         {
             "entity_type": "ONION_URL",
-            "canonical_value": "evil.onion",
+            "value": "evil.onion",
             "confidence": 0.9,
         }
     ]
@@ -170,7 +170,7 @@ def test_filemd5_rule_suricata_only():
     entities = [
         {
             "entity_type": "FILE_HASH_MD5",
-            "canonical_value": "a" * 32,
+            "value": "a" * 32,
             "confidence": 0.9,
         }
     ]
@@ -192,7 +192,7 @@ def test_cve_rule_generated():
     entities = [
         {
             "entity_type": "CVE_NUMBER",
-            "canonical_value": "CVE-2024-1234",
+            "value": "CVE-2024-1234",
             "confidence": 1.0,
         }
     ]
@@ -208,7 +208,7 @@ def test_invalid_cve_skipped():
     entities = [
         {
             "entity_type": "CVE_NUMBER",
-            "canonical_value": "CVE-not-a-number",
+            "value": "CVE-not-a-number",
             "confidence": 1.0,
         }
     ]
@@ -226,7 +226,7 @@ def test_suricata_metadata():
     entities = [
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "185.220.101.45",
+            "value": "185.220.101.45",
             "confidence": 0.94,
             "corroborating_sources": "c2_confirmed",
         }
@@ -244,7 +244,7 @@ def test_suricata_uses_tls_sni_for_domains():
     entities = [
         {
             "entity_type": "DOMAIN",
-            "canonical_value": "evil.example",
+            "value": "evil.example",
             "confidence": 0.85,
         }
     ]
@@ -264,18 +264,18 @@ def test_sid_range():
     entities = [
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "185.220.101.45",
+            "value": "185.220.101.45",
             "confidence": 0.94,
             "corroborating_sources": "c2",
         },
         {
             "entity_type": "DOMAIN",
-            "canonical_value": "evil.example",
+            "value": "evil.example",
             "confidence": 0.9,
         },
         {
             "entity_type": "CVE_NUMBER",
-            "canonical_value": "CVE-2024-1234",
+            "value": "CVE-2024-1234",
             "confidence": 1.0,
         },
     ]
@@ -291,40 +291,40 @@ def test_no_duplicate_sids():
     entities = [
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "1.1.1.1",
+            "value": "1.1.1.1",
             "confidence": 0.95,
             "corroborating_sources": "c2",
         },
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "2.2.2.2",
+            "value": "2.2.2.2",
             "confidence": 0.95,
             "corroborating_sources": "c2",
         },
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "3.3.3.3",
+            "value": "3.3.3.3",
             "confidence": 0.95,
             "corroborating_sources": "c2",
         },
         {
             "entity_type": "DOMAIN",
-            "canonical_value": "a.example",
+            "value": "a.example",
             "confidence": 0.9,
         },
         {
             "entity_type": "DOMAIN",
-            "canonical_value": "b.example",
+            "value": "b.example",
             "confidence": 0.9,
         },
         {
             "entity_type": "CVE_NUMBER",
-            "canonical_value": "CVE-2024-1111",
+            "value": "CVE-2024-1111",
             "confidence": 1.0,
         },
         {
             "entity_type": "CVE_NUMBER",
-            "canonical_value": "CVE-2024-2222",
+            "value": "CVE-2024-2222",
             "confidence": 1.0,
         },
     ]
@@ -340,7 +340,7 @@ def test_sid_auto_increment():
     entities = [
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": f"10.0.0.{i}",
+            "value": f"10.0.0.{i}",
             "confidence": 0.95,
             "corroborating_sources": "c2",
         }
@@ -357,13 +357,13 @@ def test_sid_custom_start():
     entities = [
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "10.0.0.1",
+            "value": "10.0.0.1",
             "confidence": 0.95,
             "corroborating_sources": "c2",
         },
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "10.0.0.2",
+            "value": "10.0.0.2",
             "confidence": 0.95,
             "corroborating_sources": "c2",
         },
@@ -400,13 +400,13 @@ def test_rule_blocks_have_balanced_parens():
     entities = [
         {
             "entity_type": "IP_ADDRESS",
-            "canonical_value": "1.1.1.1",
+            "value": "1.1.1.1",
             "confidence": 0.95,
             "corroborating_sources": "c2",
         },
         {
             "entity_type": "DOMAIN",
-            "canonical_value": "evil.example",
+            "value": "evil.example",
             "confidence": 0.9,
         },
     ]
@@ -420,7 +420,7 @@ def test_cve_reference():
     entities = [
         {
             "entity_type": "CVE_NUMBER",
-            "canonical_value": "CVE-2023-44487",
+            "value": "CVE-2023-44487",
             "confidence": 1.0,
         }
     ]

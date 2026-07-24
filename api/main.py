@@ -40,7 +40,7 @@ logging.basicConfig(level=logging.DEBUG)
 # Rate limiter setup
 # ---------------------------------------------------------------------------
 
-DISABLE_RATE_LIMIT = os.getenv("DISABLE_RATE_LIMIT", "false").lower() == "true"
+DISABLE_RATE_LIMIT = (os.getenv("DISABLE_RATE_LIMIT", "false") or "false").lower() == "true"
 
 if DISABLE_RATE_LIMIT:
     limiter = None

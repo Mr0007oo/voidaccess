@@ -25,6 +25,15 @@ import os
 # DB-write helpers no-op during unit tests.
 os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
 os.environ.pop("DATABASE_URL", None)
+os.environ.setdefault("DISABLE_RATE_LIMIT", "true")
+
+# The repository's developer .env may contain a real-looking PostgreSQL URL.
+# Tests that exercise the no-database degradation path must not inherit it via
+# config.load_dotenv(); keep the runtime configuration unset unless an
+# individual fixture explicitly supplies a database.
+import config as _test_config
+_test_config.DATABASE_URL = None
+os.environ.pop("DATABASE_URL", None)
 
 import pytest
 from sqlalchemy import create_engine
@@ -58,11 +67,12 @@ def reset_source_state(monkeypatch):
 
     import sources.breach_lookup as breach_lookup
     import sources.infostealer as infostealer
+    import sources.hash_reputation as hash_reputation
     import sources.nvd as nvd
 
     fresh_cache = EnrichmentCache(backend="memory")
 
-    for mod in (breach_lookup, infostealer, nvd):
+    for mod in (breach_lookup, infostealer, hash_reputation, nvd):
         monkeypatch.setattr(mod, "_enrichment_cache_singleton", fresh_cache, raising=False)
 
     # Reset lazy per-loop semaphores so they rebind to the test's event loop.

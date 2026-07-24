@@ -477,9 +477,9 @@ def test_normalize_entities_produces_normalized_records():
         by_type.setdefault(rec.entity_type, []).append(rec)
 
     assert LITECOIN_ADDRESS in by_type
-    assert by_type[LITECOIN_ADDRESS][0].confidence == 0.90
+    assert by_type[LITECOIN_ADDRESS][0].confidence == 0.94
     assert DOGECOIN_ADDRESS in by_type
-    assert by_type[DOGECOIN_ADDRESS][0].confidence == 0.90
+    assert by_type[DOGECOIN_ADDRESS][0].confidence == 0.94
 
 
 # ---------------------------------------------------------------------------
@@ -983,15 +983,15 @@ def test_credential_normalizer_round_trip():
         by_type.setdefault(rec.entity_type, []).append(rec)
 
     assert AWS_ACCESS_KEY in by_type
-    assert by_type[AWS_ACCESS_KEY][0].confidence == 1.0
+    assert by_type[AWS_ACCESS_KEY][0].confidence == 0.94
     assert GITHUB_TOKEN in by_type
-    assert by_type[GITHUB_TOKEN][0].confidence == 1.0
+    assert by_type[GITHUB_TOKEN][0].confidence == 0.94
     assert STRIPE_KEY in by_type
-    assert by_type[STRIPE_KEY][0].confidence == 1.0
+    assert by_type[STRIPE_KEY][0].confidence == 0.94
     assert GOOGLE_API_KEY in by_type
-    assert by_type[GOOGLE_API_KEY][0].confidence == 1.0
+    assert by_type[GOOGLE_API_KEY][0].confidence == 0.94
     assert JWT_TOKEN in by_type
-    assert by_type[JWT_TOKEN][0].confidence == 1.0
+    assert by_type[JWT_TOKEN][0].confidence == 0.94
 
 
 # --- 8.11. Graph integration ----------------------------------------------
@@ -1461,34 +1461,34 @@ def test_messaging_normalizer_round_trip():
 
     # Spot-check each type survived with the right confidence
     assert TELEGRAM_HANDLE in by_type
-    assert by_type[TELEGRAM_HANDLE][0].confidence == 0.90
+    assert by_type[TELEGRAM_HANDLE][0].confidence == 0.94
     assert by_type[TELEGRAM_HANDLE][0].value == "lockbitsupport"
 
     assert DISCORD_HANDLE in by_type
-    assert by_type[DISCORD_HANDLE][0].confidence == 0.90
+    assert by_type[DISCORD_HANDLE][0].confidence == 0.94
 
     assert XMPP_JID in by_type
-    assert by_type[XMPP_JID][0].confidence == 0.90
+    assert by_type[XMPP_JID][0].confidence == 0.94
     assert by_type[XMPP_JID][0].value == "lockbit@exploit.im"
 
     assert TOX_ID in by_type
-    assert by_type[TOX_ID][0].confidence == 1.0
+    assert by_type[TOX_ID][0].confidence == 0.94
 
     assert SESSION_ID in by_type
-    assert by_type[SESSION_ID][0].confidence == 1.0
+    assert by_type[SESSION_ID][0].confidence == 0.94
 
     assert MATRIX_HANDLE in by_type
-    assert by_type[MATRIX_HANDLE][0].confidence == 1.0
+    assert by_type[MATRIX_HANDLE][0].confidence == 0.94
     assert by_type[MATRIX_HANDLE][0].value == "@lockbitsupport:matrix.org"
 
     assert ICQ_NUMBER in by_type
-    assert by_type[ICQ_NUMBER][0].confidence == 0.90
+    assert by_type[ICQ_NUMBER][0].confidence == 0.94
 
     assert WICKR_ID in by_type
-    assert by_type[WICKR_ID][0].confidence == 0.90
+    assert by_type[WICKR_ID][0].confidence == 0.94
 
     assert WIRE_HANDLE in by_type
-    assert by_type[WIRE_HANDLE][0].confidence == 0.90
+    assert by_type[WIRE_HANDLE][0].confidence == 0.94
 
 
 # --- 9.11. Context helper ---------------------------------------------------
@@ -2136,23 +2136,23 @@ def test_network_forensic_normalizer_round_trip():
 
     # Spot-check each type survived with the right confidence + canonical form
     assert IPV6_ADDRESS in by_type
-    assert by_type[IPV6_ADDRESS][0].confidence == 1.0
+    assert by_type[IPV6_ADDRESS][0].confidence == 0.94
     assert by_type[IPV6_ADDRESS][0].value == "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
 
     assert MAC_ADDRESS in by_type
-    assert by_type[MAC_ADDRESS][0].confidence == 1.0
+    assert by_type[MAC_ADDRESS][0].confidence == 0.94
     # Hyphen form was canonicalised to colon form
     assert by_type[MAC_ADDRESS][0].value == "AA:BB:CC:DD:EE:FF"
 
     assert IPFS_CID in by_type
-    assert by_type[IPFS_CID][0].confidence == 1.0
+    assert by_type[IPFS_CID][0].confidence == 0.94
 
     assert MITRE_TACTIC in by_type
-    assert by_type[MITRE_TACTIC][0].confidence == 1.0
+    assert by_type[MITRE_TACTIC][0].confidence == 0.94
     assert by_type[MITRE_TACTIC][0].value == "TA0001"
 
     assert EXPLOIT_DB_ID in by_type
-    assert by_type[EXPLOIT_DB_ID][0].confidence == 1.0
+    assert by_type[EXPLOIT_DB_ID][0].confidence == 0.94
     assert by_type[EXPLOIT_DB_ID][0].value == "12345"
 
     assert CVE_NUMBER in by_type

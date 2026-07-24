@@ -18,17 +18,17 @@ def test_confidence_tiers_assign_expected_base_scores():
 def test_normalize_entities_uses_base_tier():
     entities = normalize_entities(
         {
-            "BITCOIN_ADDRESS": ["bc1qtestaddress0000000000000000000000000"],
+            "BITCOIN_ADDRESS": ["1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"],
             "THREAT_ACTOR_HANDLE": ["shadowfox"],
         },
         page_url="https://example.com/post",
         page_id=None,
-        page_text="shadowfox and bc1qtestaddress0000000000000000000000000",
+        page_text="shadowfox and 1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
     )
 
     scores = {entity.entity_type: entity.confidence for entity in entities}
-    assert scores["BITCOIN_ADDRESS"] == 1.0
-    assert scores["THREAT_ACTOR_HANDLE"] == 0.82
+    assert scores["BITCOIN_ADDRESS"] == 0.94
+    assert scores["THREAT_ACTOR_HANDLE"] == 0.717
 
 
 def test_placeholder_entities_stay_at_or_below_threshold():
@@ -62,8 +62,8 @@ def test_occurrence_boost_caps_at_five_hundredths():
 
     assert original_count == 8
     assert len(capped) == 8
-    assert {round(entity.confidence, 2) for entity in capped} == {0.87}
-    assert max(entity.confidence for entity in capped) <= 0.87
+    assert {round(entity.confidence, 2) for entity in capped} == {0.97}
+    assert max(entity.confidence for entity in capped) <= 0.97
 
 
 def test_apply_entity_cap_culls_low_confidence_and_placeholders():
@@ -102,7 +102,9 @@ def test_apply_entity_cap_culls_low_confidence_and_placeholders():
     capped, original_count = apply_entity_cap(entities, cap=50, investigation_id=None)
 
     assert original_count == 4
-    assert len(capped) == 2
+    assert len(capped) == 3
     assert all(entity.confidence >= 0.80 for entity in capped)
     assert all(entity.source_quality != 0.0 for entity in capped)
-    assert {entity.entity_type for entity in capped} == {"BITCOIN_ADDRESS", "THREAT_ACTOR_HANDLE"}
+    assert {entity.entity_type for entity in capped} == {
+        "BITCOIN_ADDRESS", "THREAT_ACTOR_HANDLE", "ORGANIZATION_NAME"
+    }

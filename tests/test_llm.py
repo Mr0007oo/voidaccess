@@ -39,6 +39,16 @@ def test_select_relevant_pages_fits_budget():
     assert len(result) == 5
 
 
+def test_select_relevant_pages_selects_embedding_model_before_small_run_shortcut():
+    """The fallback notice path is reached even when ranking is unnecessary."""
+    from unittest.mock import MagicMock, patch
+
+    pages = [make_page("x" * 100)]
+    with patch("voidaccess.llm._get_embed_model", return_value=MagicMock()) as get_model:
+        assert select_relevant_pages("test query", pages, max_chars=10000) == pages
+    get_model.assert_called_once()
+
+
 def test_select_relevant_pages_trims_to_budget():
     """Pages exceeding budget are trimmed."""
     pages = [make_page("x" * 3000, f"http://{i}.onion") for i in range(20)]

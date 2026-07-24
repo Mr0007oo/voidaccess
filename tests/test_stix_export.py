@@ -126,6 +126,26 @@ def test_stix_mixed_case_typed_relationship_refs_real_export(db_engine):
                  if o.get("type") == "relationship" and o["relationship_type"] == "uses")
     assert typed["source_ref"] == source_id
     assert typed["target_ref"] == target_id
+
+
+def test_stix_malware_classification_uses_entity_type_and_family_metadata():
+    """Malware objects expose useful STIX types instead of a fixed placeholder."""
+    from extractor.normalizer import NormalizedEntity
+    from export.stix import entity_to_stix_malware
+
+    ransomware = NormalizedEntity(
+        entity_type="RANSOMWARE_GROUP", value="LockBit", confidence=0.95,
+        source_url="https://intel.example/lockbit", page_id=None,
+    )
+    emotet = NormalizedEntity(
+        entity_type="MALWARE_FAMILY", value="Emotet", confidence=0.95,
+        source_url="https://intel.example/emotet", page_id=None,
+    )
+
+    assert entity_to_stix_malware(ransomware)["malware_types"] == ["ransomware"]
+    assert entity_to_stix_malware(emotet)["malware_types"] == ["bot"]
+
+
 def test_stix_export_warns_when_relationships_are_missing(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(export_cmd, "_load_target", lambda target: ("123e4567-e89b-12d3-a456-426614174000", {"investigation": {}}))
     monkeypatch.setattr("export.investigation_to_stix_bundle", lambda inv_id: object())

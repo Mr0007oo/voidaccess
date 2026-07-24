@@ -44,12 +44,12 @@ class ExportSelectedBody(BaseModel):
 
 def _check_investigation_owner(investigation_id: str, current_user: CurrentUser) -> None:
     """Raise 404 if the investigation does not exist, 403 if the user does not own it."""
-    if not os.getenv("DATABASE_URL"):
-        raise HTTPException(status_code=503, detail="Database not configured")
     try:
         uid = uuid.UUID(investigation_id)
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid investigation ID format")
+    if not os.getenv("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="Database not configured")
     try:
         from db.session import get_session
         from db.queries import get_investigation_by_id_or_run

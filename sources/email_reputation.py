@@ -555,8 +555,10 @@ def _update_email_entities_in_db(
                             existing.append(tag)
                     db_entity.corroborating_sources = json.dumps(existing)
             session.commit()
-    except Exception as exc:
-        logger.warning("email_reputation: DB update failed: %s", exc)
+    except Exception:
+        # Do not log the raw SQLAlchemy exception: its parameter dump can
+        # contain the full email address being enriched.
+        logger.warning("email_reputation: DB update failed")
 
 
 # ---------------------------------------------------------------------------

@@ -149,7 +149,13 @@ def select_relevant_pages(
     
     if not valid_pages:
         return []
-    
+
+    # Select the embedding implementation before the size shortcut.  When
+    # torch/sentence-transformers are unavailable this is where the
+    # deterministic fallback is selected and its operator notice is emitted;
+    # small investigations must receive the same notice as large ones.
+    model = _get_embed_model()
+
     # If small enough, return all without ranking
     total_chars = sum(len(p.get("content") or p.get("text") or "") for p in valid_pages)
     if total_chars <= max_chars and len(valid_pages) <= top_k:
@@ -159,7 +165,6 @@ def select_relevant_pages(
         import numpy as np
         from numpy import linalg
 
-        model = _get_embed_model()
         if model is None:
             raise RuntimeError("SentenceTransformer model not available")
         
