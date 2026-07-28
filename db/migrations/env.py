@@ -11,7 +11,7 @@ import sys
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, inspect, pool, text
 
 # Make sure the project root is on sys.path so `from db.models import Base`
 # resolves correctly regardless of where alembic is invoked from.
@@ -34,6 +34,33 @@ if config.config_file_name is not None:
 
 # This is what autogenerate inspects to build migration scripts.
 target_metadata = Base.metadata
+
+
+def _ensure_version_column_capacity(connection) -> None:
+    """Keep legacy PostgreSQL Alembic tables able to store current revision IDs.
+
+    The initial Alembic table used VARCHAR(32), but later revision identifiers
+    are longer than 32 characters.  Widen the metadata column before Alembic
+    writes the next revision; this touches only migration bookkeeping, never
+    application data.
+    """
+    if connection.dialect.name != "postgresql":
+        return
+    inspector = inspect(connection)
+    if "alembic_version" not in inspector.get_table_names():
+        return
+    version_column = next(
+        (c for c in inspector.get_columns("alembic_version") if c["name"] == "version_num"),
+        None,
+    )
+    current_length = getattr(version_column.get("type"), "length", None) if version_column else None
+    if current_length is not None and current_length < 255:
+        connection.execute(
+            text(
+                "ALTER TABLE alembic_version "
+                "ALTER COLUMN version_num TYPE VARCHAR(255)"
+            )
+        )
 
 
 def run_migrations_offline() -> None:
@@ -64,6 +91,7 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,  # no pooling needed for one-shot migration runs
     )
     with connectable.connect() as connection:
+        _ensure_version_column_capacity(connection)
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

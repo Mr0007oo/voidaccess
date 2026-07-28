@@ -241,6 +241,8 @@ class EntityBrowserApp(App):
         tags = entity.get("corroborating_sources") or ""
         if tags:
             lines.append(f"Tags: {tags}")
+        if entity.get("investigation_count"):
+            lines.append(f"Investigations: {entity['investigation_count']}")
         lines.append("")
         if entity.get("first_seen") or entity.get("last_seen"):
             lines.append(

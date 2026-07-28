@@ -42,6 +42,24 @@ _DATA_PATH = os.path.join(
     "data",
     "threat_gazetteer.json",
 )
+_DOMAIN_STOPWORDS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "domain_stopwords_en.txt",
+)
+
+# Organisation suffixes are also generic name qualifiers when they appear on
+# an actor/malware candidate (for example, ``LockBit Ransomware Group``).
+# Keep this set here so gazetteer matching and shape validation use the same
+# vocabulary without introducing a circular import through entity_shape.
+ORG_SUFFIXES: frozenset[str] = frozenset({
+    "inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation",
+    "gmbh", "ag", "sa", "srl", "bv", "plc", "co", "company", "group",
+    "holdings", "technologies", "systems", "solutions", "lab", "labs", "laboratories",
+    "networks", "software", "security", "capital", "partners", "ventures",
+    "bank", "university", "institute", "foundation", "agency", "bureau",
+    "industries", "international", "global", "media", "digital", "consulting",
+})
 
 # Minimum canonical-key length — drops junk snapshot entries like "$$$" (which
 # canonicalise to "") or single stray characters that would over-match.
@@ -52,6 +70,7 @@ _actors: frozenset[str] = frozenset()
 _malware: frozenset[str] = frozenset()
 _ransomware: frozenset[str] = frozenset()
 _generated_at: Optional[str] = None
+_generic_terms: frozenset[str] = frozenset()
 
 
 def _canonical_key(name: str) -> str:
@@ -77,8 +96,38 @@ def _keyset(names) -> frozenset[str]:
     return frozenset(out)
 
 
+def _load_generic_terms() -> frozenset[str]:
+    """Load generic edge qualifiers used for suffix/prefix retry matching."""
+    terms = set(ORG_SUFFIXES)
+    try:
+        with open(_DOMAIN_STOPWORDS_PATH, encoding="utf-8") as fh:
+            terms.update(line.strip().lower() for line in fh if line.strip())
+    except FileNotFoundError:
+        logger.warning("Domain stopword lexicon not found at %s", _DOMAIN_STOPWORDS_PATH)
+    return frozenset(terms)
+
+
+def _lookup_keys(name: str) -> tuple[str, ...]:
+    """Return the original key and edge-stripped retry keys for *name*."""
+    original = _canonical_key(name)
+    if not name:
+        return (original,)
+
+    terms = _generic_terms
+    tokens = re.findall(r"[A-Za-z0-9]+", name.lower())
+    while tokens and tokens[0] in terms:
+        tokens.pop(0)
+    while tokens and tokens[-1] in terms:
+        tokens.pop()
+
+    stripped = _canonical_key(" ".join(tokens))
+    if stripped and stripped != original:
+        return (original, stripped)
+    return (original,)
+
+
 def _load() -> None:
-    global _loaded, _actors, _malware, _ransomware, _generated_at
+    global _loaded, _actors, _malware, _ransomware, _generated_at, _generic_terms
     if _loaded:
         return
     _loaded = True
@@ -89,6 +138,7 @@ def _load() -> None:
         _malware = _keyset(data.get("malware"))
         _ransomware = _keyset(data.get("ransomware"))
         _generated_at = data.get("generated_at")
+        _generic_terms = _load_generic_terms()
         logger.info(
             "Gazetteer loaded: %d actors, %d malware, %d ransomware (generated %s)",
             len(_actors), len(_malware), len(_ransomware), _generated_at,
@@ -106,17 +156,17 @@ def _load() -> None:
 
 def is_known_actor(name: str) -> bool:
     _load()
-    return _canonical_key(name) in _actors
+    return any(key in _actors for key in _lookup_keys(name))
 
 
 def is_known_malware(name: str) -> bool:
     _load()
-    return _canonical_key(name) in _malware
+    return any(key in _malware for key in _lookup_keys(name))
 
 
 def is_known_ransomware(name: str) -> bool:
     _load()
-    return _canonical_key(name) in _ransomware
+    return any(key in _ransomware for key in _lookup_keys(name))
 
 
 def is_known(name: str, category: str) -> bool:
@@ -132,12 +182,12 @@ def is_known(name: str, category: str) -> bool:
 def category_of(name: str) -> Optional[str]:
     """Return the most specific known category for *name*, or None."""
     _load()
-    key = _canonical_key(name)
-    if key in _ransomware:
+    keys = _lookup_keys(name)
+    if any(key in _ransomware for key in keys):
         return "ransomware"
-    if key in _malware:
+    if any(key in _malware for key in keys):
         return "malware"
-    if key in _actors:
+    if any(key in _actors for key in keys):
         return "threat_actor"
     return None
 

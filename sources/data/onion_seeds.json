@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "last_updated": "2026-07-07",
+  "last_updated": "2026-07-25",
   "description": "Curated list of known dark web addresses for VoidAccess intelligence seeding",
   "categories": {
     "ransomware_leak_sites": {
@@ -506,6 +506,16 @@
           "source_url": "http://hn2paw7zaahbikbejiv6h22zwtijlam65y2c77xj2ypbilm2xs4bnbid.onion",
           "investigation_id": "312fb06d-a71c-453b-b108-4aff4997a4ac",
           "added_at": "2026-07-07T10:15:11.791535+00:00"
+        },
+        {
+          "name": "tornetupfu7gcgidt33ftnungxzyfq2p",
+          "url": "http://tornetupfu7gcgidt33ftnungxzyfq2pygui5qdoyss34xbgx2qruzid.onion",
+          "tags": [],
+          "status": "discovered",
+          "added": "2026-07-25",
+          "source_url": "http://tornetupfu7gcgidt33ftnungxzyfq2pygui5qdoyss34xbgx2qruzid.onion",
+          "investigation_id": "94488e9f-236e-4cdd-a55e-285219f59dc0",
+          "added_at": "2026-07-25T17:08:29.364410+00:00"
         }
       ]
     }

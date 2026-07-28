@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 
 from extractor import entity_shape as _shape
 from extractor import confidence as _conf
+from extractor import gazetteer as _gazetteer
 
 logger = logging.getLogger(__name__)
 
@@ -1463,10 +1464,24 @@ def normalize_entities(
 
     noise_count = 0
 
-    for entity_type, values in raw_entities.items():
+    for raw_entity_type, values in raw_entities.items():
         for raw_value in values:
             if not raw_value or not raw_value.strip():
                 continue
+
+            entity_type = raw_entity_type
+
+            # NER may label a known actor/malware span as ORGANIZATION_NAME
+            # when generic qualifiers are included in the span.  Let the
+            # gazetteer classification win after its suffix/prefix retry,
+            # while leaving unrelated organization candidates unchanged.
+            if entity_type == "ORGANIZATION_NAME":
+                known_category = _gazetteer.category_of(raw_value)
+                entity_type = {
+                    "threat_actor": "THREAT_ACTOR_HANDLE",
+                    "malware": "MALWARE_FAMILY",
+                    "ransomware": "RANSOMWARE_GROUP",
+                }.get(known_category, entity_type)
 
             if entity_type in ("FILE_HASH_MD5", "FILE_HASH_SHA1", "FILE_HASH_SHA256"):
                 if not _validate_hash_length(entity_type, raw_value):

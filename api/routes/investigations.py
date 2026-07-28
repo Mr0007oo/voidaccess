@@ -2925,8 +2925,9 @@ async def get_investigation_entities(
                         "freshness_label": freshness_display["label"],
                         "freshness_color": freshness_display["color"],
                         "source_count": e.source_count or 1,
+                        "investigation_count": getattr(e, "investigation_count", 1) or 1,
                         "corroborating_sources": json.loads(e.corroborating_sources or '["dark_web_scrape"]'),
-                        "cross_referenced": (e.source_count or 1) > 1,
+                        "cross_referenced": (getattr(e, "investigation_count", 1) or 1) > 1,
                         "graph_node_id": graph_node_id,
                         "defanged": defang,
                     }

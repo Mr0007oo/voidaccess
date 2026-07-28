@@ -93,14 +93,7 @@ def _load_words() -> None:
 
 
 # Organisation suffixes that strongly signal a real org name.
-_ORG_SUFFIXES: frozenset[str] = frozenset({
-    "inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation",
-    "gmbh", "ag", "sa", "srl", "bv", "plc", "co", "company", "group",
-    "holdings", "technologies", "systems", "solutions", "lab", "labs", "laboratories",
-    "networks", "software", "security", "capital", "partners", "ventures",
-    "bank", "university", "institute", "foundation", "agency", "bureau",
-    "industries", "international", "global", "media", "digital", "consulting",
-})
+_ORG_SUFFIXES = gazetteer.ORG_SUFFIXES
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z]+)?")
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")

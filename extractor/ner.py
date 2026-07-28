@@ -20,6 +20,7 @@ import logging
 import re
 
 from extractor import entity_shape as _shape
+from extractor import gazetteer
 
 logger = logging.getLogger(__name__)
 
@@ -493,12 +494,31 @@ def extract_named_entities(text: str) -> dict[str, list[str]]:
                 for ent in doc.ents:
                     if ent.label_ == "ORG":
                         candidate = ent.text.strip()
+                        # A known actor can be returned by spaCy as an ORG when
+                        # the surrounding generic qualifier is included in the
+                        # span (for example, "LockBit Ransomware Group").
+                        # Preserve the extracted value but emit the gazetteer
+                        # classification so downstream normalization does not
+                        # misfile it as ORGANIZATION_NAME.
+                        category = gazetteer.category_of(candidate)
+                        if category == "threat_actor":
+                            result[THREAT_ACTOR_HANDLE].append(candidate)
+                            continue
+                        if category == "ransomware":
+                            result[RANSOMWARE_GROUP].append(candidate)
+                            continue
+                        if category == "malware":
+                            result[MALWARE_FAMILY].append(candidate)
+                            continue
                         # Accept only if it has organisation shape (proper-noun
                         # structure, org suffix, brand casing) — not merely
                         # "absent from a denylist".
                         if _shape.evaluate(ORGANIZATION_NAME, candidate).accept:
                             orgs.append(candidate)
                 result[ORGANIZATION_NAME] = _dedup(orgs)
+                result[THREAT_ACTOR_HANDLE] = _dedup(result[THREAT_ACTOR_HANDLE])
+                result[MALWARE_FAMILY] = _dedup(result[MALWARE_FAMILY])
+                result[RANSOMWARE_GROUP] = _dedup(result[RANSOMWARE_GROUP])
 
     except Exception:
         logger.exception("extract_named_entities encountered an unexpected error")

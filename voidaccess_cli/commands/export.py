@@ -308,7 +308,8 @@ def _csv_from_data(data: dict) -> str:
     writer = csv.writer(buf)
     writer.writerow(
         ["entity_type", "value", "canonical_value", "confidence",
-         "extraction_method", "corroborating_sources", "context_snippet"]
+         "extraction_method", "corroborating_sources", "investigation_count",
+         "context_snippet"]
     )
     for e in entities:
         writer.writerow(
@@ -319,6 +320,7 @@ def _csv_from_data(data: dict) -> str:
                 e.get("confidence", ""),
                 e.get("extraction_method", ""),
                 e.get("corroborating_sources", ""),
+                e.get("investigation_count", 1),
                 (e.get("context_snippet") or "").replace("\n", " ")[:500],
             ]
         )

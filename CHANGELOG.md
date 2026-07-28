@@ -2,6 +2,10 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [1.9.4] - 2026-07-27
+
+- Version bump.
+
 ## [1.9.3] - 2026-07-24
 
 - STIX malware exports classify ransomware groups as `ransomware` and use

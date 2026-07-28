@@ -96,6 +96,7 @@ async def list_entities(
                         "context_snippet": e.context_snippet,
                         "context": e.context,
                         "investigation_id": str(e.investigation_id) if e.investigation_id else None,
+                        "investigation_count": getattr(e, "investigation_count", 1) or 1,
                         "created_at": e.created_at.isoformat() if e.created_at else None,
                     }
                     for e in entities
@@ -643,8 +644,9 @@ async def get_entity(
                 "freshness_label": freshness_display["label"],
                 "freshness_color": freshness_display["color"],
                 "source_count": entity.source_count or 1,
+                "investigation_count": getattr(entity, "investigation_count", 1) or 1,
                 "corroborating_sources": json.loads(entity.corroborating_sources or '["dark_web_scrape"]'),
-                "cross_referenced": (entity.source_count or 1) > 1,
+                "cross_referenced": (getattr(entity, "investigation_count", 1) or 1) > 1,
                 "defanged": defang,
                 "blockchain_data": {
                     "wallet_type": entity.entity_type if entity.entity_type in ("BITCOIN_ADDRESS", "ETHEREUM_ADDRESS", "MONERO_ADDRESS") else None,
@@ -811,6 +813,9 @@ def _entity_to_dict(entity) -> dict:  # type: ignore[type-arg]
         "investigation_id": str(entity.investigation_id) if entity.investigation_id else None,
         "created_at": entity.created_at.isoformat() if entity.created_at else None,
         "extraction_method": getattr(entity, "extraction_method", None),
+        "source_count": getattr(entity, "source_count", 1) or 1,
+        "investigation_count": getattr(entity, "investigation_count", 1) or 1,
+        "corroborating_sources": getattr(entity, "corroborating_sources", None),
     }
 
 

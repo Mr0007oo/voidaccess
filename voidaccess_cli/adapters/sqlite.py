@@ -602,6 +602,7 @@ def _entity_row(e) -> dict[str, Any]:
         1.0,
         float(e.confidence or 0.0) * source_quality * method_multiplier * corroboration_multiplier,
     )
+    investigation_count = getattr(e, "investigation_count", 1) or 1
     return {
         "id": str(e.id),
         "entity_type": entity_type,
@@ -611,6 +612,8 @@ def _entity_row(e) -> dict[str, Any]:
         "context_snippet": e.context_snippet,
         "extraction_method": e.extraction_method,
         "source_count": e.source_count,
+        "investigation_count": investigation_count,
+        "cross_referenced": investigation_count > 1,
         "corroborating_sources": e.corroborating_sources,
         "source_url": source_url,
         "source_quality": source_quality,

@@ -22,10 +22,12 @@ from db.search_engine_stats import (
 from search.query_builder import diversify_query
 from search.engine_catalog import SEARCH_ENGINES
 from utils.async_utils import run_async
+from search import config as search_config
 
 logger = logging.getLogger(__name__)
 
-ENGINE_TIMEOUT = 30
+# Compatibility exports; runtime reads use the shared config module below.
+ENGINE_TIMEOUT = search_config.ENGINE_TIMEOUT
 
 ENGINE_WEIGHTS = {
     "darksearch": 1.0,
@@ -56,8 +58,8 @@ USER_AGENTS = [
 _ONION_URL_RE = re.compile(r'https?://[a-z0-9._-]+\.onion(?:/[^\s"\'<>]*)?', re.IGNORECASE)
 
 MAX_CONCURRENT = 10
-SEARCH_TIMEOUT = 30
-ENGINE_RETRY_COUNT = 2
+SEARCH_TIMEOUT = search_config.SEARCH_TIMEOUT
+ENGINE_RETRY_COUNT = search_config.ENGINE_RETRY_COUNT
 
 _ENGINE_STATUS: dict[str, dict] = {}
 _LAST_SEARCH_SUMMARY: dict[str, int] = {}
@@ -99,7 +101,7 @@ async def fetch_with_timeout(
     session: aiohttp.ClientSession,
 ) -> aiohttp.ClientResponse:
     """Fetch a URL with timeout using the provided session."""
-    return await session.get(url, timeout=aiohttp.ClientTimeout(total=SEARCH_TIMEOUT))
+    return await session.get(url, timeout=aiohttp.ClientTimeout(total=search_config.SEARCH_TIMEOUT))
 
 
 async def _fetch_engine(
@@ -115,12 +117,12 @@ async def _fetch_engine(
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     
     async with semaphore:
-        for attempt in range(ENGINE_RETRY_COUNT + 1):
+        for attempt in range(search_config.ENGINE_RETRY_COUNT + 1):
             try:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=SEARCH_TIMEOUT)) as resp:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=search_config.SEARCH_TIMEOUT)) as resp:
                     if resp.status != 200:
-                        if attempt < ENGINE_RETRY_COUNT:
-                            await asyncio.sleep(0.5 * (attempt + 1))
+                        if attempt < search_config.ENGINE_RETRY_COUNT:
+                            await asyncio.sleep(search_config.retry_backoff(attempt))
                             continue
                         return EngineResult(
                             name=name,
@@ -147,13 +149,13 @@ async def _fetch_engine(
                     return EngineResult(name=name, links=links)
 
             except asyncio.TimeoutError:
-                if attempt < ENGINE_RETRY_COUNT:
-                    await asyncio.sleep(0.5 * (attempt + 1))
+                if attempt < search_config.ENGINE_RETRY_COUNT:
+                    await asyncio.sleep(search_config.retry_backoff(attempt))
                     continue
                 return EngineResult(name=name, links=[], error="timeout")
             except Exception as e:
-                if attempt < ENGINE_RETRY_COUNT:
-                    await asyncio.sleep(0.5 * (attempt + 1))
+                if attempt < search_config.ENGINE_RETRY_COUNT:
+                    await asyncio.sleep(search_config.retry_backoff(attempt))
                     continue
                 return EngineResult(name=name, links=[], error=str(e))
         
@@ -269,7 +271,7 @@ async def _search_async(
     connector = _tor_aiohttp_connector()
     async with aiohttp.ClientSession(
         connector=connector,
-        timeout=aiohttp.ClientTimeout(total=SEARCH_TIMEOUT),
+        timeout=aiohttp.ClientTimeout(total=search_config.SEARCH_TIMEOUT),
     ) as session:
 
         async def run_engine(engine: dict) -> EngineResult:

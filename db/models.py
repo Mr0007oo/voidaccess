@@ -470,6 +470,11 @@ class Entity(Base):
     source_count: Mapped[int] = mapped_column(
         sa.Integer, server_default="1", default=1
     )
+    # Distinct investigations that independently surfaced this canonical
+    # entity. This is separate from enrichment-feed provenance below.
+    investigation_count: Mapped[int] = mapped_column(
+        sa.Integer, server_default="1", default=1
+    )
     corroborating_sources: Mapped[Optional[str]] = mapped_column(
         sa.Text, nullable=True
     )

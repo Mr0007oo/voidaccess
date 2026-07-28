@@ -281,7 +281,7 @@ def create_entity(
 
 def _link_entity_to_investigation(
     session: Session, entity_id: uuid.UUID, investigation_id: uuid.UUID
-) -> None:
+) -> bool:
     """Link an entity to an investigation via InvestigationEntityLink."""
     from db.models import InvestigationEntityLink
 
@@ -290,7 +290,7 @@ def _link_entity_to_investigation(
         entity_id=entity_id, investigation_id=investigation_id
     ).first()
     if existing:
-        return
+        return False
 
     # Also check pending (unflushed) objects — autoflush=False means they won't
     # appear in the query above, causing UNIQUE VIOLATION on batch flush.
@@ -300,13 +300,29 @@ def _link_entity_to_investigation(
             and obj.entity_id == entity_id
             and obj.investigation_id == investigation_id
         ):
-            return
+            return False
 
     link = InvestigationEntityLink(
         entity_id=entity_id,
         investigation_id=investigation_id
     )
     session.add(link)
+    return True
+
+
+def _entity_investigation_count(session: Session, entity: Entity) -> int:
+    """Count distinct investigations that surfaced *entity*, including owner."""
+    from db.models import InvestigationEntityLink
+
+    ids = {
+        row[0]
+        for row in session.query(InvestigationEntityLink.investigation_id)
+        .filter_by(entity_id=entity.id)
+        .all()
+    }
+    if entity.investigation_id:
+        ids.add(entity.investigation_id)
+    return max(1, len(ids))
 
 
 def upsert_entity_canonical(
@@ -359,9 +375,12 @@ def upsert_entity_canonical(
         existing.last_seen = datetime.now(timezone.utc)
         # Update last_seen_at for freshness tracking
         existing.last_seen_at = datetime.now(timezone.utc)
-        # Link to this investigation if not already linked
-        if existing.investigation_id != investigation_id:
-            _link_entity_to_investigation(session, existing.id, investigation_id)
+        # Link to this investigation if not already linked, including for
+        # legacy rows whose owner column predates the link table backfill.
+        linked = _link_entity_to_investigation(session, existing.id, investigation_id)
+        if linked:
+            session.flush()
+            existing.investigation_count = _entity_investigation_count(session, existing)
         return existing, False
     else:
         # Create new entity
@@ -380,6 +399,7 @@ def upsert_entity_canonical(
         session.add(entity)
         session.flush()  # populate entity.id before creating the link
         _link_entity_to_investigation(session, entity.id, investigation_id)
+        entity.investigation_count = 1
         return entity, True
 
 

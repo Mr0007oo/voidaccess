@@ -39,6 +39,22 @@ logger = logging.getLogger(__name__)
 
 _CO_OCCURRENCE_MAX_ENTITIES_PER_PAGE = 40
 _CO_OCCURRENCE_MAX_EDGES_PER_PAGE = 120
+
+# ORGANIZATION_NAME is deliberately absent from both sets below, even though it
+# is the largest (or second-largest) bucket in most real runs.  These sets were
+# introduced by v1.7.2, the same release that filtered "ORGANIZATION_NAME NER
+# noise ... generic security/programming vocabulary false positives" — the
+# exclusion is that fix, not an oversight.  The bucket is still ~25-45% junk on
+# measured runs (values like POST, JavaScript, HTML, HTTPS, IP, SCADA, EDR sit
+# alongside genuine orgs), so admitting it here would attach hundreds of
+# meaningless edges to every real hub and drown the signal the semantic filter
+# exists to preserve.
+#
+# Dependency, not a TODO: genuinely-real organizations *should* eventually be
+# able to participate in co-occurrence edges.  That is gated on Phase 2's
+# noise-reduction work actually improving what lands in this bucket — do not
+# widen eligibility before then, and re-measure the bucket's noise rate rather
+# than assuming Phase 2 fixed it.
 _CO_OCCURRENCE_HUB_TYPES = frozenset({
     "THREAT_ACTOR_HANDLE",
     "RANSOMWARE_GROUP",

@@ -1287,8 +1287,20 @@ def _build_cooccurrence_edges(
     progress_callback: Optional[Callable[[str], None]] = None,
     metrics_callback: Optional[Callable[[dict[str, int]], None]] = None,
 ) -> int:
-    """Generate CO_APPEARED_ON edges for entities sharing a page."""
-    from db.models import Entity
+    """Generate CO_APPEARED_ON edges for entities sharing a page.
+
+    Entity membership is resolved the same way ``sqlite_adapter.get_entities``
+    and ``graph.builder`` resolve it: ``Entity.investigation_id`` **OR**
+    ``InvestigationEntityLink.investigation_id``.  Under the project's global
+    entity-dedup model ``Entity.investigation_id`` only records the
+    investigation that first *created* the row — every later investigation
+    that re-encounters the same canonical entity is attached through
+    ``InvestigationEntityLink`` instead.  Filtering on the column alone made
+    this builder see only the handful of entities newly inserted by the
+    current run (3 of 221 in a measured run), so the graph it produced was
+    almost entirely isolated nodes.
+    """
+    from db.models import Entity, InvestigationEntityLink
     from db.session import get_session
     from sqlalchemy.orm import joinedload
     from graph.builder import (
@@ -1306,12 +1318,29 @@ def _build_cooccurrence_edges(
     if progress_callback:
         progress_callback("loading entities")
     with get_session() as session:
-        rows = list(
+        matched = (
             session.query(Entity)
             .options(joinedload(Entity.page))
-            .filter(Entity.investigation_id == inv_uuid)
+            .outerjoin(
+                InvestigationEntityLink,
+                InvestigationEntityLink.entity_id == Entity.id,
+            )
+            .filter(
+                (Entity.investigation_id == inv_uuid)
+                | (InvestigationEntityLink.investigation_id == inv_uuid)
+            )
             .all()
         )
+        # The outer join fans out one row per link, so an entity shared with
+        # other investigations comes back more than once.  Collapse on the
+        # primary key: an entity must not co-occur with itself.
+        seen_ids: set = set()
+        rows = []
+        for ent in matched:
+            if ent.id in seen_ids:
+                continue
+            seen_ids.add(ent.id)
+            rows.append(ent)
         entity_rows_loaded = len(rows)
         by_page: dict[uuid.UUID, list] = {}
         for ent in rows:

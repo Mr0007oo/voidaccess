@@ -36,7 +36,12 @@ FRESHNESS_THRESHOLDS = {
         "aging": 730,
         "stale": 1825,
     },
-    "CVE": {
+    "FILE_HASH_SHA1": {
+        "fresh": 365,
+        "aging": 730,
+        "stale": 1825,
+    },
+    "CVE_NUMBER": {
         "fresh": 365,
         "aging": 730,
         "stale": 1825,
@@ -46,7 +51,7 @@ FRESHNESS_THRESHOLDS = {
         "aging": 180,
         "stale": 365,
     },
-    "THREAT_ACTOR": {
+    "THREAT_ACTOR_HANDLE": {
         "fresh": 90,
         "aging": 365,
         "stale": 730,
@@ -70,8 +75,12 @@ def get_freshness_tag(
     if not last_seen_at:
         return FreshnessTag.UNKNOWN
 
+    # Extraction uses uppercase names (for example CVE_NUMBER and
+    # THREAT_ACTOR_HANDLE).  Uppercasing also keeps persisted legacy rows from
+    # unexpectedly taking the DEFAULT branch solely because of casing.
+    normalized_type = (entity_type or "").upper()
     thresholds = FRESHNESS_THRESHOLDS.get(
-        entity_type,
+        normalized_type,
         FRESHNESS_THRESHOLDS["DEFAULT"],
     )
 
