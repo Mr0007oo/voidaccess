@@ -11,6 +11,7 @@ from sources import nvd
 from tests.conftest import make_results, FakeEntity
 
 _NVD_RE = re.compile(r"https://services\.nvd\.nist\.gov/rest/json/cves/2\.0.*")
+_CPE_RE = re.compile(r"https://services\.nvd\.nist\.gov/rest/json/cpes/2\.0.*")
 
 
 def _cve_payload(cve_id="CVE-2021-44228", with_v31=True):
@@ -108,3 +109,32 @@ async def test_enrich_nvd_from_entities():
 async def test_enrich_nvd_no_cves():
     results = await nvd.enrich_nvd([{"entity_type": "IP_ADDRESS", "value": "1.2.3.4"}])
     assert results == []
+
+
+def _cpe_payload(title="Zimbra Collaboration Suite", product="zimbra_collaboration_suite"):
+    return {
+        "totalResults": 1,
+        "products": [{
+            "cpe": {
+                "titles": [{"lang": "en", "title": title}],
+                "cpeName": [{
+                    "cpeName": f"cpe:2.3:a:vendor:{product}:1.0:*:*:*:*:*:*:*",
+                }],
+            },
+        }],
+    }
+
+
+async def test_fetch_nvd_cpe_exact_product_match():
+    with aioresponses() as m:
+        m.get(_CPE_RE, status=200, payload=_cpe_payload())
+        result = await nvd.fetch_nvd_cpe("Zimbra Collaboration Suite")
+    assert result["source"] == "nvd_cpe"
+    assert result["matched"] is True
+
+
+async def test_fetch_nvd_cpe_nonmatching_catalog_result_is_not_suppression():
+    with aioresponses() as m:
+        m.get(_CPE_RE, status=200, payload=_cpe_payload("Unrelated Product", "unrelated_product"))
+        result = await nvd.fetch_nvd_cpe("Zimbra Collaboration Suite")
+    assert result["matched"] is False

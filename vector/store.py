@@ -276,9 +276,6 @@ def count_pages() -> int:
 
 def is_duplicate(text: str, threshold: float = 0.05) -> bool:
     """True if the nearest neighbour is within *threshold* distance."""
-    col = get_collection()
-    if col is None:
-        return False
     hits = search_similar(text, n_results=1)
     if not hits:
         return False

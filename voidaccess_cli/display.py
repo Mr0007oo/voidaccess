@@ -294,7 +294,11 @@ class InvestigationDisplay:
                 breakdown = ", ".join(f"{kind}: {count}" for kind, count in sorted(by_type.items()))
                 table.add_row("Relationship types", breakdown)
             if summary.get("no_llm"):
-                table.add_row("Typed relationships", "0 (skipped: --no-llm)")
+                typed_count = summary.get("typed_relationship_count", 0)
+                table.add_row(
+                    "Typed relationships",
+                    f"{typed_count} (dependency parser; --no-llm)",
+                )
             elif not by_type:
                 table.add_row("Typed relationships", "0 (build completed; none found)")
         if "actor_count" in summary:

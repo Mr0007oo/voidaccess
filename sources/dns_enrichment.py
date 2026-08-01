@@ -15,6 +15,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import pacing
 from utils.enrichment_cache import DEFAULT_TTL, get_enrichment_cache
 from extractor.identity import entity_canonical_id
 
@@ -34,6 +35,19 @@ MAX_DOMAINS_TO_ENRICH = 20
 
 MAX_RELATED_PER_ENTITY = 5
 
+# Inter-request pacing for the passive-DNS / RDAP fan-out.  Two different
+# providers sit behind this one constant, verified 2026-07-29:
+#
+#   CIRCL PDNS/PSSL — access is restricted to vetted partners and requires
+#     credentials VoidAccess does not send, so these calls are expected to
+#     401/403 in practice.  CIRCL publishes no rate limit; this is courtesy
+#     pacing only.
+#   RDAP — rdap.org fronts Cloudflare, which 429s above ~10 requests per 10 s
+#     (and 3,000 per 300 s); rdap.arin.net publishes nothing.  That IS a real
+#     quota, and 0.5 s x 3 concurrent workers stays inside it.
+#
+# Routed through pacing.scale_delay_floor() because of the RDAP side: an
+# `aggressive` profile must not be able to shorten it.
 CIRCL_DELAY = 0.5
 
 
@@ -183,7 +197,7 @@ class DNSEnrichment:
                 return_exceptions=True,
             )
 
-            await asyncio.sleep(CIRCL_DELAY)
+            await asyncio.sleep(pacing.scale_delay_floor(CIRCL_DELAY))
 
             if isinstance(pdns, list):
                 result["passive_dns"] = pdns
@@ -248,7 +262,7 @@ class DNSEnrichment:
                 return_exceptions=True,
             )
 
-            await asyncio.sleep(CIRCL_DELAY)
+            await asyncio.sleep(pacing.scale_delay_floor(CIRCL_DELAY))
 
             if isinstance(pdns, list):
                 result["passive_dns"] = pdns

@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 from extractor import entity_shape as _shape
 from extractor import confidence as _conf
 from extractor import gazetteer as _gazetteer
+from extractor import software_suppression as _software
 
 logger = logging.getLogger(__name__)
 
@@ -1139,6 +1140,10 @@ class NormalizedEntity:
     # "shape_ok", "shape_weak", "unvalidated".  Kept for introspection/ranking;
     # not persisted to the DB.
     validation_tier: str = field(default="")
+    # The cleaned/extracted text that produced this entity.  Entity-path page
+    # persistence can use this to materialize the same page content that was
+    # already available to extraction instead of creating a URL-only row.
+    cleaned_text: str = field(default="")
 
     @property
     def canonical_value(self) -> str:
@@ -1551,6 +1556,14 @@ def normalize_entities(
             if not canonical:
                 continue
 
+            if (
+                entity_type == "ORGANIZATION_NAME"
+                and _software.should_suppress_organization(canonical, page_text)
+            ):
+                noise_count += 1
+                logger.debug("Suppressed software/product organization candidate")
+                continue
+
             # -------------------------------------------------------------
             # Acceptance gate.
             #
@@ -1568,7 +1581,9 @@ def normalize_entities(
             # -------------------------------------------------------------
             shape_verdict = None
             if _conf.is_shape_validated_type(entity_type):
-                shape_verdict = _shape.evaluate(entity_type, canonical)
+                shape_verdict = _shape.evaluate(
+                    entity_type, canonical, context_text=page_text
+                )
                 if not shape_verdict.accept:
                     noise_count += 1
                     logger.debug(
@@ -1656,6 +1671,7 @@ def normalize_entities(
                     extraction_method=_extraction_method_for(entity_type, extraction_method),
                     source_quality=source_quality,
                     validation_tier=validation,
+                    cleaned_text=page_text or "",
                 )
             )
 
@@ -1743,6 +1759,20 @@ def merge_with_db(
         with get_session() as session:
             page_cache: dict[str, object] = {}
 
+            def _page_text(entity: NormalizedEntity) -> str:
+                return str(getattr(entity, "cleaned_text", "") or "")
+
+            def _materialize_page_text(page: object, entity: NormalizedEntity) -> None:
+                """Fill a URL-only page row with the best text seen this run."""
+                if page is None:
+                    return
+                text = _page_text(entity)
+                if not text:
+                    return
+                existing = str(getattr(page, "cleaned_text", "") or "")
+                if len(text) > len(existing):
+                    page.cleaned_text = text
+
             for entity in entities:
                 url = entity.source_url
 
@@ -1754,7 +1784,13 @@ def merge_with_db(
                         with session.begin_nested():
                             page = get_page_by_url(session, url)
                             if page is None:
-                                page = create_page(session, url=url)
+                                page = create_page(
+                                    session,
+                                    url=url,
+                                    cleaned_text=_page_text(entity) or None,
+                                )
+                            else:
+                                _materialize_page_text(page, entity)
                         page_cache[url] = page
                     except IntegrityError:
                         # Concurrent page insert — re-read the now-committed row.
@@ -1769,6 +1805,15 @@ def merge_with_db(
                     except Exception as _pexc:
                         logger.debug("page resolve failed for %s: %s", url, _pexc)
                         page = None
+
+                if page is not None and page_cache.get(url) is not None:
+                    # A page may have been cached from an entity without text
+                    # and receive a populated entity later in the batch.
+                    try:
+                        with session.begin_nested():
+                            _materialize_page_text(page, entity)
+                    except Exception as _pexc:
+                        logger.debug("page text update failed for %s: %s", url, _pexc)
 
                 try:
                     with session.begin_nested():  # SAVEPOINT per entity

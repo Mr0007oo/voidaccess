@@ -31,11 +31,20 @@ from typing import Any, Optional
 
 import aiohttp
 
+import pacing
 from utils.enrichment_cache import DEFAULT_TTL, get_enrichment_cache
 
 logger = logging.getLogger(__name__)
 
 MAX_IPS = 50
+
+# GreyNoise free tier: 50 lookups per WEEK (10/day unauthenticated), shared with
+# the GreyNoise Visualizer.  MAX_IPS is 50, so without this cap one real
+# investigation can burn a whole week's access.  Set well below 50 so several
+# investigations can share a week without tracking actual weekly usage — that
+# would need cross-process persistence, deliberately deferred.  See
+# GreyNoiseBudget.
+MAX_GREYNOISE_LOOKUPS = 12
 
 FEODO_CSV_URL = "https://feodotracker.abuse.ch/downloads/ipblocklist.csv"
 
@@ -240,6 +249,42 @@ async def _cached_check_abuseipdb(ip: str, api_key: str) -> dict:
     return result
 
 
+class GreyNoiseBudget:
+    """
+    Per-investigation safety cap on GreyNoise lookups.
+
+    GreyNoise's free tier allows **50 lookups per week** (10/day
+    unauthenticated), and that allowance is shared with the GreyNoise Visualizer.
+    MAX_IPS is 50, so a single investigation could consume an entire week's
+    access in one run.
+
+    This is deliberately a *safety cap*, not a budget tracker: it bounds one
+    investigation and keeps no state between runs. Tracking real weekly usage
+    needs cross-process persistence, which is a separate deferred design
+    question (pattern 1 in docs/BACKLOG.md). The cap is set well below 50 so
+    several investigations can share a week without any tracking at all.
+
+    ``try_consume`` has no await, so the check-then-increment is atomic with
+    respect to the concurrent ``asyncio.gather`` fan-out in
+    ``enrich_ip_entities``.
+    """
+
+    __slots__ = ("limit", "used", "capped")
+
+    def __init__(self, limit: int = 0) -> None:
+        self.limit = MAX_GREYNOISE_LOOKUPS if limit <= 0 else int(limit)
+        self.used = 0
+        self.capped = False
+
+    def try_consume(self) -> bool:
+        """Claim one lookup. False once the cap is reached."""
+        if self.used >= self.limit:
+            self.capped = True
+            return False
+        self.used += 1
+        return True
+
+
 async def _check_greynoise(ip: str, api_key: str) -> dict:
     """Query GreyNoise community API. Returns parsed response or {}."""
     try:
@@ -252,6 +297,17 @@ async def _check_greynoise(ip: str, api_key: str) -> dict:
             ) as resp:
                 if resp.status == 404:
                     return {"classification": "unknown"}
+                if resp.status == 429:
+                    # GreyNoise 429s mean the weekly allowance is gone; it tells
+                    # us when it resets, but that is days away, so honour the
+                    # header only up to the cap and let the run continue without
+                    # GreyNoise rather than blocking on it.
+                    wait = pacing.retry_after_seconds(resp.headers, 0.0)
+                    logger.warning(
+                        "ip_reputation: GreyNoise quota exhausted for %s "
+                        "(server suggests %.0fs)", ip, wait,
+                    )
+                    return {}
                 if resp.status != 200:
                     logger.debug("ip_reputation: GreyNoise → HTTP %s for %s", resp.status, ip)
                     return {}
@@ -261,18 +317,34 @@ async def _check_greynoise(ip: str, api_key: str) -> dict:
         return {}
 
 
-async def _cached_check_greynoise(ip: str, api_key: str) -> dict:
+async def _cached_check_greynoise(
+    ip: str,
+    api_key: str,
+    budget: Optional[GreyNoiseBudget] = None,
+) -> dict:
     """Cached wrapper around _check_greynoise (6h TTL).
 
     Caches both real responses and 404 ``{"classification": "unknown"}`` results
     so we don't hammer GreyNoise repeatedly for known-unknown IPs. Empty error
     responses (``{}``) are NOT cached.
+
+    *budget* is consumed only on a cache MISS — a cache hit issues no request,
+    so charging it against the weekly allowance would under-use a quota this
+    tight for no reason.
     """
     cache = await _get_enrichment_cache()
     cached = await cache.get("IP_ADDRESS", ip, "greynoise")
     if cached is not None:
         logger.debug("GreyNoise cache hit: %s", ip)
         return cached
+
+    if budget is not None and not budget.try_consume():
+        logger.info(
+            "ip_reputation: GreyNoise skipped for %s — per-investigation cap "
+            "of %d reached (free tier is 50/week)", ip, budget.limit,
+        )
+        return {}
+
     result = await _check_greynoise(ip, api_key)
     if result:
         await cache.set(
@@ -288,6 +360,7 @@ async def _cached_check_greynoise(ip: str, api_key: str) -> dict:
 async def check_ip_reputation(
     ip: str,
     base_confidence: float = 1.0,
+    greynoise_budget: Optional[GreyNoiseBudget] = None,
 ) -> dict[str, Any]:
     """
     Run all four reputation checks for a single IP address.
@@ -360,7 +433,7 @@ async def check_ip_reputation(
 
     # --- GreyNoise check ---
     if greynoise_key:
-        gn_resp = await _cached_check_greynoise(ip, greynoise_key)
+        gn_resp = await _cached_check_greynoise(ip, greynoise_key, greynoise_budget)
         if gn_resp:
             classification = gn_resp.get("classification", "unknown")
             result["greynoise_classification"] = classification
@@ -516,9 +589,20 @@ async def enrich_ip_entities(
 
     logger.info("ip_reputation: checking %d unique IP(s)", len(unique_ips))
 
+    # One budget shared by the whole fan-out, so the cap is per investigation
+    # rather than per IP.
+    greynoise_budget = GreyNoiseBudget()
+
     # Run all checks concurrently
     rep_list = await asyncio.gather(
-        *[check_ip_reputation(ip, base_confidence=seen[ip]) for ip in unique_ips],
+        *[
+            check_ip_reputation(
+                ip,
+                base_confidence=seen[ip],
+                greynoise_budget=greynoise_budget,
+            )
+            for ip in unique_ips
+        ],
         return_exceptions=True,
     )
 
@@ -529,6 +613,8 @@ async def enrich_ip_entities(
         "suppressed": 0,
         "c2_confirmed": 0,
         "abuse_confirmed": 0,
+        "greynoise_lookups": greynoise_budget.used,
+        "greynoise_capped": greynoise_budget.capped,
     }
 
     for ip, rep in zip(unique_ips, rep_list):
@@ -566,10 +652,17 @@ async def enrich_ip_entities(
     checked = stats["checked"]
     sup = stats["suppressed"]
     status = f"ok_{checked}_ips" + (f"_{sup}_suppressed" if sup else "")
+    # Surface the cap honestly in sources_used rather than silently returning
+    # fewer GreyNoise classifications than the IP count implies.
+    if greynoise_budget.capped:
+        status += f"_greynoise_capped_at_{greynoise_budget.limit}"
 
     logger.info(
-        "ip_reputation: done — %d checked, %d suppressed, %d C2, %d abuse",
+        "ip_reputation: done — %d checked, %d suppressed, %d C2, %d abuse, "
+        "%d GreyNoise lookup(s)%s",
         checked, sup, stats["c2_confirmed"], stats["abuse_confirmed"],
+        greynoise_budget.used,
+        " (cap reached)" if greynoise_budget.capped else "",
     )
 
     return extraction_results, {"ip_reputation": status, **stats}

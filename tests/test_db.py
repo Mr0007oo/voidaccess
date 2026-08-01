@@ -441,6 +441,64 @@ class TestEntityRelationship:
 
         assert session.get(EntityRelationship, rel_id) is None
 
+    def test_typed_relationship_dedup_is_scoped_to_investigation(self, session):
+        from db.models import Entity, EntityRelationship, Investigation, Page
+        from db.queries import save_typed_relationships
+
+        prior = Investigation(query="prior typed relationship")
+        current = Investigation(query="current typed relationship")
+        session.add_all([prior, current])
+        session.flush()
+
+        page = Page(url="https://example.test/typed-scope")
+        session.add(page)
+        session.flush()
+        source = Entity(
+            page_id=page.id,
+            entity_type="THREAT_ACTOR_HANDLE",
+            value="LAUNDRY BEAR",
+        )
+        target = Entity(
+            page_id=page.id,
+            entity_type="ORGANIZATION_NAME",
+            value="ZCS",
+        )
+        session.add_all([source, target])
+        session.flush()
+
+        session.add(
+            EntityRelationship(
+                entity_a_id=source.id,
+                entity_b_id=target.id,
+                relationship_type="TARGETS",
+                investigation_id=prior.id,
+                source_page_id=page.id,
+                confidence=0.85,
+            )
+        )
+        session.flush()
+
+        relationship = {
+            "entity_a_id": source.id,
+            "entity_b_id": target.id,
+            "relationship_type": "TARGETS",
+            "confidence": 0.85,
+            "source_page_id": page.id,
+        }
+        assert save_typed_relationships(session, current.id, [relationship]) == 1
+        assert save_typed_relationships(session, current.id, [relationship]) == 0
+
+        rows = (
+            session.query(EntityRelationship)
+            .filter_by(
+                entity_a_id=source.id,
+                entity_b_id=target.id,
+                relationship_type="TARGETS",
+            )
+            .all()
+        )
+        assert {row.investigation_id for row in rows} == {prior.id, current.id}
+
 
 # ---------------------------------------------------------------------------
 # Investigation <-> Source junction

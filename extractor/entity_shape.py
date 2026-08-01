@@ -39,6 +39,7 @@ import re
 from dataclasses import dataclass, field
 
 from extractor import gazetteer
+from extractor.software_suppression import has_organization_context
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +173,7 @@ def looks_like_common_language(value: str) -> bool:
     return common_count >= len(word_toks) - 0  # all tokens common → fragment
 
 
-def _base_signals(value: str) -> dict:
+def _base_signals(value: str, context_text: str | None = None) -> dict:
     _load_words()
     toks = _tokens(value)
     word_toks = [t for t in toks if _WORD_RE.fullmatch(t)]
@@ -196,6 +197,7 @@ def _base_signals(value: str) -> dict:
             and sum(1 for t in word_toks if t[:1].isupper()) >= max(2, len(word_toks) - 1)
         ),
         "n_word_tokens": len(word_toks),
+        "organization_context": has_organization_context(value, context_text),
     }
 
 
@@ -282,6 +284,16 @@ def _evaluate_org(value: str, sig: dict) -> float:
     # tracking numbers), not an organisation name.
     if re.search(r"\d{3,}", value):
         score -= 0.5
+    # A short all-caps token is not organization evidence by itself.  This is
+    # intentionally stricter than the generic shape score: product/protocol
+    # acronyms such as ZCS, AWS, EDR and SCADA otherwise pass the old 2-6
+    # character acronym shortcut and bypass the normal length floor.
+    if (
+        sig["n_word_tokens"] == 1
+        and sig["has_acronym"]
+        and not sig["organization_context"]
+    ):
+        return 0.2
     return score
 
 
@@ -302,7 +314,11 @@ def _evaluate_malware(value: str, sig: dict) -> float:
     return score
 
 
-def evaluate(entity_type: str, value: str) -> ShapeVerdict:
+def evaluate(
+    entity_type: str,
+    value: str,
+    context_text: str | None = None,
+) -> ShapeVerdict:
     """Evaluate whether *value* plausibly has the shape of *entity_type*.
 
     Gazetteer membership short-circuits to the strongest tier; otherwise a
@@ -313,7 +329,7 @@ def evaluate(entity_type: str, value: str) -> ShapeVerdict:
         if not value:
             return ShapeVerdict(False, "reject", 0.0, {})
 
-        sig = _base_signals(value)
+        sig = _base_signals(value, context_text)
 
         # Known-good reference set wins outright — with one guard.  Malware /
         # ransomware candidates are generated only by a curated precise pattern
@@ -345,6 +361,18 @@ def evaluate(entity_type: str, value: str) -> ShapeVerdict:
                 and (sig["single_common_word"] or sig["all_tokens_common"])
                 and _no_shape
             )
+            # A title-cased, multi-word actor name ending in an organisation
+            # suffix is still a valid known actor even when every token is in
+            # the ordinary-language lexicon (for example, Lazarus Group).
+            # Keep the ordinary-language guard for bare/common candidates, but
+            # do not discard a confirmed gazetteer cluster on that basis.
+            if (
+                entity_type == "THREAT_ACTOR_HANDLE"
+                and sig["multiword_proper"]
+                and sig["has_org_suffix"]
+                and sig["n_word_tokens"] >= 2
+            ):
+                _bare_ordinary = False
             if not (_domain_noise or _bare_ordinary):
                 return ShapeVerdict(True, "gazetteer", 0.97, sig)
 

@@ -194,7 +194,52 @@ def test_strip_html():
 
 
 # ---------------------------------------------------------------------------
-# 10. test_cache_set_and_get
+# 10. test_article_body_uses_trafilatura
+# ---------------------------------------------------------------------------
+
+def test_article_body_uses_trafilatura():
+    scraper = RSSFeedScraper()
+    extracted = "Main article content. " * 10
+
+    with patch("sources.rss_scraper.trafilatura.extract", return_value=extracted) as mock_extract:
+        result = scraper._extract_article_text(
+            "<html><nav>Skip to main content</nav><article>raw page</article></html>"
+        )
+
+    assert result == extracted.strip()
+    mock_extract.assert_called_once_with(
+        "<html><nav>Skip to main content</nav><article>raw page</article></html>",
+        include_comments=False,
+        include_tables=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. test_article_body_raw_strip_fallback
+# ---------------------------------------------------------------------------
+
+def test_article_body_raw_strip_fallback():
+    scraper = RSSFeedScraper()
+    html = """
+    <html>
+      <nav>Skip to main content</nav>
+      <script>var tracking = 'noise';</script>
+      <article><h1>Article title</h1><p>Usable article text survives.</p></article>
+    </html>
+    """
+
+    with patch("sources.rss_scraper.trafilatura.extract", return_value=""):
+        result = scraper._extract_article_text(html)
+
+    assert "Usable article text survives." in result
+    assert "var tracking" not in result
+    # This is intentionally the raw-strip fallback contract, so page chrome
+    # remains available rather than producing an empty article.
+    assert "Skip to main content" in result
+
+
+# ---------------------------------------------------------------------------
+# 12. test_cache_set_and_get
 # ---------------------------------------------------------------------------
 
 def test_cache_set_and_get(tmp_path, monkeypatch):
@@ -210,7 +255,7 @@ def test_cache_set_and_get(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 11. test_cache_expires
+# 13. test_cache_expires
 # ---------------------------------------------------------------------------
 
 def test_cache_expires(tmp_path):
@@ -228,7 +273,7 @@ def test_cache_expires(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 12. test_disabled_by_env
+# 14. test_disabled_by_env
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -239,7 +284,7 @@ async def test_disabled_by_env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 13. test_content_safety_blocks
+# 15. test_content_safety_blocks
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -273,7 +318,7 @@ async def test_content_safety_blocks():
 
 
 # ---------------------------------------------------------------------------
-# 14. test_source_type_marking
+# 16. test_source_type_marking
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -317,7 +362,7 @@ async def test_source_type_marking(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 15. test_max_articles_per_feed_respected
+# 17. test_max_articles_per_feed_respected
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio

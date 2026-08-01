@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 import aiohttp
 
+import pacing
 from utils.enrichment_cache import DEFAULT_TTL, get_enrichment_cache
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,32 @@ WAYBACK_CDX_URL = (
 _crt_cache: dict[str, dict] = {}
 _urlscan_cache: dict[str, dict] = {}
 _wayback_cache: dict[str, dict] = {}
+
+# crt.sh pacing — Class B, quota-driven.  The operator states a per-IP limit of
+# **5 requests per minute** (crtsh mailing list, June 2023; reduced from the
+# 60/min announced in January 2020).  Verified 2026-07-29.
+#
+# Before this, up to MAX_DOMAINS (30) crt.sh requests were fired concurrently
+# with no delay and no 429 handling, against a 5/min limit — the highest real
+# throttling risk in the tree.
+#
+# Concurrency 1 rather than a wider semaphore: at 5 req/min the derived
+# per-worker delay for N workers is N x 12 s, so extra concurrency buys nothing
+# and only makes the arithmetic harder to read.
+#
+# A correctly paced crt.sh cannot cover 30 domains inside an investigation
+# (30 x 12 s = 6 minutes), so a soft budget bounds it the same way nvd.py bounds
+# its CVE loop.  That is a real coverage reduction and it is the correct
+# trade: firing 30 concurrent requests at a 5/min endpoint gets us throttled,
+# so most of those 30 were returning nothing anyway.  The 24 h in-memory cache
+# plus the cross-process enrichment cache are what actually recover coverage
+# across runs.
+CRT_MIN_INTERVAL = 12.5      # documented: 5 req/min = 12.0 s, + margin
+CRT_MAX_CONCURRENCY = 1
+CRT_SOFT_BUDGET = 45.0       # stop issuing new crt.sh requests after this long
+
+_crt_semaphore: Optional[asyncio.Semaphore] = None
+_crt_budget_started: Optional[float] = None
 
 CRT_CACHE_TTL = 86400.0      # 24 h
 URLSCAN_CACHE_TTL = 21600.0  # 6 h
@@ -141,6 +168,30 @@ def _is_newly_observed(first_seen: str | None) -> bool:
 # crt.sh — Certificate Transparency
 # ---------------------------------------------------------------------------
 
+def _get_crt_semaphore() -> asyncio.Semaphore:
+    global _crt_semaphore
+    if _crt_semaphore is None:
+        _crt_semaphore = asyncio.Semaphore(CRT_MAX_CONCURRENCY)
+    return _crt_semaphore
+
+
+def _crt_delay() -> float:
+    """Per-worker delay holding the aggregate crt.sh rate at ≤ 5 req/min."""
+    return pacing.rate_limit_delay(CRT_MIN_INTERVAL, CRT_MAX_CONCURRENCY)
+
+
+def start_crt_budget() -> None:
+    """Open a fresh crt.sh soft-budget window for one investigation."""
+    global _crt_budget_started
+    _crt_budget_started = time.monotonic()
+
+
+def _crt_budget_exhausted() -> bool:
+    if _crt_budget_started is None:
+        return False
+    return (time.monotonic() - _crt_budget_started) > CRT_SOFT_BUDGET
+
+
 async def query_crt_sh(domain: str) -> list[dict]:
     """
     Query crt.sh for subdomains found in certificate transparency logs.
@@ -148,21 +199,52 @@ async def query_crt_sh(domain: str) -> list[dict]:
     Returns list of dicts with keys: name, first_seen, last_seen, issuer.
     Wildcards (*.example.com) and the parent domain itself are filtered out.
     Results capped at MAX_SUBDOMAINS_PER_DOMAIN. Cached for 24 h.
+
+    Paced to crt.sh's documented 5 requests/minute per IP, and bounded by
+    CRT_SOFT_BUDGET so a 30-domain investigation degrades to fewer CT lookups
+    instead of running for six minutes or getting the IP throttled.
     """
     cached = _crt_cache.get(domain)
     if cached and (time.time() - cached["loaded_at"]) < CRT_CACHE_TTL:
         return cached["subdomains"]
 
+    if _crt_budget_exhausted():
+        logger.info(
+            "domain_reputation: crt.sh skipped for %s — soft budget (%.0fs) "
+            "reached at 5 req/min", domain, CRT_SOFT_BUDGET,
+        )
+        return []
+
     url = CRT_SH_URL.format(domain=domain)
     try:
         timeout = aiohttp.ClientTimeout(connect=10, sock_read=120)
         headers = {"User-Agent": "VoidAccess-OSINT/1.1 (security research)"}
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    logger.debug("domain_reputation: crt.sh %s → HTTP %s", domain, resp.status)
-                    return []
-                data = await resp.json(content_type=None)
+        async with _get_crt_semaphore():
+            # Delay in a `finally` inside the semaphore: paid on 429s and errors
+            # too (a 429 storm must slow us down, not speed us up), and the slot
+            # stays held so rate_limit_delay()'s arithmetic holds.
+            server_wait = 0.0
+            try:
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                    async with session.get(url) as resp:
+                        if resp.status == 429:
+                            server_wait = pacing.retry_after_seconds(
+                                resp.headers, _crt_delay()
+                            )
+                            logger.warning(
+                                "domain_reputation: crt.sh rate limited for %s "
+                                "— backing off %.1fs", domain, server_wait,
+                            )
+                            return []
+                        if resp.status != 200:
+                            logger.debug(
+                                "domain_reputation: crt.sh %s → HTTP %s",
+                                domain, resp.status,
+                            )
+                            return []
+                        data = await resp.json(content_type=None)
+            finally:
+                await asyncio.sleep(max(_crt_delay(), server_wait))
     except Exception as exc:
         logger.debug("domain_reputation: crt.sh failed for %s: %s", domain, exc)
         return []
@@ -641,6 +723,11 @@ async def enrich_domain_entities(
         unique_domains = unique_domains[:MAX_DOMAINS]
 
     logger.info("domain_reputation: enriching %d unique domain(s)", len(unique_domains))
+
+    # Open the crt.sh soft-budget window for this investigation.  crt.sh allows
+    # 5 req/min, so the fan-out below cannot cover every domain; the budget makes
+    # that degradation bounded and visible instead of open-ended.
+    start_crt_budget()
 
     rep_list = await asyncio.gather(
         *[check_domain_reputation(d, base_confidence=seen[d]) for d in unique_domains],

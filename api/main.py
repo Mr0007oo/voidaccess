@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
@@ -491,6 +492,13 @@ def _run_migrations() -> None:
 
         project_root = pathlib.Path(__file__).resolve().parents[1]
         ini_path = project_root / "alembic.ini"
+        if not ini_path.exists():
+            # Wheel data-files are installed at the virtualenv prefix, while
+            # api/ and db/ live under site-packages.  Locate the shipped
+            # config there for non-editable/API deployments.
+            ini_path = pathlib.Path(sys.prefix) / "alembic.ini"
+        if not ini_path.exists():
+            raise FileNotFoundError(f"Alembic config not found: {ini_path}")
         alembic_cfg = Config(str(ini_path))
         alembic_cfg.set_main_option("sqlalchemy.url", os.environ["DATABASE_URL"])
         alembic_cfg.set_main_option("script_location", str(project_root / "db" / "migrations"))
@@ -620,6 +628,13 @@ async def tor_test(_=Depends(get_current_user)) -> dict:
         import aiohttp  # noqa: PLC0415
         from aiohttp_socks import ProxyConnector  # noqa: PLC0415
 
+        # Deliberately NOT the shared pool in scraper/tor_pool.py, and the one
+        # justified exception to the "no private Tor connector" rule: this
+        # endpoint exists to test whether the Tor transport itself works, so it
+        # must not report health through the very session cache whose health is
+        # in question — a pooled session would make a stale or broken cached
+        # connector look like a working Tor.  It also fetches one fixed clearnet
+        # URL, so no .onion stream isolation is at stake here.
         connector = ProxyConnector.from_url(f"socks5://{TOR_PROXY_HOST}:{TOR_PROXY_PORT}")
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:

@@ -11,13 +11,15 @@ refreshes that reference set from authoritative public taxonomies.
 Sources (all public, clearnet):
   * MISP galaxy clusters — threat-actor, ransomware, malpedia (malware),
     mitre-intrusion-set, mitre-malware, mitre-tool, tool, rat, stealer, banker.
-    Each cluster ships a `value` plus `meta.synonyms`, so we capture aliases.
+    Each cluster ships a `value`, `uuid`, and (when available) `meta.synonyms`.
   * A common-English-word frequency list (google-10000-english) — used by the
     shape checker to tell "ordinary dictionary word used in its normal sense"
     apart from an entity-shaped token.
 
 Output (committed to the repo so extraction stays offline + deterministic):
-  * data/threat_gazetteer.json   — {threat_actors, malware, ransomware, ...}
+  * data/threat_gazetteer.json   — {threat_actors, malware, ransomware, ...},
+    with each category containing structured `{canonical, synonyms, uuid}`
+    records rather than a flattened list of names.
   * data/common_words_en.txt     — one lowercase common word per line
 
 Run:  python scripts/update_gazetteer.py
@@ -93,28 +95,61 @@ def _fetch_json(url: str) -> dict:
     return resp.json()
 
 
-def _collect_names(cluster: dict) -> list[str]:
-    """Return every value + synonym in a MISP galaxy cluster."""
-    out: list[str] = []
+def _collect_names(cluster: dict) -> list[dict[str, object]]:
+    """Return cluster-identity-preserving records from a MISP cluster file."""
+    out: list[dict[str, object]] = []
     for entry in cluster.get("values", []):
-        val = (entry.get("value") or "").strip()
-        if val:
-            out.append(val)
+        canonical = (entry.get("canonical") or entry.get("value") or "").strip()
+        uuid = (entry.get("uuid") or "").strip()
+        if not canonical or not uuid:
+            continue
         meta = entry.get("meta") or {}
-        for syn in meta.get("synonyms", []) or []:
-            syn = (syn or "").strip()
-            if syn:
-                out.append(syn)
+        synonyms = entry.get("synonyms")
+        if synonyms is None:
+            synonyms = meta.get("synonyms", [])
+        if isinstance(synonyms, str):
+            synonyms = [synonyms]
+        cleaned_synonyms = [
+            syn.strip()
+            for syn in (synonyms or [])
+            if isinstance(syn, str) and syn.strip()
+        ]
+        out.append({
+            "canonical": canonical,
+            "synonyms": cleaned_synonyms,
+            "uuid": uuid,
+        })
     return out
 
 
+def _merge_record(existing: dict[str, object], incoming: dict[str, object]) -> None:
+    """Merge aliases for a UUID seen in more than one source cluster file."""
+    known = list(existing.get("synonyms", []))
+    for synonym in incoming.get("synonyms", []):
+        if synonym not in known:
+            known.append(synonym)
+    existing["synonyms"] = known
+
+
+def _coverage(records: list[dict[str, object]]) -> dict[str, object]:
+    with_synonyms = sum(bool(record["synonyms"]) for record in records)
+    entries = len(records)
+    return {
+        "entries": entries,
+        "with_synonyms": with_synonyms,
+        "synonym_coverage_pct": round(with_synonyms / entries * 100, 1)
+        if entries else 0.0,
+    }
+
+
 def build_gazetteer() -> dict:
-    categories: dict[str, set[str]] = {
-        "threat_actors": set(),
-        "malware": set(),
-        "ransomware": set(),
+    categories: dict[str, dict[str, dict[str, object]]] = {
+        "threat_actors": {},
+        "malware": {},
+        "ransomware": {},
     }
     used_sources: list[str] = []
+    source_coverage: dict[str, dict[str, object]] = {}
 
     for filename, category in _MISP_CLUSTERS.items():
         url = f"{_MISP_BASE}/{filename}"
@@ -123,25 +158,60 @@ def build_gazetteer() -> dict:
         except Exception as exc:  # noqa: BLE001
             print(f"  ! skipped {filename}: {exc}", file=sys.stderr)
             continue
-        names = _collect_names(cluster)
-        categories[category].update(names)
+        records = _collect_names(cluster)
+        for record in records:
+            uuid = record["uuid"]
+            existing = categories[category].get(uuid)
+            if existing is None:
+                categories[category][uuid] = record
+            else:
+                _merge_record(existing, record)
         used_sources.append(url)
-        print(f"  + {filename}: {len(names)} names -> {category}")
+        source_coverage[filename] = _coverage(records)
+        print(
+            f"  + {filename}: {len(records)} entries, "
+            f"{source_coverage[filename]['with_synonyms']} with synonyms -> {category}"
+        )
 
     # Ransomware groups are also threat actors; make the actor set a superset so
     # a ransomware brand still validates as an actor handle.
-    categories["threat_actors"].update(categories["ransomware"])
+    for uuid, record in categories["ransomware"].items():
+        existing = categories["threat_actors"].get(uuid)
+        if existing is None:
+            categories["threat_actors"][uuid] = dict(record)
+            categories["threat_actors"][uuid]["synonyms"] = list(record["synonyms"])
+        else:
+            _merge_record(existing, record)
+
+    category_records = {
+        category: sorted(records.values(), key=lambda record: record["canonical"].casefold())
+        for category, records in categories.items()
+    }
+    source_entries = sum(item["entries"] for item in source_coverage.values())
+    source_synonyms = sum(item["with_synonyms"] for item in source_coverage.values())
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "sources": used_sources,
         "note": (
-            "Regenerate with scripts/update_gazetteer.py. Names are matched "
-            "case-insensitively after canonicalisation in extractor/gazetteer.py."
+            "Regenerate with scripts/update_gazetteer.py. Entries preserve MISP "
+            "cluster identity; names are matched case-insensitively after "
+            "canonicalisation in extractor/gazetteer.py."
         ),
-        "threat_actors": sorted(categories["threat_actors"]),
-        "malware": sorted(categories["malware"]),
-        "ransomware": sorted(categories["ransomware"]),
+        "coverage": {
+            "source_entries": source_entries,
+            "source_entries_with_synonyms": source_synonyms,
+            "source_synonym_coverage_pct": round(source_synonyms / source_entries * 100, 1)
+            if source_entries else 0.0,
+            "categories": {
+                category: _coverage(records)
+                for category, records in category_records.items()
+            },
+            "sources": source_coverage,
+        },
+        "threat_actors": category_records["threat_actors"],
+        "malware": category_records["malware"],
+        "ransomware": category_records["ransomware"],
     }
 
 

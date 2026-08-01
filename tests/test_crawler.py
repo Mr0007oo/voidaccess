@@ -104,8 +104,10 @@ def _db_url(monkeypatch, _clean_crawler_db):
     """Point DATABASE_URL at the test SQLite file."""
     monkeypatch.setattr("config.DATABASE_URL", CRAWLER_TEST_DB_URL)
     monkeypatch.setattr("db.session.DATABASE_URL", CRAWLER_TEST_DB_URL)
-    monkeypatch.setattr("crawler.spider.TOR_PROXY_HOST", "127.0.0.1")
-    monkeypatch.setattr("crawler.spider.TOR_PROXY_PORT", "9050")
+    # The proxy address moved to the shared pool the spider now borrows its
+    # sessions from (scraper/tor_pool.py); the spider no longer owns one.
+    monkeypatch.setattr("scraper.tor_pool.TOR_PROXY_HOST", "127.0.0.1")
+    monkeypatch.setattr("scraper.tor_pool.TOR_PROXY_PORT", "9050")
 
 
 # ---------------------------------------------------------------------------
@@ -699,8 +701,8 @@ class TestErrorHandling:
         patches = {
             "crawler.spider.asyncio.sleep": AsyncMock(),
             "config.DATABASE_URL": None,
-            "crawler.spider.TOR_PROXY_HOST": "127.0.0.1",
-            "crawler.spider.TOR_PROXY_PORT": "9050",
+            "scraper.tor_pool.TOR_PROXY_HOST": "127.0.0.1",
+            "scraper.tor_pool.TOR_PROXY_PORT": "9050",
         }
         if extra_patches:
             patches.update(extra_patches)
@@ -883,11 +885,13 @@ class TestCrawlResultShape:
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        mock_connector = MagicMock()
-
+        # The spider no longer builds its own connector/session — it borrows one
+        # from the shared Tor isolation pool.  Patching the acquire call is the
+        # injection point now, and it also keeps this mock out of the
+        # module-global pool where later tests would find it.
         with patch("crawler.frontier._get_model", return_value=_mock_model()), \
-             patch("crawler.spider.ProxyConnector.from_url", return_value=mock_connector), \
-             patch("aiohttp.ClientSession", return_value=mock_session), \
+             patch("scraper.tor_pool.acquire_tor_session",
+                   return_value=(mock_session, "mock-isolation-key")), \
              patch("crawler.spider.asyncio.sleep", new=AsyncMock()), \
              patch("crawler.spider.RETRY_DELAYS", (0.0, 0.0, 0.0)), \
              patch("config.DATABASE_URL", None):

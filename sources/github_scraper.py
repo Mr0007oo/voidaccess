@@ -12,9 +12,12 @@ Typical high-signal content found on GitHub:
     - Threat actor tooling, dropper scripts, stealers
     - Security research write-ups
 
-Authentication is OPTIONAL:
-    - Unauthenticated: 10 requests/minute (search API)
-    - Authenticated:   30 requests/minute — set GITHUB_TOKEN to enable
+Authentication is OPTIONAL but strongly recommended:
+    - Unauthenticated: 10 requests/minute on search, and a 60 requests/HOUR
+      primary cap that /search/code cannot be used under at all (GitHub
+      requires authentication for code search).
+    - Authenticated:   30 requests/minute on search (10/minute on code
+      search), 5,000/hour primary — set GITHUB_TOKEN to enable.
 
 Public API:
     async def scrape_github(
@@ -51,6 +54,7 @@ from typing import Optional
 
 import aiohttp
 
+import pacing
 from utils.content_safety import (
     is_blocked_query,
     is_blocked_url,
@@ -77,11 +81,26 @@ MAX_REPO_RESULTS = 5
 # Max total GitHub items per investigation
 MAX_TOTAL_RESULTS = 15
 
-# Rate limit delays (seconds)
-# Unauthenticated: 10/min = 6s between requests
-# Authenticated:   30/min = 2s between requests
-RATE_LIMIT_DELAY_UNAUTH = 6.0
-RATE_LIMIT_DELAY_AUTH = 2.0
+# Rate limit delays (seconds).  Provider-dictated, so these are FLOORS routed
+# through pacing.scale_delay_floor() — `aggressive` clamps at them, it must
+# never shorten them.  Verified against GitHub's REST docs 2026-07-29:
+#
+#   /search/*      30 req/min authenticated, 10 req/min unauthenticated
+#   /search/code   10 req/min AND requires authentication — the 30/min tier
+#                  does not apply to it, so it keeps its own constant
+#   core REST      5,000 req/hr authenticated (blob fetches live here, not
+#                  under the search quota)
+#
+# NOTE: the *primary* unauthenticated limit is 60 req/hr, which no
+# per-request delay can express — that is an hourly budget, tracked as
+# pattern 1 in docs/BACKLOG.md. Set GITHUB_TOKEN to stay clear of it.
+SEARCH_RATE_LIMIT_DELAY_UNAUTH = 6.5   # 10/min = 6.0 s + margin
+SEARCH_RATE_LIMIT_DELAY_AUTH = 2.2     # 30/min = 2.0 s + margin
+CODE_SEARCH_RATE_LIMIT_DELAY = 6.5     # 10/min in BOTH branches
+BLOB_FETCH_RATE_LIMIT_DELAY = 1.0      # core REST; 5,000/hr needs 0.72 s
+
+# Request timeout (`normal` pacing baseline)
+REQUEST_TIMEOUT = 30
 
 # Security-relevant file extensions to fetch
 SECURITY_EXTENSIONS = {
@@ -131,8 +150,20 @@ class GitHubScraper:
     def __init__(self):
         self._token = os.getenv("GITHUB_TOKEN", "").strip()
         self._session: Optional[aiohttp.ClientSession] = None
-        self._rate_limit_delay = (
-            RATE_LIMIT_DELAY_AUTH if self._token else RATE_LIMIT_DELAY_UNAUTH
+        # Provider-dictated quotas, so scale_delay_floor() — NOT scale_delay(),
+        # which shrinks under `aggressive` and would push us past GitHub's
+        # published per-minute limits.
+        self._search_delay = pacing.scale_delay_floor(
+            SEARCH_RATE_LIMIT_DELAY_AUTH if self._token
+            else SEARCH_RATE_LIMIT_DELAY_UNAUTH
+        )
+        # /search/code is 10/min even authenticated — it does not share the
+        # 30/min tier the other search endpoints get.
+        self._code_search_delay = pacing.scale_delay_floor(
+            CODE_SEARCH_RATE_LIMIT_DELAY
+        )
+        self._blob_fetch_delay = pacing.scale_delay_floor(
+            BLOB_FETCH_RATE_LIMIT_DELAY
         )
 
     @property
@@ -149,7 +180,7 @@ class GitHubScraper:
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(
             headers=self._headers,
-            timeout=aiohttp.ClientTimeout(total=30),
+            timeout=aiohttp.ClientTimeout(total=pacing.scale_timeout(REQUEST_TIMEOUT)),
         )
         return self
 
@@ -289,7 +320,7 @@ class GitHubScraper:
                 data = await resp.json()
                 items = data.get("items", [])
 
-            await asyncio.sleep(self._rate_limit_delay)
+            await asyncio.sleep(self._code_search_delay)
 
             fetch_tasks = []
             for item in items[:MAX_CODE_RESULTS]:
@@ -342,7 +373,7 @@ class GitHubScraper:
                     return {}
                 data = await resp.json()
 
-            await asyncio.sleep(self._rate_limit_delay / 2)
+            await asyncio.sleep(self._blob_fetch_delay)
 
             content_b64 = data.get("content", "").replace("\n", "")
             if not content_b64:
@@ -420,7 +451,7 @@ class GitHubScraper:
                 data = await resp.json()
                 items = data.get("items", [])
 
-            await asyncio.sleep(self._rate_limit_delay)
+            await asyncio.sleep(self._search_delay)
 
             fetch_tasks = []
             for item in items[:MAX_REPO_RESULTS]:
@@ -459,7 +490,7 @@ class GitHubScraper:
                     return {}
                 data = await resp.json()
 
-            await asyncio.sleep(self._rate_limit_delay / 2)
+            await asyncio.sleep(self._blob_fetch_delay)
 
             content_b64 = data.get("content", "").replace("\n", "")
             if not content_b64:

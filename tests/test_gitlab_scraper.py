@@ -28,8 +28,7 @@ import pytest
 
 from sources.gitlab_scraper import (
     MAX_FILE_SIZE,
-    RATE_LIMIT_DELAY_AUTH,
-    RATE_LIMIT_DELAY_UNAUTH,
+    SEARCH_RATE_LIMIT_DELAY,
     GitLabScraper,
     _is_gitlab_scraping_enabled,
     scrape_gitlab,
@@ -148,7 +147,8 @@ def test_content_safety_blocks_file():
         "filename": "file.py",
         "data": "",
     }
-    scraper._rate_limit_delay = 0.0
+    scraper._search_delay = 0.0
+    scraper._project_delay = 0.0
     result = asyncio.run(scraper._fetch_code_file(item))
     assert result == {}
 
@@ -161,7 +161,8 @@ def test_content_safety_blocks_file():
 def test_size_limit_enforced():
     """Files larger than MAX_FILE_SIZE are truncated to MAX_FILE_SIZE chars."""
     scraper = GitLabScraper()
-    scraper._rate_limit_delay = 0.0
+    scraper._search_delay = 0.0
+    scraper._project_delay = 0.0
 
     big_body = "A" * (MAX_FILE_SIZE + 5000)
     session = MagicMock()
@@ -212,7 +213,8 @@ def test_disabled_by_env(monkeypatch):
 def test_source_type_marking():
     """Successful fetches are tagged with source_type='gitlab'."""
     scraper = GitLabScraper()
-    scraper._rate_limit_delay = 0.0
+    scraper._search_delay = 0.0
+    scraper._project_delay = 0.0
 
     body = (
         "Threat intel write-up.\n"
@@ -247,18 +249,21 @@ def test_source_type_marking():
 # ---------------------------------------------------------------------------
 
 
-def test_no_token_uses_unauth_delay(monkeypatch):
-    """No GITLAB_TOKEN → rate_limit_delay equals the unauthenticated delay."""
+def test_search_delay_is_identical_with_and_without_a_token(monkeypatch):
+    """
+    GitLab.com caps /search at 10 req/min PER IP ADDRESS, and a PRIVATE-TOKEN
+    does not lift it.  This is the documented counter-example to the "key
+    present == go faster" pattern NVD established, so the search delay must
+    NOT branch on the token.  An earlier version used 4.0 s unauthenticated and
+    1.0 s authenticated — 15/min and 60/min, both over the real limit.
+    """
     monkeypatch.delenv("GITLAB_TOKEN", raising=False)
-    scraper = GitLabScraper()
-    assert scraper._rate_limit_delay == RATE_LIMIT_DELAY_UNAUTH
-
-
-def test_token_uses_auth_delay(monkeypatch):
-    """GITLAB_TOKEN set → rate_limit_delay equals the authenticated delay."""
+    unauth = GitLabScraper()._search_delay
     monkeypatch.setenv("GITLAB_TOKEN", "glpat-dummy_token_for_test")
-    scraper = GitLabScraper()
-    assert scraper._rate_limit_delay == RATE_LIMIT_DELAY_AUTH
+    auth = GitLabScraper()._search_delay
+
+    assert unauth == auth == SEARCH_RATE_LIMIT_DELAY
+    assert auth >= 6.0      # 10 req/min per IP
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +274,8 @@ def test_token_uses_auth_delay(monkeypatch):
 def test_snippet_fallback_used_when_file_api_fails():
     """When the file API returns non-200, the item['data'] snippet is used."""
     scraper = GitLabScraper()
-    scraper._rate_limit_delay = 0.0
+    scraper._search_delay = 0.0
+    scraper._project_delay = 0.0
 
     # Return 404 from the files API
     fail_resp = MagicMock()

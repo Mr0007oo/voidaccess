@@ -67,7 +67,10 @@ which could only ever suppress strings someone had already seen.
 
 - **`gazetteer.py`** — loads a bundled snapshot of public taxonomies (MITRE
   ATT&CK via MISP galaxy + MISP threat-actor / ransomware / malware clusters)
-  from `data/threat_gazetteer.json`.  A match is a strong known-good signal.
+  from `data/threat_gazetteer.json`.  Each category is stored as structured
+  MISP cluster records (`canonical`, `synonyms`, and `uuid`); the loader builds
+  an alias index so a known alias can resolve to its canonical name and full
+  cluster record without a linear scan.  A match is a strong known-good signal.
 - **`entity_shape.py`** — structural + linguistic checks: unusual capitalisation
   (CamelCase / ALLCAPS), embedded digits / leetspeak, separators, org suffixes,
   proper-noun structure, and a comprehensive English dictionary
@@ -85,6 +88,22 @@ fetch of the public taxonomies + dictionary).  Extraction itself never fetches
 anything at runtime — it reads only the committed snapshots, so results stay
 offline and deterministic.  If a snapshot is missing, the shape checks degrade
 gracefully rather than failing.
+
+### Gazetteer synonym coverage
+
+The synonym fields reflect upstream MISP data; the generator does not invent
+aliases or backfill missing ones.  Coverage is therefore uneven: the current
+source snapshot has 99.0% coverage for MITRE intrusion sets, 96.7% for MITRE
+malware, 9.7% for ransomware clusters, and 22.8% for Malpedia.  Across all
+8,933 source entries, 2,757 have at least one synonym.  Ransomware and Malpedia
+queries will consequently get less alias coverage in the later expansion
+phase; a missing synonym is an upstream data-quality characteristic, not a
+query-time lookup bug.
+
+Regeneration remains network-dependent: `scripts/update_gazetteer.py` fetches
+the ten live MISP cluster files and the English dictionary from GitHub.  There
+is no vendored fallback in this phase; improving regeneration reliability is a
+separate backlog item.
 ## Typed relationship extraction (`relationship_extract.py`)
 
 A **distinct** pass from entity extraction. Entity extraction answers *"what

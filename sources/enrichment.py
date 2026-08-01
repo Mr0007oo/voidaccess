@@ -12,10 +12,13 @@ import asyncio
 import logging
 import os
 import re
+import time
 from typing import Any, Optional
 from urllib.parse import urlparse
 
 import aiohttp
+
+import pacing
 
 logger = logging.getLogger(__name__)
 
@@ -565,6 +568,73 @@ def abusech_to_pages(
 _RANSOMWARE_LIVE_BASE = "https://api.ransomware.live/v2"
 _RANSOMWARE_LIVE_HEADERS = {"User-Agent": "VoidAccess-OSINT/1.0", "Accept": "application/json"}
 
+# ransomware.live pacing — Class B, quota-driven, and the strictest limit
+# anywhere in the tree.  Its own API page states: "Rate limited: 1 req/min per
+# endpoint", "No authentication", "Personal use only" (verified 2026-07-29).
+#
+# **Per endpoint** is the load-bearing detail.  /groups, /group/{name},
+# /v2/recentvictims and /v2/recentcyberattacks are four distinct routes, so one
+# request to each may go out immediately without violating anything.  What did
+# violate was the group-detail fan-out: five concurrent /group/{name} calls all
+# hit the SAME route, so they shared one 1-req/min allowance.
+#
+# Hence a per-route gate rather than one global delay — a single flat delay
+# would either be wrong (global, so it needlessly serialises unrelated routes)
+# or unsafe (per-call, so it misses that the five details share a route).
+_RL_MIN_INTERVAL = 62.0          # documented: 1 req/min = 60 s, + margin
+# At 1 req/min, fetching N group details costs N minutes.  Cap the fan-out and
+# bound it with a soft budget, the same shape nvd.py and crt.sh use, rather than
+# stalling the pipeline for five minutes.  Was `[:5]`.
+_RL_MAX_GROUP_DETAILS = 2
+_RL_SOFT_BUDGET = 70.0
+
+_rl_route_last: dict[str, float] = {}
+_rl_route_lock: Optional[asyncio.Lock] = None
+
+
+def _rl_route_key(path: str) -> str:
+    """
+    Collapse a concrete path to the route it shares a quota with.
+
+    ``/group/lockbit`` and ``/group/alphv`` are the same endpoint for
+    rate-limiting purposes, so the trailing path parameter is dropped.
+    """
+    parts = [p for p in path.strip("/").split("/") if p]
+    if len(parts) >= 2 and parts[0] in {"group", "groupvictims", "victims"}:
+        return f"/{parts[0]}/*"
+    return "/" + "/".join(parts)
+
+
+async def _rl_route_gate(path: str) -> float:
+    """
+    Hold until *path*'s route is allowed another request. Returns seconds slept.
+
+    Serialised through one lock so two coroutines cannot both read a stale
+    last-request timestamp and decide they are clear to send.
+    """
+    global _rl_route_lock
+    if _rl_route_lock is None:
+        _rl_route_lock = asyncio.Lock()
+
+    key = _rl_route_key(path)
+    interval = pacing.scale_delay_floor(_RL_MIN_INTERVAL)
+    slept = 0.0
+    async with _rl_route_lock:
+        last = _rl_route_last.get(key)
+        now = time.monotonic()
+        if last is not None:
+            wait = last + interval - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                slept = wait
+        _rl_route_last[key] = time.monotonic()
+    return slept
+
+
+def reset_ransomware_live_pacing() -> None:
+    """Clear per-route pacing state (used by tests)."""
+    _rl_route_last.clear()
+
 # Generic words that carry no group-identity signal in a realistic analyst
 # query ("LockBit ransomware leak site").  Stripped before matching so the
 # meaningful token(s) — e.g. "lockbit" — are what we match on, rather than
@@ -639,7 +709,16 @@ async def fetch_ransomware_live(query: str) -> list[dict]:
     try:
         async with aiohttp.ClientSession(headers=_RANSOMWARE_LIVE_HEADERS, timeout=timeout) as session:
             # ── 1. Match groups from the full group index ──────────────────────
+            await _rl_route_gate("/groups")
             async with session.get(f"{_RANSOMWARE_LIVE_BASE}/groups") as resp:
+                if resp.status == 429:
+                    wait = pacing.retry_after_seconds(
+                        resp.headers, pacing.scale_delay_floor(_RL_MIN_INTERVAL)
+                    )
+                    logger.warning(
+                        "ransomware.live /groups rate limited — %.0fs", wait
+                    )
+                    return []
                 if resp.status != 200:
                     logger.warning("ransomware.live /groups HTTP %s", resp.status)
                     return []
@@ -661,7 +740,15 @@ async def fetch_ransomware_live(query: str) -> list[dict]:
             # ── 2. Fetch full group detail for each match (has ttps, tools, locations) ──
             async def _fetch_group_detail(gname: str) -> Optional[dict]:
                 try:
+                    # /group/{name} is ONE endpoint for rate-limit purposes, so
+                    # every group shares a single 1-req/min allowance.
+                    await _rl_route_gate("/group/" + str(gname))
                     async with session.get(f"{_RANSOMWARE_LIVE_BASE}/group/{gname}") as r:
+                        if r.status == 429:
+                            logger.warning(
+                                "ransomware.live /group/%s rate limited", gname
+                            )
+                            return None
                         if r.status == 200:
                             text = await r.text()
                             if text.strip()[:1] in "[{":
@@ -671,22 +758,47 @@ async def fetch_ransomware_live(query: str) -> list[dict]:
                     pass
                 return None
 
-            detail_tasks = [_fetch_group_detail(g.get("name", "")) for g in matched_summary[:5]]
-            details = await asyncio.gather(*detail_tasks, return_exceptions=True)
+            # Sequential, not gathered: concurrent calls to the same route would
+            # all queue on the same 62 s gate anyway, and gathering them merely
+            # hides that from the soft budget below.
+            wanted = matched_summary[:_RL_MAX_GROUP_DETAILS]
+            details: list[Any] = []
+            _rl_started = time.monotonic()
+            for _g in wanted:
+                if details and (time.monotonic() - _rl_started) > _RL_SOFT_BUDGET:
+                    logger.info(
+                        "ransomware.live: group-detail budget (%.0fs) reached "
+                        "after %d of %d at 1 req/min",
+                        _RL_SOFT_BUDGET, len(details), len(wanted),
+                    )
+                    break
+                details.append(await _fetch_group_detail(_g.get("name", "")))
 
             group_map: dict[str, dict] = {}
-            for g, detail in zip(matched_summary[:5], details):
+            for g, detail in zip(wanted, details):
                 gname = g.get("name", "")
                 if isinstance(detail, dict):
                     group_map[gname] = {**g, **detail}
                 else:
                     group_map[gname] = g
 
+            # Only the *detail* fetch is rate-capped.  Every matched group still
+            # contributes its summary record, so narrowing the fan-out from 5 to
+            # _RL_MAX_GROUP_DETAILS costs ttps/tools/locations for the tail, not
+            # the groups themselves.
+            for g in matched_summary:
+                gname = g.get("name", "")
+                if gname:
+                    group_map.setdefault(gname, g)
+
             # ── 3. Pull recent victims and filter by matched groups ────────────
             recent_victims: list[dict] = []
             matched_names = {g.get("name", "").lower() for g in matched_summary}
             for endpoint in ("/v2/recentvictims", "/v2/recentcyberattacks"):
                 try:
+                    # Distinct routes, so these do not contend with each other
+                    # or with /groups — the gate is per route by design.
+                    await _rl_route_gate(endpoint)
                     async with session.get(f"https://api.ransomware.live{endpoint}") as r:
                         if r.status == 200:
                             text = await r.text()

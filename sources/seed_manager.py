@@ -43,9 +43,13 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import aiohttp
-import aiohttp_socks
 
+import pacing
+from scraper import tor_pool
 from utils.content_safety import is_blocked_url
+
+# Timing baseline (`normal` pacing profile); scaled at call time.
+SEED_CHECK_TIMEOUT = 15  # seconds, seed reachability probe
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +111,6 @@ def _get_seed_file() -> Path:
 
 
 SEED_FILE: Optional[Path] = None
-
-TOR_PROXY = "socks5://127.0.0.1:9050"
 
 
 def _read_seed_bytes() -> bytes:
@@ -236,24 +238,34 @@ class SeedManager:
     async def check_seed_availability(
         self,
         url: str,
-        timeout: int = 15,
+        timeout: int = SEED_CHECK_TIMEOUT,
     ) -> bool:
         """
         Check if a seed URL is reachable over Tor.
         Returns True if reachable, False otherwise.
         """
+        # Borrowed from the shared Tor pool, keyed on this seed's hostname.
+        # This used to build its own credential-less connector per probe, which
+        # meant `validate_seeds()` put its 5 concurrent onion probes on one
+        # circuit — and it hardcoded 127.0.0.1:9050, so it could never reach the
+        # `tor` service under Docker and every seed silently read as dead.  The
+        # pool fixes both: it takes the proxy address from config, and each
+        # distinct seed host gets its own circuit.
+        session, iso_key = tor_pool.acquire_tor_session(url)
         try:
-            connector = aiohttp_socks.ProxyConnector.from_url(TOR_PROXY)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=timeout),
-                    headers={"User-Agent": "Mozilla/5.0 (compatible)"},
-                    ssl=False,
-                ) as resp:
-                    return resp.status < 500
+            async with session.get(
+                url,
+                # Per-request: a reachability probe is allowed to be more
+                # patient than the pool's session-level default.
+                timeout=aiohttp.ClientTimeout(total=pacing.scale_timeout(timeout)),
+                headers={"User-Agent": "Mozilla/5.0 (compatible)"},
+                ssl=False,
+            ) as resp:
+                return resp.status < 500
         except Exception:
             return False
+        finally:
+            tor_pool.release_tor_session(iso_key)
 
     async def validate_seeds(self, concurrency: int = 5) -> dict:
         """

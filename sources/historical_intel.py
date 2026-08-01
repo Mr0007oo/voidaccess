@@ -18,6 +18,7 @@ import logging
 from typing import Optional
 
 
+import pacing
 from sources.cache import CachedFeed
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,17 @@ _fbi_feed = CachedFeed(
     "https://www.justice.gov/news/press-releases/rss",
     _FBI_CACHE,
     ttl_seconds=43200)
+
+# Per-entity pacing across the MITRE / DOJ / CISA fan-out (verified 2026-07-29):
+#
+#   raw.githubusercontent.com (MITRE CTI) — 60 req/HOUR unauthenticated since
+#     GitHub's May 2025 change.  A real quota, but an hourly one.
+#   justice.gov RSS, cisa.gov feeds       — no published limit; courtesy only.
+#
+# Routed through pacing.scale_delay_floor() on the strength of the GitHub side.
+# The long feed TTLs above (7 days for MITRE, 12 h for DOJ) are what actually
+# keeps us clear of the hourly cap; this delay only smooths the per-entity loop.
+ENTITY_REQUEST_DELAY = 0.5
 
 
 async def _fetch_mitre_index() -> dict:
@@ -217,7 +229,7 @@ async def enrich_historical(entities_by_type: dict[str, list[dict]]) -> list[dic
         if cisa_adv:
             results.append(cisa_adv)
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(pacing.scale_delay_floor(ENTITY_REQUEST_DELAY))
 
     return results
 

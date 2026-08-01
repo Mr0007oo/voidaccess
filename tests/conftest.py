@@ -69,10 +69,22 @@ def reset_source_state(monkeypatch):
     import sources.infostealer as infostealer
     import sources.hash_reputation as hash_reputation
     import sources.nvd as nvd
+    import sources.domain_reputation as domain_reputation
+    import sources.ip_reputation as ip_reputation
 
     fresh_cache = EnrichmentCache(backend="memory")
 
-    for mod in (breach_lookup, infostealer, hash_reputation, nvd):
+    # Every module holding its own cache singleton must be reset, or an entry
+    # written by one test becomes a cache HIT in the next — which silently
+    # suppresses the outbound request the next test is trying to observe.
+    for mod in (
+        breach_lookup,
+        infostealer,
+        hash_reputation,
+        nvd,
+        domain_reputation,
+        ip_reputation,
+    ):
         monkeypatch.setattr(mod, "_enrichment_cache_singleton", fresh_cache, raising=False)
 
     # Reset lazy per-loop semaphores so they rebind to the test's event loop.
@@ -81,14 +93,48 @@ def reset_source_state(monkeypatch):
     monkeypatch.setattr(infostealer, "_hr_semaphore", None, raising=False)
 
     # Neutralise the deliberate rate-limit sleeps so the suite runs fast.
-    monkeypatch.setattr(breach_lookup, "_XON_REQUEST_DELAY", 0.0, raising=False)
-    monkeypatch.setattr(breach_lookup, "_LEAKCHECK_REQUEST_DELAY", 0.0, raising=False)
-    monkeypatch.setattr(infostealer, "_HR_REQUEST_DELAY", 0.0, raising=False)
+    # These are the documented *intervals* the delay is derived from — zeroing
+    # the interval zeroes the delay, so this keeps working now that the delay
+    # is computed from (interval x concurrency) rather than stored directly.
+    monkeypatch.setattr(breach_lookup, "_XON_MIN_INTERVAL", 0.0, raising=False)
+    monkeypatch.setattr(breach_lookup, "_LEAKCHECK_MIN_INTERVAL", 0.0, raising=False)
+    monkeypatch.setattr(infostealer, "_HR_MIN_INTERVAL", 0.0, raising=False)
     monkeypatch.setattr(nvd, "_NVD_DELAY_NO_KEY", 0.0, raising=False)
     monkeypatch.setattr(nvd, "_NVD_DELAY_WITH_KEY", 0.0, raising=False)
 
+    # NVD's rolling window is real in-process state; a window left full by one
+    # test would make the next one block on a 30 s expiry.
+    nvd._reset_request_windows()
+
+    # crt.sh is paced at 5 req/min and ransomware.live at 1 req/min — both far
+    # too slow for a test suite, so zero the intervals and clear route state.
+    import sources.enrichment as enrichment_mod
+
+    monkeypatch.setattr(domain_reputation, "CRT_MIN_INTERVAL", 0.0, raising=False)
+    monkeypatch.setattr(domain_reputation, "_crt_semaphore", None, raising=False)
+    monkeypatch.setattr(domain_reputation, "_crt_budget_started", None, raising=False)
+    monkeypatch.setattr(enrichment_mod, "_RL_MIN_INTERVAL", 0.0, raising=False)
+    monkeypatch.setattr(enrichment_mod, "_rl_route_lock", None, raising=False)
+    enrichment_mod.reset_ransomware_live_pacing()
+    domain_reputation._crt_cache.clear()
+    domain_reputation._urlscan_cache.clear()
+    domain_reputation._wayback_cache.clear()
+
+    # The Tor stream-isolation pool is process-global and shared by every
+    # Tor-fetching module (scraper, crawler, search, sources).  Tests that patch
+    # `aiohttp.ClientSession` would otherwise park a MagicMock in it, and the
+    # next test to ask for that hostname would silently be handed the previous
+    # test's mock.  Sessions are also loop-bound, so one surviving a test would
+    # fail with "attached to a different loop" in the next.
+    from scraper import tor_pool as _tor_pool
+
+    _tor_pool._tor_sessions.clear()
+    _tor_pool._tor_inflight.clear()
+
     yield
 
+    _tor_pool._tor_sessions.clear()
+    _tor_pool._tor_inflight.clear()
     reset_default_cache()
 
 

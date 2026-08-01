@@ -26,9 +26,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from sources.github_scraper import (
+    CODE_SEARCH_RATE_LIMIT_DELAY,
     MAX_FILE_SIZE,
-    RATE_LIMIT_DELAY_AUTH,
-    RATE_LIMIT_DELAY_UNAUTH,
+    SEARCH_RATE_LIMIT_DELAY_AUTH,
+    SEARCH_RATE_LIMIT_DELAY_UNAUTH,
     GitHubScraper,
     _is_github_scraping_enabled,
     scrape_github,
@@ -143,7 +144,9 @@ def test_content_safety_blocks_file():
     }
     # _fetch_code_file sleeps ~rate_limit_delay/2 between calls; shrink it so the
     # test is fast.
-    scraper._rate_limit_delay = 0.0
+    scraper._search_delay = 0.0
+    scraper._code_search_delay = 0.0
+    scraper._blob_fetch_delay = 0.0
     result = asyncio.run(scraper._fetch_code_file(item))
     assert result == {}
 
@@ -156,7 +159,9 @@ def test_content_safety_blocks_file():
 def test_size_limit_enforced():
     """Files larger than MAX_FILE_SIZE are truncated to MAX_FILE_SIZE chars."""
     scraper = GitHubScraper()
-    scraper._rate_limit_delay = 0.0
+    scraper._search_delay = 0.0
+    scraper._code_search_delay = 0.0
+    scraper._blob_fetch_delay = 0.0
 
     big_body = "A" * (MAX_FILE_SIZE + 5000)
     session = MagicMock()
@@ -206,7 +211,9 @@ def test_disabled_by_env(monkeypatch):
 def test_source_type_marking():
     """Successful fetches are tagged with source_type='github'."""
     scraper = GitHubScraper()
-    scraper._rate_limit_delay = 0.0
+    scraper._search_delay = 0.0
+    scraper._code_search_delay = 0.0
+    scraper._blob_fetch_delay = 0.0
 
     body = (
         "Threat intel write-up.\n"
@@ -241,17 +248,31 @@ def test_source_type_marking():
 
 
 def test_no_token_uses_unauth_delay(monkeypatch):
-    """No GITHUB_TOKEN → rate_limit_delay equals the unauthenticated delay."""
+    """No GITHUB_TOKEN → the search delay equals the unauthenticated baseline."""
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     scraper = GitHubScraper()
-    assert scraper._rate_limit_delay == RATE_LIMIT_DELAY_UNAUTH
+    assert scraper._search_delay == SEARCH_RATE_LIMIT_DELAY_UNAUTH
 
 
 def test_token_uses_auth_delay(monkeypatch):
-    """GITHUB_TOKEN set → rate_limit_delay equals the authenticated delay."""
+    """GITHUB_TOKEN set → the search delay equals the authenticated baseline."""
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_dummy_token_for_test")
     scraper = GitHubScraper()
-    assert scraper._rate_limit_delay == RATE_LIMIT_DELAY_AUTH
+    assert scraper._search_delay == SEARCH_RATE_LIMIT_DELAY_AUTH
+
+
+def test_code_search_delay_ignores_the_token(monkeypatch):
+    """
+    /search/code is 10 req/min even authenticated — it does not share the
+    30/min tier the other search endpoints get, so a token must not shorten it.
+    """
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    unauth = GitHubScraper()._code_search_delay
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_dummy_token_for_test")
+    auth = GitHubScraper()._code_search_delay
+
+    assert unauth == auth == CODE_SEARCH_RATE_LIMIT_DELAY
+    assert auth >= 6.0      # 10 req/min
 
 
 # ---------------------------------------------------------------------------

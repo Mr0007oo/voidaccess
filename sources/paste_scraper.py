@@ -44,6 +44,7 @@ from urllib.parse import quote_plus
 
 import aiohttp
 
+import pacing
 from sources.proxy_client import clearnet_fetch
 from utils.content_safety import is_blocked_query, sanitize_content
 
@@ -90,6 +91,17 @@ PASTE_SOURCES = [
         "rate_limit": 1.0,
     },
 ]
+
+# Timing baselines (`normal` pacing profile); scaled at call time.
+REQUEST_TIMEOUT = 30       # seconds, main paste-site session
+ROBOTS_TIMEOUT = 5         # seconds, robots.txt probe
+# Per-source `rate_limit` above is a provider-dictated FLOOR, routed through
+# pacing.scale_delay_floor() — not scale_delay(), which would let `aggressive`
+# shorten it.  Pastebin documents "not more than 1 request per second" on its
+# scraping API and blocks clients that exceed it, so 1.5 s is the documented
+# 1.0 s plus margin.  dpaste / paste.ee / Rentry publish no limit; their 1.0 s
+# is VoidAccess's own courtesy pacing (see docs/BACKLOG.md classification).
+DEFAULT_RATE_LIMIT = 1.0   # seconds between requests to one paste source
 
 HEADERS = {
     "User-Agent": (
@@ -162,7 +174,7 @@ class PasteScraper:
     async def __aenter__(self) -> "PasteScraper":
         self._session = aiohttp.ClientSession(
             headers=HEADERS,
-            timeout=aiohttp.ClientTimeout(total=30),
+            timeout=aiohttp.ClientTimeout(total=pacing.scale_timeout(REQUEST_TIMEOUT)),
         )
         return self
 
@@ -335,7 +347,11 @@ class PasteScraper:
                     seen.add(i)
                     unique_ids.append(i)
 
-            await asyncio.sleep(source.get("rate_limit", 1.0))
+            await asyncio.sleep(
+                pacing.scale_delay_floor(
+                    source.get("rate_limit", DEFAULT_RATE_LIMIT)
+                )
+            )
             return unique_ids[:10]
         except Exception as exc:
             logger.debug(
@@ -438,7 +454,7 @@ async def check_robots_txt(
         robots_url = f"{base_url.rstrip('/')}/robots.txt"
         async with session.get(
             robots_url,
-            timeout=aiohttp.ClientTimeout(total=5),
+            timeout=aiohttp.ClientTimeout(total=pacing.scale_timeout(ROBOTS_TIMEOUT)),
         ) as resp:
             if resp.status != 200:
                 return True

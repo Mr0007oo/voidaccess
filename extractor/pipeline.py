@@ -29,15 +29,72 @@ from extractor.regex_patterns import extract_all as _regex_extract_all
 from extractor.ner import extract_named_entities as _ner_extract
 from extractor.llm_extract import extract_with_llm as _llm_extract
 from extractor import confidence as _conf
+from extractor.software_suppression import (
+    suppress_cpe_matched_organizations as _suppress_cpe_orgs,
+)
 from extractor.normalizer import (
     normalize_entities as _normalize,
     merge_with_db as _merge_db,
     NormalizedEntity,
     resolve_entity_type_conflicts as _resolve_conflicts,
     _REGEX_TYPES as _HIGH_CONFIDENCE_REGEX_TYPES,
+    canonicalize_entity_value as _canonicalize_entity_value,
 )
 
 logger = logging.getLogger(__name__)
+
+
+_RELATIONSHIP_TYPE_ALIASES: dict[str, frozenset[str]] = {
+    "CVE": frozenset({"CVE", "CVE_NUMBER"}),
+    "CVE_NUMBER": frozenset({"CVE", "CVE_NUMBER"}),
+    "THREAT_ACTOR": frozenset({"THREAT_ACTOR", "THREAT_ACTOR_HANDLE"}),
+    "THREAT_ACTOR_HANDLE": frozenset({"THREAT_ACTOR", "THREAT_ACTOR_HANDLE"}),
+    "MALWARE": frozenset({"MALWARE", "MALWARE_FAMILY"}),
+    "MALWARE_FAMILY": frozenset({"MALWARE", "MALWARE_FAMILY"}),
+    "RANSOMWARE": frozenset({"RANSOMWARE", "RANSOMWARE_GROUP"}),
+    "RANSOMWARE_GROUP": frozenset({"RANSOMWARE", "RANSOMWARE_GROUP"}),
+}
+
+
+def _relationship_entity_keys(entity_type: str, value: str) -> list[tuple[str, str]]:
+    """Return exact and canonical keys used to match raw claims to entities."""
+    normalized_type = str(entity_type or "").upper().strip()
+    raw_value = str(value or "").strip()
+    if not normalized_type or not raw_value:
+        return []
+    values = [raw_value.casefold()]
+    try:
+        canonical = _canonicalize_entity_value(normalized_type, raw_value)
+    except Exception:
+        canonical = raw_value
+    if canonical and canonical.casefold() not in values:
+        values.append(canonical.casefold())
+    types = _RELATIONSHIP_TYPE_ALIASES.get(
+        normalized_type, frozenset({normalized_type})
+    )
+    return [(candidate_type, candidate_value) for candidate_type in types for candidate_value in values]
+
+
+def _resolve_dependency_relationship_endpoint(
+    page_entities: dict[tuple[str, str], tuple[Any, Any]],
+    all_entities: dict[tuple[str, str], tuple[Any, Any]],
+    entity_type: str,
+    value: str,
+) -> Optional[tuple[Any, Any]]:
+    """Resolve a raw claim endpoint to a validated entity and DB id.
+
+    Page-local attribution is preferred for provenance, but normalized entity
+    conflict resolution can legitimately retain the winning entity on a
+    different page.  The global index is the fallback that preserves the claim
+    without weakening the validated-entity gate.
+    """
+    keys = _relationship_entity_keys(entity_type, value)
+    for index in (page_entities, all_entities):
+        for key in keys:
+            pair = index.get(key)
+            if pair is not None:
+                return pair
+    return None
 
 PER_TYPE_CAPS = {
     "ORGANIZATION_NAME": 50,
@@ -318,6 +375,27 @@ async def extract_entities_from_page(
         errors.append(f"normalize: {exc}")
         normalized = []
 
+    # Option A suppression happens before either direct or batch persistence.
+    # Deterministic rules run in normalization; this bounded async pass adds
+    # only partial NVD CPE coverage.
+    if persist:
+        try:
+            normalized, suppressed_count = await _suppress_cpe_orgs(
+                normalized,
+                {page_url: page_text or ""},
+            )
+            if suppressed_count:
+                logger.info(
+                    "Suppressed %d software/product organization candidate(s)",
+                    suppressed_count,
+                )
+        except Exception as exc:
+            logger.debug(
+                "CPE organization suppression unavailable for %s: %s",
+                page_url,
+                exc,
+            )
+
     # -----------------------------------------------------------------------
     # Build result (no DB persist yet if persist=False)
     # -----------------------------------------------------------------------
@@ -482,6 +560,40 @@ async def extract_entities_from_pages(
 
     all_normalized = _resolve_conflicts(all_normalized)
 
+    # Run CPE suppression once across the batch, after conflict resolution and
+    # before the entity cap/database merge.  This keeps NVD calls bounded per
+    # investigation rather than multiplying them by page count.
+    page_text_by_url = {
+        str(page.get("url", "") or ""): str(page.get("text", "") or "")
+        for page in pages
+    }
+    try:
+        all_normalized, suppressed_count = await _suppress_cpe_orgs(
+            all_normalized,
+            page_text_by_url,
+        )
+        if suppressed_count:
+            surviving_ids = {id(entity) for entity in all_normalized}
+            for result in results:
+                result.entities = [
+                    entity for entity in result.entities if id(entity) in surviving_ids
+                ]
+                result.entity_count = len(result.entities)
+                result.entities_by_type = {}
+                for entity in result.entities:
+                    result.entities_by_type[entity.entity_type] = (
+                        result.entities_by_type.get(entity.entity_type, 0) + 1
+                    )
+            logger.info(
+                "Suppressed %d software/product organization candidate(s) in batch",
+                suppressed_count,
+            )
+    except Exception as exc:
+        logger.debug("Batch CPE organization suppression unavailable: %s", exc)
+
+    if not all_normalized:
+        return results
+
     # -----------------------------------------------------------------------
     # Content safety: drop prohibited entity values before capping/storing.
     # Only text-based types are checked; technical IOCs are never filtered.
@@ -531,6 +643,133 @@ async def extract_entities_from_pages(
                 result.entities = [e for e in capped_entities if e.source_url == result.page_url]
         except Exception as exc:
             logger.error("Batch entity persist failed: %s", exc)
+
+    # -----------------------------------------------------------------------
+    # Typed dependency relationships (no-LLM only).
+    #
+    # The scraper parsed the untruncated ``db_text`` and returned value/type
+    # claims.  Resolve those claims against the exact normalized entities that
+    # survived conflict resolution and the investigation cap, then persist
+    # through the same compatibility-checked relationship writer used by the
+    # LLM path.  This is intentionally before graph construction and is never
+    # run when an LLM relationship pass is active.
+    # -----------------------------------------------------------------------
+    if (
+        llm is None
+        and not run_llm_extraction
+        and investigation_id is not None
+        and capped_entities
+    ):
+        try:
+            import config as _config  # noqa: PLC0415
+
+            if getattr(_config, "ENABLE_RELATIONSHIP_EXTRACTION", True):
+                from db.queries import save_typed_relationships  # noqa: PLC0415
+                from db.session import get_session  # noqa: PLC0415
+                from extractor.relationship_extract import (  # noqa: PLC0415
+                    _is_compatible_relationship,
+                )
+
+                by_page: dict[str, dict[tuple[str, str], tuple[Any, Any]]] = {}
+                all_entity_keys: dict[tuple[str, str], tuple[Any, Any]] = {}
+                for result in results:
+                    page_entities: dict[tuple[str, str], tuple[Any, Any]] = {}
+                    for ent, entity_id in zip(result.entities, result.entity_ids):
+                        if entity_id is None:
+                            continue
+                        for key in _relationship_entity_keys(
+                            str(getattr(ent, "entity_type", "") or ""),
+                            str(getattr(ent, "value", "") or ""),
+                        ):
+                            page_entities[key] = (ent, entity_id)
+                            all_entity_keys.setdefault(key, (ent, entity_id))
+                    by_page[result.page_url] = page_entities
+
+                # ``result.entities`` is intentionally page-local for the
+                # normal graph/report path.  The conflict resolver, however,
+                # can retain a validated winner whose source_url differs from
+                # the page where a raw dependency claim was generated.  Index
+                # every persisted validated entity globally so that attribution
+                # differences do not silently delete otherwise valid claims.
+                for ent, entity_id in zip(capped_entities, entity_id_map):
+                    if entity_id is None:
+                        continue
+                    for key in _relationship_entity_keys(
+                        str(getattr(ent, "entity_type", "") or ""),
+                        str(getattr(ent, "value", "") or ""),
+                    ):
+                        all_entity_keys.setdefault(key, (ent, entity_id))
+
+                dependency_rows: list[dict[str, Any]] = []
+                for page in pages:
+                    url = page.get("url", "")
+                    page_entities = by_page.get(url, {})
+                    for claim in page.get("dependency_relationships", []) or []:
+                        source_key = (
+                            str(claim.get("source_type", "")).upper(),
+                            str(claim.get("source_value", "")).strip().casefold(),
+                        )
+                        target_key = (
+                            str(claim.get("target_type", "")).upper(),
+                            str(claim.get("target_value", "")).strip().casefold(),
+                        )
+                        source_pair = _resolve_dependency_relationship_endpoint(
+                            page_entities,
+                            all_entity_keys,
+                            source_key[0],
+                            source_key[1],
+                        )
+                        target_pair = _resolve_dependency_relationship_endpoint(
+                            page_entities,
+                            all_entity_keys,
+                            target_key[0],
+                            target_key[1],
+                        )
+                        if source_pair is None or target_pair is None:
+                            continue
+                        source_ent, source_id = source_pair
+                        target_ent, target_id = target_pair
+                        rel_type = str(claim.get("relationship_type", "")).upper()
+                        source_data = {
+                            "id": source_id,
+                            "type": source_ent.entity_type,
+                            "value": source_ent.value,
+                        }
+                        target_data = {
+                            "id": target_id,
+                            "type": target_ent.entity_type,
+                            "value": target_ent.value,
+                        }
+                        if not _is_compatible_relationship(
+                            rel_type, source_data, target_data
+                        ):
+                            continue
+                        dependency_rows.append(
+                            {
+                                "entity_a_id": source_id,
+                                "entity_b_id": target_id,
+                                "relationship_type": rel_type,
+                                "confidence": claim.get("confidence", 0.85),
+                                "source_page_id": page.get("page_id"),
+                            }
+                        )
+                if dependency_rows:
+                    with get_session() as _rel_session:
+                        inserted = save_typed_relationships(
+                            _rel_session, investigation_id, dependency_rows
+                        )
+                    logger.info(
+                        "Dependency typed relationships persisted for %s: %d new (of %d claims)",
+                        investigation_id,
+                        inserted,
+                        len(dependency_rows),
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Dependency relationship extraction failed for %s (non-fatal): %s",
+                investigation_id,
+                exc,
+            )
 
     # -----------------------------------------------------------------------
     # Typed relationship extraction (distinct LLM pass).

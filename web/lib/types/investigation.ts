@@ -54,6 +54,15 @@ export type InvestigationEntity = {
   entity_type: string;
   value: string;
   confidence: number;
+  priority_score?: number;
+  priority_score_components?: {
+    confidence: number;
+    corroboration: number;
+    freshness: number;
+    centrality: number;
+  };
+  priority_score_centrality_contribution?: number;
+  typed_relationship_degree?: number;
   category?: string;
   investigation_id?: string | null;
   context?: string | null;
@@ -67,6 +76,7 @@ export type InvestigationEntity = {
   freshness_label?: string;
   freshness_color?: string;
   source_count?: number;
+  investigation_count?: number;
   corroborating_sources?: string[];
   cross_referenced?: boolean;
   defanged?: boolean;

@@ -12,9 +12,11 @@ Typical high-signal content found on GitLab:
     - Leaked credentials and internal endpoint configs
     - Security research write-ups and proof-of-concept code
 
-Authentication is OPTIONAL:
-    - Unauthenticated: ~15 requests/minute (search API)
-    - Authenticated:   ~60 requests/minute — set GITLAB_TOKEN to enable
+Authentication is OPTIONAL, and unlike most providers it does NOT raise the
+search rate limit — GitLab.com caps /search at 10 requests/minute per IP
+address whether or not a token is supplied.  A GITLAB_TOKEN still widens the
+general API allowance (2,000/min per user vs 500/min per IP) and grants access
+to private-visibility results, so it remains worth setting.
 
 Public API:
     async def scrape_gitlab(
@@ -52,6 +54,8 @@ from urllib.parse import quote
 
 import aiohttp
 
+import pacing
+
 from utils.content_safety import (
     is_blocked_query,
     is_blocked_url,
@@ -77,11 +81,24 @@ MAX_REPO_RESULTS = 5
 # Max total GitLab items per investigation
 MAX_TOTAL_RESULTS = 15
 
-# Rate limit delays (seconds)
-# Unauthenticated: ~15/min = 4s between requests
-# Authenticated:   ~60/min = 1s between requests (conservative)
-RATE_LIMIT_DELAY_UNAUTH = 4.0
-RATE_LIMIT_DELAY_AUTH = 1.0
+# Rate limit delays (seconds).  Provider-dictated, so these are FLOORS routed
+# through pacing.scale_delay_floor() — `aggressive` clamps at them, it must
+# never shorten them.  Verified against GitLab.com's published limits
+# 2026-07-29:
+#
+#   /search (advanced, project, group)   10 req/min PER IP
+#   /projects/:id                        400 req/min
+#   general authenticated API            2,000 req/min per user
+#
+# The search cap is applied per IP address and is NOT lifted by supplying a
+# token, which breaks the "authenticated == faster" pattern NVD established.
+# There is deliberately no AUTH/UNAUTH split here: an earlier version had
+# 4.0 s / 1.0 s, i.e. 15/min and 60/min, and both exceeded the real 10/min.
+SEARCH_RATE_LIMIT_DELAY = 6.5    # 10/min per IP = 6.0 s + margin; both branches
+PROJECT_RATE_LIMIT_DELAY = 1.0   # /projects/:id; 400/min needs only 0.15 s
+
+# Request timeout (`normal` pacing baseline)
+REQUEST_TIMEOUT = 30
 
 # Security-relevant file extensions to fetch
 SECURITY_EXTENSIONS = {
@@ -131,9 +148,12 @@ class GitLabScraper:
     def __init__(self):
         self._token = os.getenv("GITLAB_TOKEN", "").strip()
         self._session: Optional[aiohttp.ClientSession] = None
-        self._rate_limit_delay = (
-            RATE_LIMIT_DELAY_AUTH if self._token else RATE_LIMIT_DELAY_UNAUTH
-        )
+        # Provider-dictated quotas, so scale_delay_floor() — NOT scale_delay(),
+        # which shrinks under `aggressive` and would push us past GitLab's
+        # published per-minute limits.  The search delay does not branch on
+        # self._token: GitLab caps /search per IP regardless of authentication.
+        self._search_delay = pacing.scale_delay_floor(SEARCH_RATE_LIMIT_DELAY)
+        self._project_delay = pacing.scale_delay_floor(PROJECT_RATE_LIMIT_DELAY)
 
     @property
     def _headers(self) -> dict:
@@ -147,7 +167,7 @@ class GitLabScraper:
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(
             headers=self._headers,
-            timeout=aiohttp.ClientTimeout(total=30),
+            timeout=aiohttp.ClientTimeout(total=pacing.scale_timeout(REQUEST_TIMEOUT)),
         )
         return self
 
@@ -284,7 +304,7 @@ class GitLabScraper:
                 if not isinstance(items, list):
                     return []
 
-            await asyncio.sleep(self._rate_limit_delay)
+            await asyncio.sleep(self._search_delay)
 
             fetch_tasks = []
             for item in items[:MAX_CODE_RESULTS]:
@@ -366,7 +386,7 @@ class GitLabScraper:
                     return {}
                 data = await resp.json()
 
-            await asyncio.sleep(self._rate_limit_delay / 2)
+            await asyncio.sleep(self._project_delay)
 
             content_b64 = data.get("content", "").replace("\n", "")
             if not content_b64:
@@ -442,7 +462,7 @@ class GitLabScraper:
                 if not isinstance(items, list):
                     return []
 
-            await asyncio.sleep(self._rate_limit_delay)
+            await asyncio.sleep(self._search_delay)
 
             fetch_tasks = []
             for item in items[:MAX_REPO_RESULTS]:
@@ -499,7 +519,7 @@ class GitLabScraper:
                         if readme_content:
                             break
 
-            await asyncio.sleep(self._rate_limit_delay / 2)
+            await asyncio.sleep(self._project_delay)
 
             if not readme_content:
                 return {}

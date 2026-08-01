@@ -26,10 +26,11 @@ from typing import List
 from urllib.parse import quote_plus
 
 import aiohttp
-from aiohttp_socks import ProxyConnector
 from bs4 import BeautifulSoup
 
-from config import DARKSEARCH_API_KEY, TOR_PROXY_HOST, TOR_PROXY_PORT
+import pacing
+from config import DARKSEARCH_API_KEY
+from scraper import tor_pool
 
 _logger = logging.getLogger(__name__)
 
@@ -57,7 +58,17 @@ _ONIONSEARCH_ENGINES = [
     },
 ]
 
-_TIMEOUT = aiohttp.ClientTimeout(connect=15, sock_read=45)
+# `normal` pacing baseline; scaled per call by _timeout().
+_CONNECT_TIMEOUT = 15
+_READ_TIMEOUT = 45
+
+
+def _timeout() -> aiohttp.ClientTimeout:
+    """Request timeout for the active pacing profile, resolved per call."""
+    return aiohttp.ClientTimeout(
+        connect=pacing.scale_timeout(_CONNECT_TIMEOUT),
+        sock_read=pacing.scale_timeout(_READ_TIMEOUT),
+    )
 _ONION_RE = re.compile(r"https?://[a-z2-7]{16,56}\.onion[^\s\"'<>]*", re.IGNORECASE)
 _LAST_ONIONSEARCH_STATUS: dict[str, str] = {"Torch": "not_run", "Haystack": "not_run"}
 
@@ -70,13 +81,6 @@ def get_last_onionsearch_status() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-
-def _tor_connector() -> ProxyConnector:
-    return ProxyConnector.from_url(
-        f"socks5://{TOR_PROXY_HOST}:{TOR_PROXY_PORT}",
-        rdns=True,
-    )
-
 
 def _ua() -> str:
     return (
@@ -105,15 +109,24 @@ async def search_darksearch(query: str, pages: int = 2) -> List[dict]:
         headers["Authorization"] = f"Bearer {DARKSEARCH_API_KEY}"
 
     try:
-        connector = _tor_connector()
-        async with aiohttp.ClientSession(
-            connector=connector, timeout=_TIMEOUT
-        ) as session:
+        # One pooled session for every page — they all target the same host, so
+        # they are one identity to Tor and belong on one circuit.
+        #
+        # darksearch.io is clearnet but deliberately Tor-routed (see docstring).
+        # `tor_isolation_key` maps non-onion hosts to the shared un-isolated
+        # bucket, so this path keeps exactly its present behaviour —
+        # credential-less SOCKS5 through Tor — while no longer building a
+        # throwaway connector on every call.
+        session, iso_key = tor_pool.acquire_tor_session(_DARKSEARCH_API)
+        try:
             for page in range(1, pages + 1):
                 params = {"query": query, "page": page}
                 try:
                     async with session.get(
-                        _DARKSEARCH_API, params=params, headers=headers
+                        _DARKSEARCH_API,
+                        params=params,
+                        headers=headers,
+                        timeout=_timeout(),
                     ) as resp:
                         if resp.status != 200:
                             _logger.debug(
@@ -143,6 +156,8 @@ async def search_darksearch(query: str, pages: int = 2) -> List[dict]:
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     _logger.debug("DarkSearch page %d error: %s", page, exc)
                     break
+        finally:
+            tor_pool.release_tor_session(iso_key)
     except Exception as exc:
         _logger.debug("DarkSearch session error: %s", exc)
 
@@ -170,35 +185,39 @@ async def search_onionsearch(query: str) -> List[dict]:
     encoded = quote_plus(query)
 
     try:
-        connector = _tor_connector()
-        async with aiohttp.ClientSession(
-            connector=connector, timeout=_TIMEOUT
-        ) as session:
-            for engine in _ONIONSEARCH_ENGINES:
-                url = engine["url"].replace("{query}", encoded)
-                name = engine["name"]
-                try:
-                    async with session.get(
-                        url, headers={"User-Agent": _ua()}
-                    ) as resp:
-                        if resp.status != 200:
-                            _LAST_ONIONSEARCH_STATUS[name] = f"http_{resp.status}"
-                            _logger.debug(
-                                "%s returned HTTP %d", name, resp.status
-                            )
-                            continue
-                        html = await resp.text(errors="replace")
-                        parsed = _parse_onion_links(html, name)
-                        results.extend(parsed)
-                        _LAST_ONIONSEARCH_STATUS[name] = f"ok_{len(parsed)}_results"
-                except (aiohttp.ClientError, Exception) as exc:
-                    error_name = type(exc).__name__.lower()
-                    _LAST_ONIONSEARCH_STATUS[name] = (
-                        "error_proxy" if "proxy" in error_name or "proxy" in str(exc).lower()
-                        else "error_timeout" if isinstance(exc, asyncio.TimeoutError)
-                        else "error_transport"
-                    )
-                    _logger.debug("%s fetch error: %s", name, exc)
+        for engine in _ONIONSEARCH_ENGINES:
+            url = engine["url"].replace("{query}", encoded)
+            name = engine["name"]
+            # Acquired per engine, not once for the loop.  Torch and Haystack
+            # are different onion services; sharing one session put them on one
+            # circuit, which let either operator correlate our queries to the
+            # other.  Keyed on hostname, so a retry or a repeat query to the
+            # same engine still reuses its circuit.
+            session, iso_key = tor_pool.acquire_tor_session(url)
+            try:
+                async with session.get(
+                    url, headers={"User-Agent": _ua()}, timeout=_timeout()
+                ) as resp:
+                    if resp.status != 200:
+                        _LAST_ONIONSEARCH_STATUS[name] = f"http_{resp.status}"
+                        _logger.debug(
+                            "%s returned HTTP %d", name, resp.status
+                        )
+                        continue
+                    html = await resp.text(errors="replace")
+                    parsed = _parse_onion_links(html, name)
+                    results.extend(parsed)
+                    _LAST_ONIONSEARCH_STATUS[name] = f"ok_{len(parsed)}_results"
+            except (aiohttp.ClientError, Exception) as exc:
+                error_name = type(exc).__name__.lower()
+                _LAST_ONIONSEARCH_STATUS[name] = (
+                    "error_proxy" if "proxy" in error_name or "proxy" in str(exc).lower()
+                    else "error_timeout" if isinstance(exc, asyncio.TimeoutError)
+                    else "error_transport"
+                )
+                _logger.debug("%s fetch error: %s", name, exc)
+            finally:
+                tor_pool.release_tor_session(iso_key)
     except Exception as exc:
         status = "error_proxy" if "proxy" in type(exc).__name__.lower() or "proxy" in str(exc).lower() else "error_transport"
         _LAST_ONIONSEARCH_STATUS = {name: status for name in _LAST_ONIONSEARCH_STATUS}

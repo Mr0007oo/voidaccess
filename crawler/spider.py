@@ -5,8 +5,10 @@ Public API:
     CrawlResult   dataclass — returned by crawl()
     crawl()       async function — main entry point
 
-All HTTP requests go through the Tor SOCKS5 proxy (TOR_PROXY_HOST /
-TOR_PROXY_PORT from config.py).  No clearnet requests to dark web targets.
+All HTTP requests go through the Tor SOCKS5 proxy, via the shared stream-
+isolation pool in `scraper/tor_pool.py` — one circuit per target hostname,
+shared with every other Tor fetcher in the process.  No clearnet requests to
+dark web targets.
 
 Politeness rules (non-negotiable for Tor stability):
   - Same domain  → random 2–8 s delay between consecutive requests
@@ -34,12 +36,12 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import aiohttp
-from aiohttp_socks import ProxyConnector
 
-from config import TOR_PROXY_HOST, TOR_PROXY_PORT
+import pacing
 from crawler.dedup import ContentDedup, UrlDedup
 from crawler.frontier import Frontier
 from crawler.utils import extract_onion_links, is_valid_onion, normalize_url
+from scraper import tor_pool
 from scraper.scrape import _extract_text
 from vector import bulk_check_cache, upsert_page
 
@@ -48,6 +50,9 @@ _logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants (mirror scrape.py where applicable)
 # ---------------------------------------------------------------------------
+
+# Timing constants below are the `normal` pacing baseline; the active profile
+# scales them at call time via the `pacing` module (see pacing/README.md).
 
 MAX_DOWNLOAD_BYTES = 1_000_000          # 1 MB hard cap
 MAX_RETURN_CHARS = 2_000                # truncation in results list
@@ -58,6 +63,8 @@ ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 
 _SAME_DOMAIN_DELAY = (2.0, 8.0)        # seconds, random within range
 _NEW_DOMAIN_DELAY = (0.5, 2.0)         # seconds, random within range
+_CONNECT_TIMEOUT = 10                  # seconds
+_READ_TIMEOUT = 45                     # seconds
 _DOMAIN_MAX_CONCURRENT = 3             # asyncio.Semaphore value per domain
 _GLOBAL_CONCURRENCY = 10               # max simultaneous page fetches overall
 
@@ -140,14 +147,23 @@ class Spider:
         event loop; the actual sleep happens outside the lock so other
         coroutines are not blocked.
         """
+        # The pacing profile scales both politeness windows.  This is the
+        # natural home for `quiet` to extend further: the crawler already has
+        # a concept of per-domain politeness, so the profile widens the
+        # existing window rather than bolting on a separate delay.  Both ends
+        # are scaled so the jitter the randomisation exists to provide is
+        # preserved instead of collapsing to a point.
+        new_domain_delay = pacing.scale_delay_range(*_NEW_DOMAIN_DELAY)
+        same_domain_delay = pacing.scale_delay_range(*_SAME_DOMAIN_DELAY)
+
         async with self._timing_lock:
             last = self._domain_last_access.get(domain)
             now = time.monotonic()
             if last is None:
-                delay = random.uniform(*_NEW_DOMAIN_DELAY)
+                delay = random.uniform(*new_domain_delay)
             else:
                 elapsed = now - last
-                needed = random.uniform(*_SAME_DOMAIN_DELAY)
+                needed = random.uniform(*same_domain_delay)
                 delay = max(0.0, needed - elapsed)
             # Reserve the slot so concurrent coroutines don't both sleep 0
             self._domain_last_access[domain] = now + delay
@@ -169,6 +185,14 @@ class Spider:
 
         Returns (raw_bytes, html, extracted_text) on success, or None on
         any unrecoverable failure.  Never raises.
+
+        *session* comes from the shared Tor pool, whose session-level timeout is
+        tuned for the scraper (a 5 s read).  Crawling needs far more patience
+        than that, so the crawler's own window is applied as a **per-request**
+        override: aiohttp lets a `timeout=` on the call beat the session
+        default, which keeps one shared circuit per host while letting the two
+        callers disagree about how long to wait.  Baking these into the pooled
+        session instead would silently impose 45 s reads on every scrape too.
         """
         headers = {
             "User-Agent": _USER_AGENT,
@@ -176,12 +200,23 @@ class Spider:
         }
         last_exc: object = None
 
-        for attempt in range(MAX_RETRIES + 1):
+        # Resolved per call, not per import, so a profile selected after this
+        # module was imported still applies.  Reading the module constants here
+        # also keeps existing tests that monkeypatch RETRY_DELAYS working.
+        max_retries, retry_delays = pacing.retry_plan(MAX_RETRIES, RETRY_DELAYS)
+        request_timeout = aiohttp.ClientTimeout(
+            connect=pacing.scale_timeout(_CONNECT_TIMEOUT),
+            sock_read=pacing.scale_timeout(_READ_TIMEOUT),
+        )
+
+        for attempt in range(max_retries + 1):
             if attempt > 0:
-                await asyncio.sleep(RETRY_DELAYS[attempt - 1])
+                await asyncio.sleep(retry_delays[attempt - 1])
 
             try:
-                async with session.get(url, headers=headers) as resp:
+                async with session.get(
+                    url, headers=headers, timeout=request_timeout
+                ) as resp:
                     if resp.status in RETRYABLE_STATUS:
                         last_exc = f"HTTP {resp.status}"
                         continue
@@ -297,7 +332,7 @@ class Spider:
         self,
         url: str,
         depth: int,
-        session: aiohttp.ClientSession,
+        session: Optional[aiohttp.ClientSession] = None,
     ) -> None:
         """
         Fetch *url*, extract links, and update all state.
@@ -305,11 +340,27 @@ class Spider:
         Acquires the per-domain semaphore after the politeness delay so at
         most _DOMAIN_MAX_CONCURRENT fetches to the same domain run in
         parallel at any time.
+
+        When *session* is None — the production path — the session is taken from
+        the shared Tor isolation pool, keyed on this URL's hostname, and the
+        in-flight hold is released in the `finally`.  Acquisition happens
+        *inside* the semaphore so that hold lasts only as long as the fetch, not
+        through the politeness delay, which under a `quiet` profile can be tens
+        of seconds.
+
+        An explicitly supplied *session* is used as-is and never released here,
+        because the caller owns it.  This is the same "pass None for sessions
+        that were not acquired from the pool" seam that
+        `scraper.scrape._fetch_one` uses, and it is what lets unit tests drive
+        this method with a mock session instead of a live circuit.
         """
         domain = (urlparse(url).hostname or url).lower()
         await self._polite_delay(domain)
 
         async with self._domain_semaphores[domain]:
+            iso_key: Optional[str] = None
+            if session is None:
+                session, iso_key = tor_pool.acquire_tor_session(url)
             try:
                 result = await self._fetch(url, session)
 
@@ -361,6 +412,10 @@ class Spider:
                 _logger.warning("Unexpected error processing %s: %s", url, exc, exc_info=True)
                 self._db_upsert_source(url, "failed")
 
+            finally:
+                if iso_key is not None:
+                    tor_pool.release_tor_session(iso_key)
+
     # ------------------------------------------------------------------
     # Main crawl loop
     # ------------------------------------------------------------------
@@ -390,68 +445,68 @@ class Spider:
             _logger.warning("No valid seed URLs; returning empty CrawlResult.")
             return CrawlResult()
 
-        timeout = aiohttp.ClientTimeout(connect=10, sock_read=45)
-        connector = ProxyConnector.from_url(
-            f"socks5://{TOR_PROXY_HOST}:{TOR_PROXY_PORT}",
-            rdns=True,
-        )
+        # No session is created here any more.  A crawl run used to open one
+        # credential-less Tor session for every page it would ever fetch, which
+        # put the whole run on a single circuit.  Sessions now come from the
+        # shared pool, per target hostname, acquired inside _process_url — so a
+        # crawl that walks three onion services uses three circuits, and the
+        # scraper fetching one of those same hosts reuses the crawler's circuit
+        # instead of building a second one.
+        active: set[asyncio.Task] = set()
+        total_processed = 0
 
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            active: set[asyncio.Task] = set()
-            total_processed = 0
+        while True:
+            # Fill task pool up to concurrency cap while pages remain
+            batch: list[tuple[str, int]] = []
+            while (
+                not self._frontier.empty()
+                and len(active) < _GLOBAL_CONCURRENCY
+                and total_processed + len(active) < self.max_pages
+            ):
+                url, depth = self._frontier.pop()
+                batch.append((url, depth))
 
-            while True:
-                # Fill task pool up to concurrency cap while pages remain
-                batch: list[tuple[str, int]] = []
-                while (
-                    not self._frontier.empty()
-                    and len(active) < _GLOBAL_CONCURRENCY
-                    and total_processed + len(active) < self.max_pages
-                ):
-                    url, depth = self._frontier.pop()
-                    batch.append((url, depth))
-
-                if batch:
-                    cached_pages, uncached_urls = bulk_check_cache(
-                        [url for url, _depth in batch]
-                    )
-                    cached_map = {page.get("link"): page for page in cached_pages}
-                    for url, depth in batch:
-                        cached_page = cached_map.get(url)
-                        if cached_page is not None:
-                            content = str(cached_page.get("content", ""))
-                            self._pages_crawled += 1
-                            self._results.append({"url": url, "content": content[:MAX_RETURN_CHARS]})
-                            try:
-                                upsert_page(
-                                    url,
-                                    content,
-                                    metadata={"crawler": "spider", "cached": True},
-                                )
-                            except Exception as exc:
-                                _logger.debug("cache refresh upsert failed for %s: %s", url, exc)
-                            continue
-                        if url not in uncached_urls:
-                            continue
-                        task = asyncio.create_task(
-                            self._process_url(url, depth, session),
-                            name=f"crawl:{url}",
-                        )
-                        active.add(task)
-
-                if not active:
-                    break  # frontier empty, nothing in flight
-
-                done, active = await asyncio.wait(
-                    active, return_when=asyncio.FIRST_COMPLETED
+            if batch:
+                cached_pages, uncached_urls = bulk_check_cache(
+                    [url for url, _depth in batch]
                 )
-                total_processed += len(done)
+                cached_map = {page.get("link"): page for page in cached_pages}
+                for url, depth in batch:
+                    cached_page = cached_map.get(url)
+                    if cached_page is not None:
+                        content = str(cached_page.get("content", ""))
+                        self._pages_crawled += 1
+                        self._results.append({"url": url, "content": content[:MAX_RETURN_CHARS]})
+                        try:
+                            upsert_page(
+                                url,
+                                content,
+                                metadata={"crawler": "spider", "cached": True},
+                            )
+                        except Exception as exc:
+                            _logger.debug("cache refresh upsert failed for %s: %s", url, exc)
+                        continue
+                    if url not in uncached_urls:
+                        continue
+                    task = asyncio.create_task(
+                        self._process_url(url, depth),
+                        name=f"crawl:{url}",
+                    )
+                    active.add(task)
 
-                # Propagate any unexpected task exceptions to the log
-                for t in done:
-                    exc = t.exception()
-                    if exc:
-                        _logger.error("Task %s raised: %s", t.get_name(), exc)
+            if not active:
+                break  # frontier empty, nothing in flight
+
+            done, active = await asyncio.wait(
+                active, return_when=asyncio.FIRST_COMPLETED
+            )
+            total_processed += len(done)
+
+            # Propagate any unexpected task exceptions to the log
+            for t in done:
+                exc = t.exception()
+                if exc:
+                    _logger.error("Task %s raised: %s", t.get_name(), exc)
 
         return CrawlResult(
             pages_crawled=self._pages_crawled,

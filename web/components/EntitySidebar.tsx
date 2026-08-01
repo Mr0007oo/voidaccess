@@ -283,12 +283,14 @@ export function EntitySidebar({
 
   const filtered = useMemo(() => {
     const s = search.toLowerCase().trim();
-    let result = entities;
+    let result = [...entities].sort(
+      (a, b) => (b.priority_score ?? 0) - (a.priority_score ?? 0)
+    );
     if (s) {
       result = result.filter(
         (e) =>
-          e.value.toLowerCase().includes(s) ||
-          (e.category as string).toLowerCase().includes(s)
+          (e.value ?? "").toLowerCase().includes(s) ||
+          (e.category ?? "").toLowerCase().includes(s)
       );
     }
     if (freshnessFilter === "fresh") {
@@ -472,6 +474,12 @@ export function EntitySidebar({
                                 }}
                               >
                                 {typeConfig.label}
+                              </span>
+                              <span
+                                title="Signal-based entity priority (confidence, corroboration, freshness, and optional typed-relationship centrality)"
+                                className="shrink-0 rounded bg-[var(--bg-raised)] px-1.5 py-0.5 text-[9px] font-mono font-bold text-[var(--text-secondary)]"
+                              >
+                                {(e.priority_score ?? 0).toFixed(3)}
                               </span>
                               {(e.source_count ?? 1) > 1 && (
                                 <span
@@ -708,4 +716,3 @@ export function EntitySidebar({
     </div>
   );
 }
-

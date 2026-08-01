@@ -134,7 +134,10 @@ export default function InvestigationPage() {
     try {
       const token = getToken();
       const conf = minConf !== undefined ? minConf : entityMinConfidence;
-      const qs = new URLSearchParams({ limit: "1000", min_confidence: conf.toString(), defang: defangEnabled.toString() });
+      // Keep the client within the API's paginated maximum.  The previous
+      // 1000 request was rejected with HTTP 422 before the sidebar could
+      // render any entities or their priority scores.
+      const qs = new URLSearchParams({ limit: "100", min_confidence: conf.toString(), defang: defangEnabled.toString() });
       if (freshness && freshness !== "expired") {
         qs.set("freshness_exclude", freshness);
       } else if (freshness === "expired") {

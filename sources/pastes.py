@@ -28,10 +28,10 @@ from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
-from aiohttp_socks import ProxyConnector
 from bs4 import BeautifulSoup
 
-from config import TOR_PROXY_HOST, TOR_PROXY_PORT
+import pacing
+from scraper import tor_pool
 
 _logger = logging.getLogger(__name__)
 
@@ -60,21 +60,23 @@ _PASTE_SITES = [
     },
 ]
 
-_TIMEOUT = aiohttp.ClientTimeout(connect=15, sock_read=30)
+# `normal` pacing baseline; scaled per call by _timeout().
+_CONNECT_TIMEOUT = 15
+_READ_TIMEOUT = 30
+
+
+def _timeout() -> aiohttp.ClientTimeout:
+    """Request timeout for the active pacing profile, resolved per call."""
+    return aiohttp.ClientTimeout(
+        connect=pacing.scale_timeout(_CONNECT_TIMEOUT),
+        sock_read=pacing.scale_timeout(_READ_TIMEOUT),
+    )
 _SNIPPET_LEN = 500
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _tor_connector() -> ProxyConnector:
-    # python_socks only accepts socks5/socks4/http — use socks5 + rdns (like socks5h)
-    return ProxyConnector.from_url(
-        f"socks5://{TOR_PROXY_HOST}:{TOR_PROXY_PORT}",
-        rdns=True,
-    )
-
 
 def _matches(text: str, query: str) -> bool:
     """Case-insensitive match: every whitespace-separated term must appear."""
@@ -171,15 +173,20 @@ async def fetch_recent_pastes(query: str, max_results: int = 20) -> List[dict]:
     results: List[dict] = []
 
     try:
-        connector = _tor_connector()
-        async with aiohttp.ClientSession(
-            connector=connector, timeout=_TIMEOUT
-        ) as session:
-            for site in _PASTE_SITES:
-                if len(results) >= max_results:
-                    break
+        for site in _PASTE_SITES:
+            if len(results) >= max_results:
+                break
+            # One pooled session per paste site, not one for all three.  These
+            # are three unrelated onion services; a shared session put them on
+            # a single circuit, so any one operator saw the traffic pattern of
+            # all three.  The index page and every paste fetched from it share
+            # the site's hostname, and therefore correctly share its circuit.
+            session, iso_key = tor_pool.acquire_tor_session(site["index_url"])
+            try:
                 site_results = await _scrape_site(session, site, query, max_results)
-                results.extend(site_results)
+            finally:
+                tor_pool.release_tor_session(iso_key)
+            results.extend(site_results)
     except Exception as exc:
         _logger.debug("fetch_recent_pastes session error: %s", exc)
 
@@ -207,6 +214,9 @@ async def _scrape_site(
                     "Gecko/20100101 Firefox/137.0"
                 )
             },
+            # Per-request: the pooled session's default is the scraper's 5 s
+            # read, and paste index pages are slower than that.
+            timeout=_timeout(),
         ) as resp:
             if resp.status != 200:
                 return []
@@ -236,7 +246,7 @@ async def _fetch_paste(
 ) -> Optional[dict]:
     """Fetch and keyword-check a single paste URL. Returns None if no match."""
     try:
-        async with session.get(url) as resp:
+        async with session.get(url, timeout=_timeout()) as resp:
             if resp.status != 200:
                 return None
             html = await resp.text(errors="replace")

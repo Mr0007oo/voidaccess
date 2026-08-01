@@ -538,6 +538,159 @@ _NOISE_URL_PATTERNS = (
     "faq", "help", "login", "register", "signup", "browse",
 )
 
+# Alias expansion is deliberately conservative.  The per-term cap is based
+# on the Phase 1 distribution (p50=0, p90=2, p99=7, max=41) and the small
+# secondary weights keep a page from winning merely by mentioning many aliases.
+_ALIAS_CAP = 8
+_MAX_GAZETTEER_PHRASE_WORDS = 8
+_EXACT_PHRASE_URL_WEIGHT = 7.0
+_EXACT_PHRASE_TITLE_WEIGHT = 5.0
+_ORIGINAL_TERM_URL_WEIGHT = 3.0
+_ORIGINAL_TERM_TITLE_WEIGHT = 2.0
+_ALIAS_TERM_URL_WEIGHT = 0.10
+_ALIAS_TERM_TITLE_WEIGHT = 0.05
+
+
+def _query_term_key(term: str) -> str:
+    """Return a stable key for deduplicating query names and aliases."""
+    return re.sub(r"[^a-z0-9]+", "", (term or "").casefold())
+
+
+def _clean_query_phrase(phrase: str) -> str:
+    """Remove query punctuation that should not prevent a gazetteer hit."""
+    return (phrase or "").strip(" \t\r\n\"'`.,;:!?()[]{}")
+
+
+def _find_gazetteer_matches(query: str) -> list[dict[str, Any]]:
+    """Find longest, non-overlapping gazetteer names present in *query*.
+
+    The gazetteer remains responsible for its indexed lookup.  This only
+    supplies query phrase candidates so multi-word names such as
+    ``Lazarus Group`` can expand without treating every word as an actor.
+    """
+    from extractor import gazetteer
+
+    tokens = (query or "").split()
+    matches: list[dict[str, Any]] = []
+    occupied: set[int] = set()
+
+    for width in range(min(len(tokens), _MAX_GAZETTEER_PHRASE_WORDS), 0, -1):
+        for start in range(0, len(tokens) - width + 1):
+            end = start + width
+            if any(position in occupied for position in range(start, end)):
+                continue
+            phrase = _clean_query_phrase(" ".join(tokens[start:end]))
+            if not phrase:
+                continue
+            record = gazetteer.lookup(phrase)
+            if record is None:
+                continue
+            matches.append({
+                "query_term": phrase,
+                "record": record,
+                "start": start,
+                "end": end,
+            })
+            occupied.update(range(start, end))
+
+    return matches
+
+
+def _build_query_expansion(query: str) -> dict[str, Any]:
+    """Build the weighted query terms consumed by the heuristic ranker.
+
+    ``expanded`` is false when there are no usable aliases.  Callers use that
+    flag to preserve the pre-expansion scoring path exactly for ordinary
+    queries and gazetteer records with zero synonyms.
+    """
+    original_terms = [term for term in (query or "").lower().split() if term]
+    matches = _find_gazetteer_matches(query)
+    matched_keys = {
+        _query_term_key(match["query_term"])
+        for match in matches
+    }
+
+    selected_aliases: list[dict[str, str]] = []
+    seen_alias_keys: set[str] = set()
+    match_details: list[dict[str, Any]] = []
+
+    for match in matches:
+        record = match["record"]
+        canonical = record.get("canonical") or ""
+        candidates = [canonical, *(record.get("synonyms") or [])]
+        # Keep the canonical name first when the query matched an alias, then
+        # select the remaining aliases in stable lexical order.  This makes a
+        # capped expansion reproducible while retaining the canonical signal.
+        canonical_key = _query_term_key(canonical)
+        ordered: list[str] = []
+        if canonical and canonical_key not in matched_keys:
+            ordered.append(canonical)
+        ordered.extend(sorted(
+            (candidate for candidate in candidates[1:] if candidate),
+            key=lambda candidate: (candidate.casefold(), candidate),
+        ))
+
+        available: list[str] = []
+        local_keys: set[str] = set()
+        for candidate in ordered:
+            key = _query_term_key(candidate)
+            if not key or key in matched_keys or key in local_keys:
+                continue
+            local_keys.add(key)
+            available.append(candidate)
+
+        chosen = available[:_ALIAS_CAP]
+        for alias in chosen:
+            key = _query_term_key(alias)
+            if key in seen_alias_keys:
+                continue
+            seen_alias_keys.add(key)
+            selected_aliases.append({
+                "term": alias,
+                "source": match["query_term"],
+            })
+        match_details.append({
+            "query_term": match["query_term"],
+            "canonical": canonical,
+            "available_aliases": len(available),
+            "selected_aliases": chosen,
+        })
+
+    expanded = bool(selected_aliases)
+    terms: list[dict[str, Any]] = []
+    if expanded:
+        for match in matches:
+            terms.append({
+                "term": match["query_term"].lower(),
+                "tier": "exact_phrase",
+                "url_weight": _EXACT_PHRASE_URL_WEIGHT,
+                "title_weight": _EXACT_PHRASE_TITLE_WEIGHT,
+                "source": match["query_term"],
+            })
+
+    terms.extend({
+        "term": term,
+        "tier": "original_term",
+        "url_weight": _ORIGINAL_TERM_URL_WEIGHT,
+        "title_weight": _ORIGINAL_TERM_TITLE_WEIGHT,
+        "source": None,
+    } for term in original_terms)
+
+    if expanded:
+        terms.extend({
+            "term": alias["term"].lower(),
+            "tier": "alias_term",
+            "url_weight": _ALIAS_TERM_URL_WEIGHT,
+            "title_weight": _ALIAS_TERM_TITLE_WEIGHT,
+            "source": alias["source"],
+        } for alias in selected_aliases)
+
+    return {
+        "expanded": expanded,
+        "matches": match_details,
+        "terms": terms,
+    }
+
 
 def _heuristic_filter(
     results: list[dict],
@@ -557,8 +710,18 @@ def _heuristic_filter(
     if not results:
         return []
 
+    expansion = _build_query_expansion(query)
     query_terms = [t for t in (query or "").lower().split() if t]
     scored: list[tuple[int, float]] = []
+
+    if expansion["expanded"]:
+        logger.info(
+            "heuristic query expansion: %s",
+            json.dumps({
+                "matches": expansion["matches"],
+                "terms": expansion["terms"],
+            }, ensure_ascii=False),
+        )
 
     for i, page in enumerate(results, 1):
         score = 0.0
@@ -575,12 +738,21 @@ def _heuristic_filter(
         )
         score += min(len(content) / 1000.0, 5.0)
 
-        # Query-term signals.
-        for term in query_terms:
-            if term in url:
-                score += 3.0
-            if term in title:
-                score += 2.0
+        # Query-term signals.  Keep the old path untouched when there is no
+        # usable expansion, including for gazetteer records with no aliases.
+        if expansion["expanded"]:
+            for weighted_term in expansion["terms"]:
+                term = weighted_term["term"]
+                if term in url:
+                    score += weighted_term["url_weight"]
+                if term in title:
+                    score += weighted_term["title_weight"]
+        else:
+            for term in query_terms:
+                if term in url:
+                    score += 3.0
+                if term in title:
+                    score += 2.0
 
         # Prefer .onion over clearnet.
         if ".onion" in url:

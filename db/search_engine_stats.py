@@ -9,6 +9,8 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
+import pacing
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,14 +69,42 @@ def circuit_duration_for_failures(consecutive_failures: int) -> timedelta:
     return timedelta(hours=2)
 
 
+# `normal` pacing baseline for the adaptive per-engine timeout.
+ENGINE_TIMEOUT_DEFAULT = 20.0     # no observations yet
+ENGINE_TIMEOUT_FLOOR = 8.0        # lower clamp
+ENGINE_TIMEOUT_CEILING = 45.0     # upper clamp
+ENGINE_TIMEOUT_MULTIPLIER = 2.0   # applied to observed average response time
+
+
 def get_engine_timeout(stats: dict[str, Any]) -> float:
+    """
+    Return the adaptive per-engine timeout, in seconds.
+
+    This is a self-tuning value: an engine's own observed average response
+    time drives the result.  The pacing profile deliberately scales only the
+    *bounds* it is clamped into and the no-observations default — never the
+    computed value itself.  Multiplying the adaptive output by a profile
+    factor would let a profile guess override a real measurement, so the
+    profile would fight the adaptive logic instead of complementing it.  With
+    bounds-scaling, an engine that has demonstrated it answers in 6 s still
+    gets a 12 s timeout under every profile; what changes is how much room a
+    genuinely slow engine is granted before the ceiling cuts it off, and how
+    eagerly a fast one is clamped up off the floor.
+    """
+    floor, ceiling = pacing.scale_adaptive_bounds(
+        ENGINE_TIMEOUT_FLOOR, ENGINE_TIMEOUT_CEILING
+    )
+
+    # No observations yet — nothing to adapt to, so this is a plain timeout
+    # and takes the ordinary timeout scale, clamped into the same window.
     if int(stats.get("total_attempts") or 0) == 0:
-        return 20.0
+        return max(floor, min(ceiling, pacing.scale_timeout(ENGINE_TIMEOUT_DEFAULT)))
     avg_ms = float(stats.get("avg_response_time_ms") or 0)
     if avg_ms == 0:
-        return 20.0
-    dynamic = (avg_ms / 1000.0) * 2.0
-    return max(8.0, min(45.0, dynamic))
+        return max(floor, min(ceiling, pacing.scale_timeout(ENGINE_TIMEOUT_DEFAULT)))
+
+    dynamic = (avg_ms / 1000.0) * ENGINE_TIMEOUT_MULTIPLIER
+    return max(floor, min(ceiling, dynamic))
 
 
 def engine_priority_score(stats: dict[str, Any]) -> float:

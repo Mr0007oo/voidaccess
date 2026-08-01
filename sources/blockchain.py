@@ -13,6 +13,7 @@ import uuid
 from typing import Optional, Any
 from datetime import datetime, timezone
 
+import pacing
 from db.models import Entity, EntityRelationship, RelationshipType
 from db.queries import upsert_entity_canonical
 
@@ -24,6 +25,21 @@ ETHERSCAN_BASE = "https://api.etherscan.io/api"
 # Reasonable caps to avoid hammering free APIs
 MAX_TRANSACTIONS_PER_WALLET = 50
 MAX_CONNECTED_ADDRESSES = 10  # How many counterparty addresses to extract
+
+# Inter-wallet pacing.  One constant covers both providers, so it has to satisfy
+# whichever is stricter per-request (verified 2026-07-29):
+#
+#   BlockCypher free tier — 3 req/s AND 100 req/hr
+#   Etherscan free key    — 5 calls/s, 100,000 calls/day
+#
+# 0.4 s = 2.5 req/s, inside BlockCypher's 3/s.  Provider-dictated, so it goes
+# through pacing.scale_delay_floor() and no profile may shorten it.
+#
+# CAVEAT: BlockCypher's 100 req/hr is the binding constraint in practice and a
+# per-request delay says nothing about it — 2.5 req/s exhausts the hour's
+# allowance in 40 seconds.  That is an hourly budget (pattern 1 in
+# docs/BACKLOG.md); MAX_CONNECTED_ADDRESSES bounds a single run but not a day.
+WALLET_REQUEST_DELAY = 0.4
 
 # Entity type constants to match extractor/regex_patterns.py
 BITCOIN_ADDRESS = "BITCOIN_ADDRESS"
@@ -438,7 +454,7 @@ async def enrich_wallets_for_investigation(
             logger.warning(f"Wallet enrichment failed for {address[:12]}: {e}")
         
         # Respect rate limits
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(pacing.scale_delay_floor(WALLET_REQUEST_DELAY))
         
     session.commit()
     return stats

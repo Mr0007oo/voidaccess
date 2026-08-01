@@ -15,6 +15,7 @@ import logging
 
 import aiohttp
 
+import pacing
 from config import MAX_IPS_PER_INVESTIGATION, SHODAN_RATE_LIMIT_DELAY
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,6 @@ async def enrich_shodan(entities: list[dict]) -> list[dict]:
         result = await enrich_shodan_ip(ip, extracted_cves)
         if result is not None:
             results.append(result)
-        await asyncio.sleep(SHODAN_RATE_LIMIT_DELAY)
+        await asyncio.sleep(pacing.scale_delay_floor(SHODAN_RATE_LIMIT_DELAY))
 
     return results

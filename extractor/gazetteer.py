@@ -23,6 +23,7 @@ is_known_malware(name)     → bool
 is_known_ransomware(name)  → bool
 is_known(name, category)   → bool   (category in {"threat_actor","malware","ransomware"})
 category_of(name)          → str | None
+lookup(name, category=None) → dict | None (canonical, synonyms, uuid)
 stats()                    → dict
 """
 
@@ -33,7 +34,7 @@ import logging
 import os
 import re
 import unicodedata
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +67,9 @@ ORG_SUFFIXES: frozenset[str] = frozenset({
 _MIN_KEY_LEN = 2
 
 _loaded = False
-_actors: frozenset[str] = frozenset()
-_malware: frozenset[str] = frozenset()
-_ransomware: frozenset[str] = frozenset()
+_actors: dict[str, dict[str, Any]] = {}
+_malware: dict[str, dict[str, Any]] = {}
+_ransomware: dict[str, dict[str, Any]] = {}
 _generated_at: Optional[str] = None
 _generic_terms: frozenset[str] = frozenset()
 
@@ -79,6 +80,8 @@ def _canonical_key(name: str) -> str:
     entity's canonical value lines up with a gazetteer entry."""
     if not name:
         return ""
+    if name.isascii() and name.isalnum():
+        return name.lower()
     v = unicodedata.normalize("NFKD", name)
     v = v.encode("ascii", "ignore").decode("ascii")
     v = v.lower()
@@ -96,6 +99,39 @@ def _keyset(names) -> frozenset[str]:
     return frozenset(out)
 
 
+def _index_records(records: Any) -> tuple[dict[str, dict[str, Any]], int]:
+    """Build an alias-to-record index while accepting the legacy flat format."""
+    index: dict[str, dict[str, Any]] = {}
+    cluster_count = 0
+    for item in records or []:
+        if isinstance(item, str):
+            record = {"canonical": item, "synonyms": [], "uuid": ""}
+        elif isinstance(item, dict):
+            canonical = item.get("canonical")
+            uuid = item.get("uuid", "")
+            synonyms = item.get("synonyms", [])
+            if not isinstance(canonical, str) or not canonical.strip():
+                continue
+            if not isinstance(synonyms, list):
+                synonyms = [synonyms] if isinstance(synonyms, str) else []
+            record = {
+                "canonical": canonical.strip(),
+                "synonyms": [s.strip() for s in synonyms if isinstance(s, str) and s.strip()],
+                "uuid": uuid.strip() if isinstance(uuid, str) else "",
+            }
+        else:
+            continue
+
+        cluster_count += 1
+        for term in (record["canonical"], *record["synonyms"]):
+            key = _canonical_key(term)
+            if len(key) >= _MIN_KEY_LEN:
+                # A first match is deterministic if upstream data contains a
+                # colliding alias, and avoids changing existing membership semantics.
+                index.setdefault(key, record)
+    return index, cluster_count
+
+
 def _load_generic_terms() -> frozenset[str]:
     """Load generic edge qualifiers used for suffix/prefix retry matching."""
     terms = set(ORG_SUFFIXES)
@@ -111,6 +147,8 @@ def _lookup_keys(name: str) -> tuple[str, ...]:
     """Return the original key and edge-stripped retry keys for *name*."""
     original = _canonical_key(name)
     if not name:
+        return (original,)
+    if name.isascii() and name.isalnum():
         return (original,)
 
     terms = _generic_terms
@@ -134,14 +172,16 @@ def _load() -> None:
     try:
         with open(_DATA_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
-        _actors = _keyset(data.get("threat_actors"))
-        _malware = _keyset(data.get("malware"))
-        _ransomware = _keyset(data.get("ransomware"))
+        _actors, actor_clusters = _index_records(data.get("threat_actors"))
+        _malware, malware_clusters = _index_records(data.get("malware"))
+        _ransomware, ransomware_clusters = _index_records(data.get("ransomware"))
         _generated_at = data.get("generated_at")
         _generic_terms = _load_generic_terms()
         logger.info(
-            "Gazetteer loaded: %d actors, %d malware, %d ransomware (generated %s)",
-            len(_actors), len(_malware), len(_ransomware), _generated_at,
+            "Gazetteer loaded: %d actor names (%d clusters), %d malware names (%d clusters), "
+            "%d ransomware names (%d clusters) (generated %s)",
+            len(_actors), actor_clusters, len(_malware), malware_clusters,
+            len(_ransomware), ransomware_clusters, _generated_at,
         )
     except FileNotFoundError:
         logger.warning(
@@ -189,6 +229,33 @@ def category_of(name: str) -> Optional[str]:
         return "malware"
     if any(key in _actors for key in keys):
         return "threat_actor"
+    return None
+
+
+def lookup(name: str, category: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Return the cluster record for *name*, including its canonical and aliases.
+
+    Alias keys are indexed at load time, so the query-time lookup remains a
+    constant-time dictionary operation (apart from the existing edge-stripping
+    retries).  A copy is returned so callers cannot mutate the loaded snapshot.
+    """
+    _load()
+    if category in ("threat_actor", "THREAT_ACTOR_HANDLE", "actor"):
+        indexes = (_actors,)
+    elif category in ("malware", "MALWARE_FAMILY"):
+        indexes = (_malware,)
+    elif category in ("ransomware", "RANSOMWARE_GROUP"):
+        indexes = (_ransomware,)
+    elif category is None:
+        indexes = (_ransomware, _malware, _actors)
+    else:
+        return None
+
+    for key in _lookup_keys(name):
+        for index in indexes:
+            record = index.get(key)
+            if record is not None:
+                return {**record, "synonyms": list(record["synonyms"])}
     return None
 
 

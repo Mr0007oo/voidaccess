@@ -23,6 +23,13 @@ CONFIG_PATH = CLI_HOME / "config.json"
 DB_PATH = CLI_HOME / "investigations.db"
 DEFAULT_OUTPUT_DIR = CLI_HOME / "results"
 
+# Pacing profile names and default are owned by the `pacing` module, not
+# duplicated here — the whole point of that module is one source of truth.
+from pacing import DEFAULT_PROFILE as DEFAULT_PACE  # noqa: E402
+from pacing import ENV_VAR as PACE_ENV_VAR  # noqa: E402
+from pacing import PROFILES as PACE_PROFILES  # noqa: E402
+from pacing import normalize_profile as normalize_pace  # noqa: E402
+
 ENRICHMENT_KEYS = [
     "OTX_API_KEY",
     "VT_API_KEY",
@@ -110,6 +117,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 9050,
     },
+    # Persistent default pacing profile — how patient/polite VoidAccess is
+    # with every scraped target.  Pushed to VOIDACCESS_PACE by apply_env() so
+    # the runtime chokepoint (the `pacing` module, read by scraper/, crawler/,
+    # search/ and sources/) sees the same value the user set here.  The
+    # one-shot `investigate --pace` flag overrides it for a single run.
+    "pace": DEFAULT_PACE,
     "output_dir": str(DEFAULT_OUTPUT_DIR),
 }
 
@@ -122,6 +135,7 @@ _CONFIG_ALLOWED_KEYS = {
     "enrichment_keys": frozenset(ENRICHMENT_KEYS),
     "features": frozenset(DEFAULT_CONFIG["features"]),
     "tor": frozenset({"host", "port"}),
+    "pace": None,
     "output_dir": None,
 }
 
@@ -196,6 +210,9 @@ def load_config() -> dict[str, Any]:
         features["use_proxy"] = bool(features.get("residential_proxy_enabled", False))
     elif "use_proxy" in cfg.get("features", {}):
         features["use_proxy"] = bool(cfg["features"].get("use_proxy", False))
+    # An unrecognised pace silently normalises to the default rather than
+    # raising — a typo in a config file must never block an investigation.
+    merged["pace"] = normalize_pace(cfg.get("pace", DEFAULT_PACE))
     if cfg.get("output_dir"):
         merged["output_dir"] = cfg["output_dir"]
     return merged
@@ -247,6 +264,7 @@ def save_config(config: dict[str, Any]) -> None:
     )
     features["use_proxies"] = features["rest_api_transport_enabled"]
     features["use_proxy"] = features["residential_proxy_enabled"]
+    config["pace"] = normalize_pace(config.get("pace", DEFAULT_PACE))
     _ensure_home()
     CONFIG_PATH.write_text(
         json.dumps(config, indent=2, sort_keys=True),
@@ -432,6 +450,18 @@ def apply_env(config: Optional[dict[str, Any]] = None) -> None:
         os.environ["VOIDACCESS_USE_PROXY"] = "true"
     else:
         os.environ.pop("VOIDACCESS_USE_PROXY", None)
+
+    # Pacing profile → VOIDACCESS_PACE, the chokepoint the `pacing` module
+    # reads.  Same env-var transport pattern as the clearnet toggles above:
+    # it is what lets library code under scraper/, crawler/, search/ and
+    # sources/ pick up the profile without importing anything CLI-specific.
+    #
+    # Precedence: an already-set VOIDACCESS_PACE wins and is left untouched.
+    # `investigate --pace` sets that env var before calling apply_env(), so
+    # the one-shot flag beats the persisted config for that invocation —
+    # the same precedence rule as --use-proxies vs `configure proxy --enable`.
+    if not os.environ.get(PACE_ENV_VAR):
+        os.environ[PACE_ENV_VAR] = normalize_pace(cfg.get("pace", DEFAULT_PACE))
 
     # Keyless APIs (ThreatFox/URLhaus/MalwareBazaar/abuse.ch) must never
     # receive an empty auth header — clear any empty env remnant.

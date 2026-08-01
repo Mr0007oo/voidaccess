@@ -8,10 +8,10 @@ from typing import Optional
 
 import aiohttp
 import requests
-from aiohttp_socks import ProxyConnector
 from bs4 import BeautifulSoup
 
 from config import TOR_PROXY_HOST, TOR_PROXY_PORT
+from search import tor_isolation
 from db.search_engine_stats import (
     engine_priority_score,
     get_all_engine_stats_async,
@@ -25,9 +25,6 @@ from utils.async_utils import run_async
 from search import config as search_config
 
 logger = logging.getLogger(__name__)
-
-# Compatibility exports; runtime reads use the shared config module below.
-ENGINE_TIMEOUT = search_config.ENGINE_TIMEOUT
 
 ENGINE_WEIGHTS = {
     "darksearch": 1.0,
@@ -58,6 +55,8 @@ USER_AGENTS = [
 _ONION_URL_RE = re.compile(r'https?://[a-z0-9._-]+\.onion(?:/[^\s"\'<>]*)?', re.IGNORECASE)
 
 MAX_CONCURRENT = 10
+# Compatibility exports of the `normal` baseline; every runtime read goes
+# through search_config's pacing-aware accessors instead.
 SEARCH_TIMEOUT = search_config.SEARCH_TIMEOUT
 ENGINE_RETRY_COUNT = search_config.ENGINE_RETRY_COUNT
 
@@ -86,22 +85,12 @@ def _is_onion_url(url: str) -> bool:
     return bool(_ONION_URL_RE.search(url))
 
 
-def _tor_aiohttp_connector() -> ProxyConnector:
-    """SOCKS5 with remote DNS for aiohttp-socks with connection pooling."""
-    return ProxyConnector.from_url(
-        f"socks5://{TOR_PROXY_HOST}:{TOR_PROXY_PORT}",
-        rdns=True,
-        limit=10,
-        limit_per_host=2,
-    )
-
-
 async def fetch_with_timeout(
     url: str,
     session: aiohttp.ClientSession,
 ) -> aiohttp.ClientResponse:
     """Fetch a URL with timeout using the provided session."""
-    return await session.get(url, timeout=aiohttp.ClientTimeout(total=search_config.SEARCH_TIMEOUT))
+    return await session.get(url, timeout=aiohttp.ClientTimeout(total=search_config.search_timeout()))
 
 
 async def _fetch_engine(
@@ -117,11 +106,11 @@ async def _fetch_engine(
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     
     async with semaphore:
-        for attempt in range(search_config.ENGINE_RETRY_COUNT + 1):
+        for attempt in range(search_config.engine_retry_count() + 1):
             try:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=search_config.SEARCH_TIMEOUT)) as resp:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=search_config.search_timeout())) as resp:
                     if resp.status != 200:
-                        if attempt < search_config.ENGINE_RETRY_COUNT:
+                        if attempt < search_config.engine_retry_count():
                             await asyncio.sleep(search_config.retry_backoff(attempt))
                             continue
                         return EngineResult(
@@ -149,12 +138,12 @@ async def _fetch_engine(
                     return EngineResult(name=name, links=links)
 
             except asyncio.TimeoutError:
-                if attempt < search_config.ENGINE_RETRY_COUNT:
+                if attempt < search_config.engine_retry_count():
                     await asyncio.sleep(search_config.retry_backoff(attempt))
                     continue
                 return EngineResult(name=name, links=[], error="timeout")
             except Exception as e:
-                if attempt < search_config.ENGINE_RETRY_COUNT:
+                if attempt < search_config.engine_retry_count():
                     await asyncio.sleep(search_config.retry_backoff(attempt))
                     continue
                 return EngineResult(name=name, links=[], error=str(e))
@@ -268,57 +257,61 @@ async def _search_async(
             continue
         active_engines.append(engine)
 
-    connector = _tor_aiohttp_connector()
-    async with aiohttp.ClientSession(
-        connector=connector,
-        timeout=aiohttp.ClientTimeout(total=search_config.SEARCH_TIMEOUT),
-    ) as session:
+    # No batch-wide session.  Each engine borrows its own from the shared Tor
+    # pool, keyed on its hostname, so the 16 onion engines land on 16 circuits
+    # instead of all sharing one — see search/tor_isolation.py for the policy.
+    async def run_engine(engine: dict) -> EngineResult:
+        name = engine["name"]
+        timeout = get_engine_timeout(stats_by_name.get(name, _default_stats(name)))
+        engine_url = engine["url"].format(query=query)
 
-        async def run_engine(engine: dict) -> EngineResult:
-            name = engine["name"]
-            timeout = get_engine_timeout(stats_by_name.get(name, _default_stats(name)))
-
-            async def fetch_with_engine_session():
-                result = await _fetch_engine(engine, query, session, semaphore)
-                return result
-
-            start = time.monotonic()
+        async def fetch_with_engine_session():
+            # Acquired inside the task, released however the fetch ends —
+            # including the wait_for timeout below, which cancels this
+            # coroutine and so runs the finally.
+            session, iso_key = tor_isolation.acquire_engine_session(engine_url)
             try:
-                result = await asyncio.wait_for(fetch_with_engine_session(), timeout=timeout)
-                result.took_ms = int((time.monotonic() - start) * 1000)
-                success = result.error is None
-                task = record_engine_attempt_async(name, success, len(result.links), result.took_ms)
-                if task is not None:
-                    record_tasks.append(task)
-                if result.error:
-                    logger.warning(f"Engine {name} failed: {result.error}")
-                elif not result.links:
-                    logger.warning(f"Engine {name} returned 0 results")
-                return result
-            except asyncio.TimeoutError:
-                took_ms = int((time.monotonic() - start) * 1000)
-                task = record_engine_attempt_async(name, False, 0, took_ms)
-                if task is not None:
-                    record_tasks.append(task)
-                logger.warning(f"Engine {name} timed out")
-                return EngineResult(name=name, links=[], error="timeout", took_ms=took_ms)
-            except Exception as e:
-                took_ms = int((time.monotonic() - start) * 1000)
-                task = record_engine_attempt_async(name, False, 0, took_ms)
-                if task is not None:
-                    record_tasks.append(task)
-                logger.warning(f"Engine {name} exception: {e}")
-                return EngineResult(name=name, links=[], error=str(e), took_ms=took_ms)
+                return await _fetch_engine(engine, query, session, semaphore)
+            finally:
+                tor_isolation.release_engine_session(iso_key)
 
-        tasks = [run_engine(e) for e in active_engines]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        start = time.monotonic()
+        try:
+            result = await asyncio.wait_for(fetch_with_engine_session(), timeout=timeout)
+            result.took_ms = int((time.monotonic() - start) * 1000)
+            success = result.error is None
+            task = record_engine_attempt_async(name, success, len(result.links), result.took_ms)
+            if task is not None:
+                record_tasks.append(task)
+            if result.error:
+                logger.warning(f"Engine {name} failed: {result.error}")
+            elif not result.links:
+                logger.warning(f"Engine {name} returned 0 results")
+            return result
+        except asyncio.TimeoutError:
+            took_ms = int((time.monotonic() - start) * 1000)
+            task = record_engine_attempt_async(name, False, 0, took_ms)
+            if task is not None:
+                record_tasks.append(task)
+            logger.warning(f"Engine {name} timed out")
+            return EngineResult(name=name, links=[], error="timeout", took_ms=took_ms)
+        except Exception as e:
+            took_ms = int((time.monotonic() - start) * 1000)
+            task = record_engine_attempt_async(name, False, 0, took_ms)
+            if task is not None:
+                record_tasks.append(task)
+            logger.warning(f"Engine {name} exception: {e}")
+            return EngineResult(name=name, links=[], error=str(e), took_ms=took_ms)
 
-        processed: list[EngineResult] = list(skipped_results)
-        for r in results:
-            if isinstance(r, Exception):
-                logger.warning(f"Engine task exception: {r}")
-                continue
-            processed.append(r)
+    tasks = [run_engine(e) for e in active_engines]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    processed: list[EngineResult] = list(skipped_results)
+    for r in results:
+        if isinstance(r, Exception):
+            logger.warning(f"Engine task exception: {r}")
+            continue
+        processed.append(r)
 
     if record_tasks:
         await asyncio.gather(*record_tasks, return_exceptions=True)

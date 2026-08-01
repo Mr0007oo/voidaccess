@@ -615,8 +615,11 @@ def save_typed_relationships(
     existing_rows = (
         session.query(EntityRelationship)
         .filter(
-            (EntityRelationship.entity_a_id.in_(endpoint_ids))
-            | (EntityRelationship.entity_b_id.in_(endpoint_ids))
+            EntityRelationship.investigation_id == investigation_id,
+            (
+                (EntityRelationship.entity_a_id.in_(endpoint_ids))
+                | (EntityRelationship.entity_b_id.in_(endpoint_ids))
+            ),
         )
         .all()
     )

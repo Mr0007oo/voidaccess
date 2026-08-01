@@ -39,6 +39,18 @@ from utils.enrichment_cache import _SQLITE_CREATE_TABLE, _SQLITE_INDEX_EXPIRES
 from voidaccess_cli.config import DB_PATH as _DB_PATH
 
 
+class DatabaseSchemaError(RuntimeError):
+    """Raised before an investigation when the local DB is behind the code."""
+
+
+_REQUIRED_SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
+    # Added by Alembic migration 0026.  The ORM touches this column during
+    # every entity merge, so silently proceeding without it produces an empty
+    # investigation that looks successful but can never persist entities.
+    "entities": frozenset({"investigation_count"}),
+}
+
+
 def _source_quality_from_url(url: str) -> float:
     """Return a multi-tier source quality score derived from the source URL."""
     if not url:
@@ -156,6 +168,34 @@ def init_db() -> None:
         conn.execute(text(_SQLITE_INDEX_EXPIRES))
         conn.execute(text(CREATE_SEARCH_ENGINE_STATS_SQL))
         conn.commit()
+
+
+def validate_schema() -> None:
+    """Fail before a run if the DB is missing columns required by the ORM.
+
+    The CLI historically used ``create_all`` for SQLite, which does not alter
+    existing tables.  A database created before a migration could therefore
+    survive startup and fail only inside per-entity savepoints, yielding a
+    misleading zero-entity run.  Validate the migrated contract immediately
+    after initialization so the user gets one actionable error instead.
+    """
+    from sqlalchemy import inspect
+    from db.session import get_engine
+
+    engine = get_engine(_sqlite_url())
+    inspector = inspect(engine)
+    missing: list[str] = []
+    for table, required_columns in _REQUIRED_SCHEMA_COLUMNS.items():
+        present = {column["name"] for column in inspector.get_columns(table)}
+        missing.extend(
+            f"{table}.{column}"
+            for column in sorted(required_columns - present)
+        )
+    if missing:
+        raise DatabaseSchemaError(
+            "Database schema is stale; missing required column(s): "
+            f"{', '.join(missing)}. Run `alembic upgrade head` and retry."
+        )
 
 
 def _ensure_metadata_column(engine) -> None:
@@ -551,7 +591,20 @@ def get_entities(
         if entity_types:
             q = q.filter(Entity.entity_type.in_(entity_types))
         rows = q.limit(limit).all()
-        row_dicts = [_entity_row(r) for r in rows]
+        # Score from ORM rows so CLI confidence uses the same persisted
+        # confidence signal as the API, while preserving the CLI's existing
+        # display-time effective-confidence adjustment.
+        try:
+            from utils.entity_priority import score_map
+            relationships = get_relationships(full)
+            priority_by_id = score_map(rows, relationships)
+        except Exception:
+            priority_by_id = {}
+        row_dicts = []
+        for row in rows:
+            item = _entity_row(row)
+            item.update(priority_by_id.get(str(row.id), {}))
+            row_dicts.append(item)
         try:
             from extractor.normalizer import resolve_entity_type_conflicts
             from extractor.identity import entity_canonical_id

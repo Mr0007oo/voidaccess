@@ -83,18 +83,15 @@ class TestMonitorIntegration(unittest.IsolatedAsyncioTestCase):
         cached = {"link": "http://cached.onion", "content": "cached body"}
         spider_obj = spider.Spider(["http://cached.onion", "http://fresh.onion"], "q", max_pages=2)
         spider_obj._process_url = AsyncMock()
-        fake_session = MagicMock()
-        fake_cm = MagicMock()
-        fake_cm.__aenter__ = AsyncMock(return_value=fake_session)
-        fake_cm.__aexit__ = AsyncMock(return_value=None)
-        fake_connector = MagicMock()
 
+        # run() no longer builds a connector or a ClientSession — sessions come
+        # from the shared Tor pool, acquired inside _process_url, which is
+        # mocked out entirely here.  The connector/session patches this test
+        # used to need are therefore gone rather than retargeted.
         with patch.object(spider, "is_valid_onion", return_value=True):
             with patch.object(spider, "bulk_check_cache", return_value=([cached], ["http://fresh.onion"])):
-                with patch.object(spider.ProxyConnector, "from_url", return_value=fake_connector):
-                    with patch.object(spider.aiohttp, "ClientSession", return_value=fake_cm):
-                        with patch.object(spider, "upsert_page", return_value=True) as upsert:
-                            result = await spider_obj.run()
+                with patch.object(spider, "upsert_page", return_value=True) as upsert:
+                    result = await spider_obj.run()
 
         self.assertEqual(result.pages_crawled, 1)
         spider_obj._process_url.assert_awaited_once()

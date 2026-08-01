@@ -95,6 +95,10 @@ router = APIRouter()
 # Populated during the pipeline run; read by the GET detail endpoint.
 _infra_cluster_cache: dict[str, list] = {}
 
+# In-process cache: investigation_id (str) → node-id/community-id map.
+# The DB metadata copy is the durable source of truth.
+_communities_cache: dict[str, dict[str, int]] = {}
+
 # In-process cache: investigation_id (str) → sources_used status dict.
 # Populated during the pipeline run; read by the GET detail endpoint.
 # Phase 6.1: this is now a *fast-path* cache — the DB metadata column is
@@ -122,6 +126,22 @@ def _set_infra_clusters(investigation_id: str, clusters: list) -> None:
     _update_investigation_metadata(
         investigation_id,
         {"infrastructure_clusters": clusters},
+    )
+
+
+def _set_communities(investigation_id: str, communities: dict[str, int]) -> None:
+    """Cache and persist the server-computed community partition."""
+    normalized = {
+        str(node_id): int(community_id)
+        for node_id, community_id in communities.items()
+    }
+    _communities_cache[investigation_id] = normalized
+    _update_investigation_metadata(
+        investigation_id,
+        {
+            "communities": normalized,
+            "community_count": len(set(normalized.values())) if normalized else 0,
+        },
     )
 
 # ---------------------------------------------------------------------------
@@ -411,6 +431,26 @@ async def _build_graph_phase(
                 session.commit()
         except Exception as e:
             logger.info("[%s] Edge persistence failed (non-fatal): %s", inv_uuid, e)
+
+        # Match the CLI's pre-finalization community step.  Feed the helper
+        # the complete graph, before the graph endpoint's display truncation
+        # to 20 nodes/50 edges; using that response slice would create an
+        # incomplete partition and break CLI/API parity.
+        try:
+            communities = await asyncio.to_thread(
+                _detect_communities_for_graph, graph_obj
+            )
+            _set_communities(str(inv_uuid), communities)
+            logger.info(
+                "[%s] Community detection: %s communities (%s nodes)",
+                inv_uuid,
+                len(set(communities.values())) if communities else 0,
+                len(communities),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Community detection failed (non-fatal): %s", inv_uuid, exc
+            )
     except Exception as exc:
         logger.exception("[%s] Graph building failed: %s", inv_uuid, str(exc))
         return None
@@ -725,6 +765,7 @@ def _get_db_investigation(investigation_id: str) -> Any:
 
             db_sources_used = db_metadata.get("sources_used") or {}
             db_infra_clusters = db_metadata.get("infrastructure_clusters") or []
+            db_communities = db_metadata.get("communities") or {}
 
             sources_used = (
                 _sources_used_cache.get(str(inv.id))
@@ -736,6 +777,15 @@ def _get_db_investigation(investigation_id: str) -> Any:
                 or _infra_cluster_cache.get(investigation_id)
                 or db_infra_clusters
             )
+            communities = (
+                _communities_cache.get(str(inv.id))
+                or _communities_cache.get(investigation_id)
+                or db_communities
+            )
+            communities = {
+                str(node_id): int(community_id)
+                for node_id, community_id in communities.items()
+            }
 
             return {
                 "id": str(inv.id),
@@ -759,6 +809,8 @@ def _get_db_investigation(investigation_id: str) -> Any:
                 "paste_sources_used": paste_sources_used,
                 "infrastructure_clusters": infrastructure_clusters,
                 "sources_used": sources_used,
+                "communities": communities,
+                "community_count": len(set(communities.values())) if communities else 0,
                 "seeds_discovered": _count_discovered_seeds_for_investigation(str(inv.id)),
             }
     except HTTPException:
@@ -912,19 +964,34 @@ async def _get_investigation_model_choice(model: Optional[str]) -> tuple[str, An
 # ---------------------------------------------------------------------------
 
 
+# LLM retry bounds.  Unlike an enrichment client's documented interval, 65 s here
+# is a guess ("outlast a 1-minute window"), so it is a fallback rather than a
+# floor — a provider naming a shorter wait is honoured down to the minimum.
+_LLM_RATE_LIMIT_FALLBACK = 65.0
+_LLM_RATE_LIMIT_MIN_WAIT = 5.0
+_LLM_RATE_LIMIT_MAX_WAIT = 300.0
+
+
 def _parse_rate_limit_reset(exc: Exception) -> float:
-    """Extract reset timestamp from a 429 error and return seconds to wait."""
-    import time
-    import re
-    exc_str = str(exc)
-    # OpenRouter returns X-RateLimit-Reset as epoch milliseconds in metadata
-    match = re.search(r"'X-RateLimit-Reset':\s*'?(\d{13})'?", exc_str)
-    if match:
-        reset_ms = int(match.group(1))
-        wait = (reset_ms / 1000.0) - time.time() + 1.0  # +1s buffer
-        return max(wait, 5.0)
-    # Fallback: 65s to outlast a 60s/1-min rate-limit window
-    return 65.0
+    """
+    Seconds to wait after an LLM 429, from the provider's own headers.
+
+    Delegates to ``pacing.retry_after_seconds`` so there is one implementation
+    of "the server told us how long to wait" shared with the enrichment API
+    clients, rather than two that can drift.  The exception object is passed
+    through directly: LangChain buries the 429 headers in the exception message,
+    which that helper handles via its string branch.
+
+    The 65 s fallback outlasts a 60 s/1-min window when no header is present.
+    """
+    import pacing
+
+    return pacing.retry_after_seconds(
+        exc,
+        fallback=_LLM_RATE_LIMIT_FALLBACK,
+        floor=_LLM_RATE_LIMIT_MIN_WAIT,
+        max_wait=_LLM_RATE_LIMIT_MAX_WAIT,
+    )
 
 
 async def _llm_with_backoff(fn, *args, max_retries: int = 4, investigation_id: "uuid.UUID | None" = None, **kwargs):
@@ -2835,7 +2902,7 @@ async def get_investigation_entities(
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
         from db.session import get_session
-        from db.models import Entity, InvestigationEntityLink
+        from db.models import Entity, EntityRelationship, InvestigationEntityLink
         from db.queries import get_investigation_by_id_or_run
         from graph.builder import _make_node_id
         from utils.ioc_freshness import get_freshness_tag, get_freshness_display
@@ -2853,10 +2920,24 @@ async def get_investigation_entities(
                 sa_select(InvestigationEntityLink.entity_id)
                 .where(InvestigationEntityLink.investigation_id == inv.id)
             )
-            query = session.query(Entity).filter(
+            scoped_query = session.query(Entity).filter(
                 (Entity.investigation_id == inv.id)
                 | Entity.id.in_(linked_ids_select)
             )
+            # Scores are normalized against the complete investigation, not
+            # the current page or confidence/type filter.  This keeps ranking
+            # stable across pagination and makes it comparable to the CLI
+            # export for the same investigation.
+            score_entities = scoped_query.all()
+            relationships = (
+                session.query(EntityRelationship)
+                .filter(EntityRelationship.investigation_id == inv.id)
+                .all()
+            )
+            from utils.entity_priority import score_map
+            priority_by_id = score_map(score_entities, relationships)
+
+            query = scoped_query
             if entity_type:
                 query = query.filter(Entity.entity_type == entity_type)
             if min_confidence > 0.0:
@@ -2929,6 +3010,18 @@ async def get_investigation_entities(
                         "corroborating_sources": json.loads(e.corroborating_sources or '["dark_web_scrape"]'),
                         "cross_referenced": (getattr(e, "investigation_count", 1) or 1) > 1,
                         "graph_node_id": graph_node_id,
+                        "priority_score": priority_by_id.get(str(e.id), {}).get(
+                            "priority_score", 0.0
+                        ),
+                        "priority_score_components": priority_by_id.get(
+                            str(e.id), {}
+                        ).get("priority_score_components", {}),
+                        "priority_score_centrality_contribution": priority_by_id.get(
+                            str(e.id), {}
+                        ).get("priority_score_centrality_contribution", 0.0),
+                        "typed_relationship_degree": priority_by_id.get(
+                            str(e.id), {}
+                        ).get("typed_relationship_degree", 0),
                         "defanged": defang,
                     }
                 )
@@ -2961,8 +3054,9 @@ async def export_investigation_entities_csv(
 
     try:
         from db.session import get_session
-        from db.models import Entity, InvestigationEntityLink
+        from db.models import Entity, EntityRelationship, InvestigationEntityLink
         from db.queries import get_investigation_by_id_or_run
+        from utils.entity_priority import score_map
 
         with get_session() as session:
             inv = get_investigation_by_id_or_run(session, inv_uuid)
@@ -2983,6 +3077,12 @@ async def export_investigation_entities_csv(
                 )
                 .all()
             )
+            relationships = (
+                session.query(EntityRelationship)
+                .filter(EntityRelationship.investigation_id == inv.id)
+                .all()
+            )
+            priority_by_id = score_map(entities, relationships)
 
             output = io.StringIO()
             writer = csv.writer(output)
@@ -2990,6 +3090,7 @@ async def export_investigation_entities_csv(
                 "entity_type",
                 "canonical_value",
                 "confidence",
+                "priority_score",
                 "occurrence_count",
                 "first_seen_page",
                 "context_snippet",
@@ -3011,6 +3112,7 @@ async def export_investigation_entities_csv(
                     e.entity_type,
                     e.canonical_value or e.value,
                     e.confidence,
+                    priority_by_id.get(str(e.id), {}).get("priority_score", 0.0),
                     1,
                     source_url,
                     context[:500],
@@ -3080,6 +3182,27 @@ def _rebuild_networkx_graph(nodes: list, edges: list) -> "nx.DiGraph":
     return G
 
 
+def _detect_communities_for_graph(graph_obj) -> dict[str, int]:
+    """Run the shared detector over the complete API graph.
+
+    ``_rebuild_networkx_graph`` is the API representation adapter.  It is
+    correct here because it receives the full ``to_json`` graph, not the
+    endpoint's presentation slice.  Its directed graph is equivalent to the
+    CLI helper's simple undirected graph for detection: ``detect_communities``
+    projects either input to an undirected graph before running the algorithm.
+    """
+    from graph.builder import detect_communities
+    from graph.export import to_json
+
+    graph_data = to_json(graph_obj)
+    rebuilt = _rebuild_networkx_graph(graph_data["nodes"], graph_data["edges"])
+    partition = detect_communities(rebuilt)
+    return {
+        str(node_id): int(community_id)
+        for node_id, community_id in partition.items()
+    }
+
+
 @router.get("/{investigation_id}/graph")
 async def get_investigation_graph(
     investigation_id: str,
@@ -3106,6 +3229,20 @@ async def get_investigation_graph(
             if graph_status not in ("built", "complete", "skipped_overflow", "no_data"):
                 return {"status": "pending"}
             internal_id = inv.id
+            graph_communities = _communities_cache.get(str(internal_id), {})
+            if not graph_communities:
+                graph_metadata = getattr(inv, "metadata_json", None)
+                if isinstance(graph_metadata, str):
+                    try:
+                        graph_metadata = json.loads(graph_metadata)
+                    except (ValueError, TypeError):
+                        graph_metadata = {}
+                if isinstance(graph_metadata, dict):
+                    graph_communities = graph_metadata.get("communities") or {}
+            graph_communities = {
+                str(node_id): int(community_id)
+                for node_id, community_id in graph_communities.items()
+            }
 
         graph = build_graph_from_db_cached(investigation_id=internal_id) if not force_rebuild else build_graph_from_db(investigation_id=internal_id)
         graph_data = to_json(graph)
@@ -3119,6 +3256,12 @@ async def get_investigation_graph(
             "summary_stats": summary_stats(graph),
             "nodes": nodes,
             "edges": edges,
+            "communities": graph_communities,
+            "community_count": (
+                len(set(graph_communities.values()))
+                if graph_communities
+                else 0
+            ),
             "visualization_html": viz_html,
         }
     except HTTPException:

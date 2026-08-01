@@ -65,6 +65,11 @@ def _badges_for_entity(entity: dict) -> list[str]:
         badges.append("[Malicious]")
     if "fresh" in tags:
         badges.append("[Fresh]")
+    freshness = entity.get("freshness_tag")
+    if freshness and freshness != "unknown" and not any(
+        freshness in badge.lower() for badge in badges
+    ):
+        badges.append(f"[{freshness.title()}]")
     return badges
 
 
@@ -114,13 +119,13 @@ class EntityBrowserApp(App):
             counts[r["entity_a_id"]] += 1
             counts[r["entity_b_id"]] += 1
         self.connection_count = counts
-        # Stable secondary sort key so the table reads predictably even when
-        # community colouring is the primary visual cue.
+        # Priority is the primary user-facing sort.  Community and connection
+        # count remain stable secondary context, never the ranking signal.
         self.entities.sort(
             key=lambda e: (
+                -(e.get("priority_score") or 0),
                 self.communities.get(str(e.get("id")), -1),
                 -counts.get(e["id"], 0),
-                -(e.get("confidence") or 0),
             )
         )
 
@@ -138,7 +143,7 @@ class EntityBrowserApp(App):
     def on_mount(self) -> None:
         self.title = f"voidaccess — {self._title_text}"
         table: DataTable = self.query_one("#entity_table", DataTable)
-        table.add_columns("Cm", "T", "Value", "Conn", "Badges")
+        table.add_columns("Cm", "T", "Value", "Priority", "Conn", "Badges")
         self._populate_table()
 
     # -- helpers -----------------------------------------------------------
@@ -169,7 +174,8 @@ class EntityBrowserApp(App):
             # the entity isn't in any community (older investigations).
             cm = self.communities.get(str(e.get("id")))
             cm_label = f"[cyan]C{cm}[/cyan]" if cm is not None else ""
-            table.add_row(cm_label, glyph, val, str(conn), badges, key=e["id"])
+            priority = f"{(e.get('priority_score') or 0):.3f}"
+            table.add_row(cm_label, glyph, val, priority, str(conn), badges, key=e["id"])
 
     # -- input handlers ----------------------------------------------------
 
@@ -237,6 +243,10 @@ class EntityBrowserApp(App):
         lines.append(
             f"Type: {entity['entity_type']}  |  Confidence: "
             f"{(entity.get('confidence') or 0):.2f}"
+        )
+        lines.append(
+            f"Priority: {(entity.get('priority_score') or 0):.3f}  |  "
+            f"Freshness: {entity.get('freshness_tag') or 'unknown'}"
         )
         tags = entity.get("corroborating_sources") or ""
         if tags:

@@ -9,10 +9,11 @@ from typing import Optional
 
 import aiohttp
 import requests
-from aiohttp_socks import ProxyConnector
 from bs4 import BeautifulSoup
 
 from config import TOR_PROXY_HOST, TOR_PROXY_PORT
+from scraper import tor_pool
+from search import tor_isolation
 from db.search_engine_stats import (
     engine_priority_score,
     get_all_engine_stats_async,
@@ -26,9 +27,6 @@ from search.engine_catalog import DEFAULT_SEARCH_ENGINES, SEARCH_ENGINES
 from search import config as search_config
 
 logger = logging.getLogger(__name__)
-
-# Compatibility exports; runtime reads use the shared config module below.
-ENGINE_TIMEOUT = search_config.ENGINE_TIMEOUT
 
 ENGINE_WEIGHTS = {
     "darksearch": 1.0,
@@ -59,6 +57,8 @@ USER_AGENTS = [
 _ONION_URL_RE = re.compile(r'https?:\/\/[a-z0-9.]+\.onion', re.IGNORECASE)
 
 MAX_CONCURRENT = 10
+# Compatibility exports of the `normal` baseline; every runtime read goes
+# through search_config's pacing-aware accessors instead.
 SEARCH_TIMEOUT = search_config.SEARCH_TIMEOUT
 ENGINE_RETRY_COUNT = search_config.ENGINE_RETRY_COUNT
 
@@ -91,37 +91,29 @@ def _is_onion_url(url: str) -> bool:
     return bool(_ONION_URL_RE.search(url))
 
 
-def _tor_aiohttp_connector() -> ProxyConnector:
-    """SOCKS5 with remote DNS for aiohttp-socks with connection pooling."""
-    return ProxyConnector.from_url(
-        f"socks5://{TOR_PROXY_HOST}:{TOR_PROXY_PORT}",
-        rdns=True,
-        limit=10,
-        limit_per_host=2,
-    )
-
-
-_search_session: Optional[aiohttp.ClientSession] = None
-
-
 def get_search_session() -> aiohttp.ClientSession:
-    """Return a cached session configured for Tor SOCKS5 proxy."""
-    global _search_session
-    if _search_session is None or _search_session.closed:
-        connector = _tor_aiohttp_connector()
-        _search_session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=aiohttp.ClientTimeout(total=search_config.SEARCH_TIMEOUT),
-        )
-    return _search_session
+    """
+    Return a Tor-proxied session for search use.
+
+    Kept for backward compatibility.  This is the pool's *shared un-isolated*
+    bucket, because it names no target and so has no isolation key to derive
+    one from.  Per-engine isolation happens in `_search_async`, which acquires a
+    session keyed on each engine's hostname — prefer
+    `search.tor_isolation.acquire_engine_session` in new code.
+    """
+    return tor_pool.get_tor_session_cached()
 
 
 async def close_search_session() -> None:
-    """Close cached search session - call on shutdown."""
-    global _search_session
-    if _search_session and not _search_session.closed:
-        await _search_session.close()
-        _search_session = None
+    """
+    Close search's Tor sessions — call on shutdown.
+
+    Search no longer owns a session of its own; it borrows from the shared pool,
+    so this drains that pool.  Safe to call alongside
+    `scraper.scrape.close_cached_sessions()` (which drains the same pool) — the
+    second call simply finds it empty.
+    """
+    await tor_pool.close_pool()
 
 
 async def fetch_with_timeout(
@@ -131,7 +123,7 @@ async def fetch_with_timeout(
     """Fetch a URL with timeout using the provided or cached session."""
     if session is None:
         session = get_search_session()
-    return await session.get(url, timeout=aiohttp.ClientTimeout(total=search_config.SEARCH_TIMEOUT))
+    return await session.get(url, timeout=aiohttp.ClientTimeout(total=search_config.search_timeout()))
 
 
 async def _fetch_engine(
@@ -147,11 +139,11 @@ async def _fetch_engine(
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
     async with semaphore:
-        for attempt in range(search_config.ENGINE_RETRY_COUNT + 1):
+        for attempt in range(search_config.engine_retry_count() + 1):
             try:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=search_config.SEARCH_TIMEOUT)) as resp:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=search_config.search_timeout())) as resp:
                     if resp.status != 200:
-                        if attempt < search_config.ENGINE_RETRY_COUNT:
+                        if attempt < search_config.engine_retry_count():
                             await asyncio.sleep(search_config.retry_backoff(attempt))
                             continue
                         return EngineResult(
@@ -179,12 +171,12 @@ async def _fetch_engine(
                     return EngineResult(name=name, links=links)
 
             except asyncio.TimeoutError:
-                if attempt < search_config.ENGINE_RETRY_COUNT:
+                if attempt < search_config.engine_retry_count():
                     await asyncio.sleep(search_config.retry_backoff(attempt))
                     continue
                 return EngineResult(name=name, links=[], error="timeout")
             except Exception as e:
-                if attempt < search_config.ENGINE_RETRY_COUNT:
+                if attempt < search_config.engine_retry_count():
                     await asyncio.sleep(search_config.retry_backoff(attempt))
                     continue
                 return EngineResult(name=name, links=[], error=str(e))
@@ -255,15 +247,22 @@ async def _search_async(
             continue
         active_engines.append(engine)
 
-    search_session = get_search_session()
-
+    # No single shared search session.  Each engine borrows its own from the
+    # shared Tor pool, keyed on its hostname, so the 16 onion engines land on 16
+    # circuits instead of all sharing one — see search/tor_isolation.py.
     async def run_engine(engine: dict) -> EngineResult:
         name = engine["name"]
         timeout = get_engine_timeout(stats_by_name.get(name, _default_stats(name)))
+        engine_url = engine["url"].format(query=query)
 
         async def fetch_with_engine_session():
-            result = await _fetch_engine(engine, query, search_session, semaphore)
-            return result
+            # Released however the fetch ends, including the wait_for timeout
+            # below, which cancels this coroutine and so runs the finally.
+            session, iso_key = tor_isolation.acquire_engine_session(engine_url)
+            try:
+                return await _fetch_engine(engine, query, session, semaphore)
+            finally:
+                tor_isolation.release_engine_session(iso_key)
 
         start = time.monotonic()
         try:

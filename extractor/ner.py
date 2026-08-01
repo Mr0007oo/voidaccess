@@ -21,6 +21,7 @@ import re
 
 from extractor import entity_shape as _shape
 from extractor import gazetteer
+from extractor.software_suppression import should_suppress_organization
 
 logger = logging.getLogger(__name__)
 
@@ -488,6 +489,18 @@ def extract_named_entities(text: str) -> dict[str, list[str]]:
         if nlp is not None:
             text_lower = text.lower()
             has_threat_context = any(w in text_lower for w in _THREAT_CONTEXT)
+            if not has_threat_context:
+                # Short reports/README files may have no generic threat word,
+                # but a gazetteer-confirmed actor can still be emitted by
+                # spaCy as ORG (for example, ``Lazarus Group``). Inspect only
+                # for known actor spans outside the broader organization gate.
+                doc = nlp(text[:100_000])  # cap for performance
+                for ent in doc.ents:
+                    if ent.label_ != "ORG":
+                        continue
+                    candidate = ent.text.strip()
+                    if gazetteer.category_of(candidate) == "threat_actor":
+                        result[THREAT_ACTOR_HANDLE].append(candidate)
             if has_threat_context:
                 doc = nlp(text[:100_000])  # cap for performance
                 orgs: list[str] = []
@@ -510,10 +523,14 @@ def extract_named_entities(text: str) -> dict[str, list[str]]:
                         if category == "malware":
                             result[MALWARE_FAMILY].append(candidate)
                             continue
+                        if should_suppress_organization(candidate, text):
+                            continue
                         # Accept only if it has organisation shape (proper-noun
                         # structure, org suffix, brand casing) — not merely
                         # "absent from a denylist".
-                        if _shape.evaluate(ORGANIZATION_NAME, candidate).accept:
+                        if _shape.evaluate(
+                            ORGANIZATION_NAME, candidate, context_text=text
+                        ).accept:
                             orgs.append(candidate)
                 result[ORGANIZATION_NAME] = _dedup(orgs)
                 result[THREAT_ACTOR_HANDLE] = _dedup(result[THREAT_ACTOR_HANDLE])

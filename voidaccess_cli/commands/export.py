@@ -11,6 +11,7 @@ import csv
 import io
 import json
 import re as _re
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -193,8 +194,16 @@ def _render(
 
     if fmt == "sigma":
         from export import export_sigma_rules
-        rules_yaml = export_sigma_rules(inv_uuid)
-        return rules_yaml if isinstance(rules_yaml, str) else "\n---\n".join(rules_yaml), ".yml"
+        # The Sigma exporter writes one YAML file per rule and therefore needs
+        # an output directory.  The CLI itself promises one output artifact,
+        # so collect those files in a temporary directory and combine them.
+        with tempfile.TemporaryDirectory(prefix="voidaccess-sigma-") as temp_dir:
+            rule_paths = export_sigma_rules(inv_uuid, temp_dir)
+            rules_yaml = "\n---\n".join(
+                Path(rule_path).read_text(encoding="utf-8")
+                for rule_path in rule_paths
+            )
+        return rules_yaml, ".yml"
 
     raise typer.BadParameter(f"Unknown format: {fmt}")
 
@@ -307,7 +316,7 @@ def _csv_from_data(data: dict) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(
-        ["entity_type", "value", "canonical_value", "confidence",
+        ["entity_type", "value", "canonical_value", "confidence", "priority_score",
          "extraction_method", "corroborating_sources", "investigation_count",
          "context_snippet"]
     )
@@ -318,6 +327,7 @@ def _csv_from_data(data: dict) -> str:
                 e.get("value", ""),
                 e.get("canonical_value", ""),
                 e.get("confidence", ""),
+                e.get("priority_score", ""),
                 e.get("extraction_method", ""),
                 e.get("corroborating_sources", ""),
                 e.get("investigation_count", 1),

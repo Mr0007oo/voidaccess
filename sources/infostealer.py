@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 import aiohttp
 
+import pacing
 from utils.enrichment_cache import DEFAULT_TTL, get_enrichment_cache
 
 logger = logging.getLogger(__name__)
@@ -47,9 +48,22 @@ _CAVALIER_BASE = "https://cavalier.hudsonrock.com/api/json/v2/osint-tools"
 _EMAIL_ENDPOINT = f"{_CAVALIER_BASE}/search-by-email"
 _DOMAIN_ENDPOINT = f"{_CAVALIER_BASE}/search-by-domain"
 
-# Gentle pacing for a free source — bound concurrency and sleep between calls.
+# Courtesy pacing for a free source.  Hudson Rock publishes NO rate limit for
+# the free osint-tools endpoints (checked against docs.hudsonrock.com
+# 2026-07-29: getting-started, permissions and the API reference are all
+# silent), so 2 req/s is VoidAccess's own chosen ceiling rather than a quota we
+# are obliged to respect — see the courtesy classification in docs/BACKLOG.md.
+#
+# It still goes through pacing.rate_limit_delay() so the concurrency bound and
+# the delay stay one derived mechanism instead of two independently-tuned
+# numbers that multiply against each other.
 _HR_MAX_CONCURRENCY = 2
-_HR_REQUEST_DELAY = 0.5
+_HR_MIN_INTERVAL = 0.5            # self-imposed: 2 req/s aggregate
+
+
+def _hr_delay() -> float:
+    """Per-worker delay holding the aggregate Hudson Rock rate at ≤ 2 req/s."""
+    return pacing.rate_limit_delay(_HR_MIN_INTERVAL, _HR_MAX_CONCURRENCY)
 
 _hr_semaphore: Optional[asyncio.Semaphore] = None
 
@@ -111,18 +125,31 @@ async def _get_json(url: str, params: dict) -> tuple[Optional[Any], str]:
     try:
         timeout = aiohttp.ClientTimeout(total=20)
         async with _get_hr_semaphore():
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.get(url, params=params) as resp:
-                    if resp.status == 404:
-                        return None, "not_found"
-                    if resp.status == 429:
-                        logger.warning("infostealer: Hudson Rock — rate limited")
-                        return None, "rate_limited"
-                    if resp.status != 200:
-                        logger.debug("infostealer: Hudson Rock → HTTP %s", resp.status)
-                        return None, "error"
-                    text = await resp.text()
-            await asyncio.sleep(_HR_REQUEST_DELAY)
+            # `finally` inside the semaphore: a 404/429/error return must still
+            # pay the delay (otherwise a run of 429s speeds us up rather than
+            # backing off), and the slot must stay held while we sleep so the
+            # concurrency arithmetic in rate_limit_delay() holds.
+            server_wait = 0.0
+            try:
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                    async with session.get(url, params=params) as resp:
+                        if resp.status == 404:
+                            return None, "not_found"
+                        if resp.status == 429:
+                            server_wait = pacing.retry_after_seconds(
+                                resp.headers, _hr_delay()
+                            )
+                            logger.warning(
+                                "infostealer: Hudson Rock — rate limited, "
+                                "backing off %.1fs", server_wait,
+                            )
+                            return None, "rate_limited"
+                        if resp.status != 200:
+                            logger.debug("infostealer: Hudson Rock → HTTP %s", resp.status)
+                            return None, "error"
+                        text = await resp.text()
+            finally:
+                await asyncio.sleep(max(_hr_delay(), server_wait))
     except asyncio.TimeoutError:
         logger.debug("infostealer: Hudson Rock timed out")
         return None, "error"

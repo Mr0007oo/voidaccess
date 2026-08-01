@@ -66,12 +66,44 @@ def run(
             "affects Tor or .onion."
         ),
     ),
+    pace: Optional[str] = typer.Option(
+        None,
+        "--pace",
+        help=(
+            "quiet | normal | aggressive — how patient and polite this run is with "
+            "every scraped target (Tor, clearnet, search engines, source scrapers, "
+            "the JS renderer). 'quiet' uses longer timeouts, longer gaps between "
+            "retries, fewer retries and much longer politeness delays; 'aggressive' "
+            "trades completeness for wall-clock. One-shot override; does not touch "
+            "on-disk config, and wins over the persistent default set by "
+            "`voidaccess configure pace`. Defaults to that persisted value, or "
+            "'normal' if none is set."
+        ),
+    ),
     depth: str = typer.Option("normal", "--depth", help="shallow | normal | deep"),
     fmt: str = typer.Option("both", "--format", help="json | md | both"),
     quiet: bool = typer.Option(False, "--quiet", help="No live display; print final summary only"),
 ) -> None:
     """Run an investigation: query → search → scrape → extract → enrich → report."""
     from voidaccess_cli import config as cli_config
+
+    # --pace must be resolved BEFORE apply_env(): apply_env() only sets
+    # VOIDACCESS_PACE when it is not already set, which is exactly what makes
+    # the one-shot flag beat the persisted config for this invocation. Same
+    # precedence rule as --use-proxies vs `configure proxy --enable`.
+    #
+    # A bad value is a hard error here, unlike the library-side silent
+    # fallback: at the CLI the user is right there to fix the typo, and
+    # silently running at a different pace than they asked for would make the
+    # measured behaviour of the run a lie.
+    if pace is not None:
+        if not cli_config.PACE_PROFILES or pace.strip().lower() not in cli_config.PACE_PROFILES:
+            console.print(
+                f"[red]Invalid pace:[/red] {pace}. "
+                f"Choose one of: {', '.join(cli_config.PACE_PROFILES)}."
+            )
+            raise typer.Exit(code=2)
+        os.environ[cli_config.PACE_ENV_VAR] = pace.strip().lower()
 
     cli_config.apply_env()
 
@@ -167,6 +199,7 @@ def run(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        from voidaccess_cli.adapters.sqlite import DatabaseSchemaError
         asyncio.run(
             _run_investigation(
                 query=query,
@@ -179,6 +212,9 @@ def run(
                 quiet=quiet,
             )
         )
+    except DatabaseSchemaError as exc:
+        console.print(f"[red]Database schema error:[/red] {exc}")
+        raise typer.Exit(code=1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user.[/yellow]")
         raise typer.Exit(code=130)
@@ -257,6 +293,129 @@ CLI_PHASE_TIMEOUTS: dict[str, int] = {
 }
 
 
+def _clearnet_page_text(page: dict) -> str:
+    """Return the text field used both for scoring and later extraction."""
+    return (
+        page.get("text")
+        or page.get("content")
+        or page.get("cleaned_text")
+        or page.get("text_content")
+        or ""
+    )
+
+
+def _append_enrichment_pages_to_manifest(
+    scraped_pages: list[dict],
+    enrichment_pages: list[dict],
+) -> list[dict]:
+    """Add enrichment page records to the final page manifest.
+
+    Enrichment pages are extracted in a second pass, after the core scraped
+    pages have been assembled.  They still create entities and co-occurrence
+    edges, so omitting them from ``pages_scraped`` makes the user-facing page
+    count disagree with the graph's provenance.  Keep one manifest entry per
+    URL while preserving the existing core-page records when a URL overlaps.
+    """
+    seen_urls = {
+        str(page.get("url") or page.get("link") or "")
+        for page in scraped_pages
+        if page.get("url") or page.get("link")
+    }
+    for page in enrichment_pages:
+        url = str(page.get("url") or page.get("link") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        scraped_pages.append(
+            {
+                "url": url,
+                "text": _clearnet_page_text(page),
+                "source": page.get("source") or page.get("source_type") or "enrichment",
+                "source_type": page.get("source_type"),
+            }
+        )
+        seen_urls.add(url)
+    return scraped_pages
+
+
+def _annotate_no_llm_dependency_relationships(
+    pages: list[dict],
+    route: str,
+) -> list[dict]:
+    """Run dependency extraction for connectors that bypass ``scrape.py``."""
+    from extractor.dependency_relationship import (
+        extract_dependency_relationships_from_page,
+    )
+
+    annotated: list[dict] = []
+    for page in pages:
+        item = dict(page)
+        text = _clearnet_page_text(item)
+        claims = extract_dependency_relationships_from_page(text) if text else []
+        item["dependency_relationships"] = claims
+        item["dependency_extraction_invoked"] = True
+        item["dependency_extraction_route"] = route
+        logger.info(
+            "Dependency extractor invoked for %s route: %d chars, %d claims",
+            route,
+            len(text),
+            len(claims),
+        )
+        annotated.append(item)
+    return annotated
+
+
+def _filter_clearnet_pages(
+    pages: list[dict],
+    query: str,
+    top_n: int,
+    llm: Any = None,
+) -> list[dict]:
+    """Filter side-source pages without changing the Tor candidate path."""
+    candidates: list[dict] = []
+    unique_pages: list[dict] = []
+    seen_urls: set[str] = set()
+    for page in pages:
+        url = page.get("url") or page.get("link")
+        text = _clearnet_page_text(page)
+        if not url or not text or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        unique_pages.append(page)
+        candidates.append({
+            "link": url,
+            "title": page.get("title") or "",
+            "content": text,
+        })
+
+    if not unique_pages:
+        return []
+
+    try:
+        if llm is None:
+            from voidaccess.llm import _heuristic_filter
+            picked = _heuristic_filter(candidates, query, top_n)
+            return [unique_pages[index - 1] for index in picked]
+
+        from voidaccess.llm import filter_results
+        selected = filter_results(llm, query, candidates, top_n) or candidates
+        selected_urls = {
+            item.get("link") or item.get("url")
+            for item in selected
+        }
+        return [
+            page for page in unique_pages
+            if (page.get("url") or page.get("link")) in selected_urls
+        ]
+    except Exception as exc:
+        # Side-source enrichment is best effort; retain the previous behavior
+        # if a secondary filter pass fails.
+        logger.warning(
+            "Clearnet relevance filter failed (%s); retaining all side pages",
+            exc,
+        )
+        return unique_pages
+
+
 async def _cli_run_with_timeout(coro, timeout_seconds: int, phase_name: str, investigation_id: str):
     """Phase 6.2 timeout wrapper for the CLI.
 
@@ -328,6 +487,11 @@ async def _run_investigation(
 
     # --- DB init ----------------------------------------------------------
     sqlite_adapter.init_db()
+    # Validate the migrated schema before Tor/LLM/network work and before the
+    # investigation row is created.  A stale SQLite schema used to let every
+    # entity merge fail inside isolated savepoints, leaving a silent running
+    # investigation with no report.
+    sqlite_adapter.validate_schema()
     _patch_llm_extraction_cache(sqlite_adapter)
 
     # Phase 6.3 — clean up CLI investigations that were interrupted by a
@@ -568,6 +732,27 @@ async def _run_investigation(
         filtered_links = (search_links or [])[:filter_top_n]
         display.update_step("Filtering results", "skip" if no_llm else "ok", f"{len(filtered_links)} kept")
 
+    # Keep the existing Tor/onion list and scoring path untouched. Clearnet
+    # source pages are scored separately before they reach the merge below.
+    clearnet_pages = [
+        page
+        for extra in (paste_pages, github_pages, gitlab_pages, rss_pages)
+        for page in extra
+    ]
+    filtered_clearnet_pages = await asyncio.to_thread(
+        _filter_clearnet_pages,
+        clearnet_pages,
+        refined or query,
+        filter_top_n,
+        llm,
+    )
+
+    display.update_step(
+        "Filtering results",
+        "ok" if (search_links or clearnet_pages) else ("skip" if no_llm else "ok"),
+        f"{len(filtered_links) + len(filtered_clearnet_pages)} kept",
+    )
+
     _metric_finish("source_gathering")
 
     # --- Step 4 — scrape pages -------------------------------------------
@@ -590,13 +775,28 @@ async def _run_investigation(
                     filtered_links,
                     max_workers=preset["max_workers"],
                     investigation_id=investigation_id,
+                    extract_typed_relationships=no_llm,
                 )
 
             results = await _scrape_with_progress()
             display.update_current_url("")
+            relationship_claims_by_url = getattr(
+                results, "relationship_claims_by_url", {}
+            )
             for url, text in results.items():
                 if text:
-                    scraped_pages.append({"url": url, "text": text, "source": "tor_search"})
+                    page_record = {
+                        "url": url,
+                        "text": text,
+                        "source": "tor_search",
+                        "dependency_extraction_invoked": no_llm,
+                        "dependency_extraction_route": "core-scraper" if no_llm else None,
+                    }
+                    if relationship_claims_by_url.get(url):
+                        page_record["dependency_relationships"] = (
+                            relationship_claims_by_url[url]
+                        )
+                    scraped_pages.append(page_record)
             _fetched = sum(1 for _t in results.values() if _t)
             pipeline_metrics.record_scraping(
                 attempted=len(filtered_links),
@@ -631,20 +831,51 @@ async def _run_investigation(
         logger.debug("Seed discovery from CLI pages failed (non-fatal): %s", exc)
         display.update_step("Discovering seeds", "skip", "no new seeds")
 
-    # Merge in clearnet pages (paste/github/gitlab/rss)
-    for extra in (paste_pages, github_pages, gitlab_pages, rss_pages):
-        for page in extra:
-            url = page.get("url") or page.get("link")
-            text = page.get("text") or page.get("content") or page.get("cleaned_text") or page.get("text_content") or ""
-            if not url or not text:
-                continue
-            scraped_pages.append({"url": url, "text": text, "source": page.get("source", "clearnet")})
+    # Merge only clearnet pages that passed the relevance filter.
+    if no_llm:
+        filtered_clearnet_pages = _annotate_no_llm_dependency_relationships(
+            filtered_clearnet_pages,
+            "clearnet-side-source",
+        )
+    for page in filtered_clearnet_pages:
+        url = page.get("url") or page.get("link")
+        text = _clearnet_page_text(page)
+        if not url or not text:
+            continue
+        scraped_pages.append({
+            "url": url,
+            "text": text,
+            "source": page.get("source") or page.get("source_type") or "clearnet",
+            "source_type": page.get("source_type"),
+            "dependency_relationships": page.get("dependency_relationships", []),
+            "dependency_extraction_invoked": page.get(
+                "dependency_extraction_invoked", False
+            ),
+            "dependency_extraction_route": page.get("dependency_extraction_route"),
+        })
 
+    if no_llm:
+        telegram_pages = _annotate_no_llm_dependency_relationships(
+            telegram_pages,
+            "telegram-side-source",
+        )
     for page in telegram_pages:
         url = page.get("url") or ""
         text = page.get("text") or ""
         if url and text:
-            scraped_pages.append({"url": url, "text": text, "source": "telegram", "source_type": "telegram"})
+            scraped_pages.append({
+                "url": url,
+                "text": text,
+                "source": "telegram",
+                "source_type": "telegram",
+                "dependency_relationships": page.get("dependency_relationships", []),
+                "dependency_extraction_invoked": page.get(
+                    "dependency_extraction_invoked", False
+                ),
+                "dependency_extraction_route": page.get(
+                    "dependency_extraction_route"
+                ),
+            })
 
     from utils.content_dedup import deduplicate_page_records
     scraped_pages = deduplicate_page_records(scraped_pages)
@@ -824,6 +1055,12 @@ async def _run_investigation(
             )
         except Exception as exc:
             console.print(f"[grey50]Enrichment extraction failed: {exc}[/grey50]")
+    # Enrichment pages participate in entity extraction and graph construction
+    # just like the core scraped pages.  Add them to the final manifest before
+    # page IDs, page_count, and the JSON payload are finalized; otherwise the
+    # report's page count describes only the 15 core RSS pages while the graph
+    # also contains enrichment-provenance entities and edges.
+    _append_enrichment_pages_to_manifest(scraped_pages, enrichment_pages)
     _metric_finish("enrichment")
 
     # --- Step 6.9 — Update persistent actor profiles (non-blocking) -------
@@ -888,8 +1125,14 @@ async def _run_investigation(
             timeout=CLI_PHASE_TIMEOUTS["graph_build"],
         )
         if no_llm:
+            persisted_relationships = sqlite_adapter.get_relationships(investigation_id)
+            typed_count = sum(
+                1
+                for relationship in persisted_relationships
+                if relationship.get("relationship_type") != "CO_APPEARED_ON"
+            )
             graph_detail = (
-                f"{edges_written} relationships; typed relationships skipped: --no-llm"
+                f"{edges_written} relationships; typed relationships: {typed_count}"
             )
         elif edges_written == 0:
             graph_detail = "0 relationships found (build completed; none detected)"
@@ -1006,6 +1249,20 @@ async def _run_investigation(
     json_path = out_dir / f"{slug}-{ts}.json"
     md_path = out_dir / f"{slug}-{ts}.md"
 
+    dependency_invoked_pages = [
+        page for page in scraped_pages
+        if page.get("dependency_extraction_invoked")
+    ]
+    dependency_claims = [
+        claim
+        for page in dependency_invoked_pages
+        for claim in (page.get("dependency_relationships") or [])
+    ]
+    dependency_routes: dict[str, int] = {}
+    for page in dependency_invoked_pages:
+        route = page.get("dependency_extraction_route") or "unknown"
+        dependency_routes[route] = dependency_routes.get(route, 0) + 1
+
     payload = {
         "id": investigation_id,
         "query": query,
@@ -1017,6 +1274,11 @@ async def _run_investigation(
         "sources_used": sources_used,
         "entities": final_entities,
         "relationships": final_relationships,
+        "dependency_extraction": {
+            "invoked_pages": len(dependency_invoked_pages),
+            "claims_before_persistence": len(dependency_claims),
+            "routes": dependency_routes,
+        },
         # Keep the lightweight output manifest needed to resolve relationship
         # provenance.  Text is intentionally omitted; the DB remains the
         # source of page content while each relationship can point to a real
@@ -1521,14 +1783,15 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     for etype in sorted(by_type.keys()):
         rows = by_type[etype]
         lines.append(f"\n### {etype} ({len(rows)})")
-        lines.append("| Value | Confidence | Method | Tags |")
-        lines.append("|---|---|---|---|")
+        lines.append("| Value | Priority | Confidence | Method | Tags |")
+        lines.append("|---|---|---|---|---|")
         for r in rows[:50]:
             tags = (r.get("corroborating_sources") or "").replace("|", "/")
             val = entity_display_id(r).replace("|", "/")
             conf = r.get("confidence")
             lines.append(
-                f"| {val} | {conf:.2f} | {r.get('extraction_method') or ''} | {tags} |"
+                f"| {val} | {(r.get('priority_score') or 0):.3f} | "
+                f"{conf:.2f} | {r.get('extraction_method') or ''} | {tags} |"
             )
         if len(rows) > 50:
             lines.append(f"\n_…and {len(rows) - 50} more (see JSON)_")

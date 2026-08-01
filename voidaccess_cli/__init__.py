@@ -1,3 +1,3 @@
 """voidaccess CLI — dark-web OSINT command-line interface."""
 
-__version__ = "1.9.4"
+__version__ = "2.0.0"

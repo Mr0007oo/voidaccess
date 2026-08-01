@@ -42,6 +42,7 @@ from typing import Any, Optional
 
 import aiohttp
 
+import pacing
 from utils.enrichment_cache import DEFAULT_TTL, get_enrichment_cache
 
 logger = logging.getLogger(__name__)
@@ -51,14 +52,35 @@ MAX_EMAILS = 30
 XPOSEDORNOT_BASE_URL = "https://api.xposedornot.com/v1"
 LEAKCHECK_PUBLIC_URL = "https://leakcheck.io/api/public"
 
-# Gentle, source-appropriate pacing. XposedOrNot documents ~2 req/s per IP plus
-# hourly/daily caps; LeakCheck's public tier is unauthenticated and rate-limited.
-# We bound concurrency AND sleep after each request (mirroring the abuse.ch-style
-# pacing used elsewhere) so we never hammer a free source into an IP ban.
+# Provider-dictated pacing, verified against both providers' live docs
+# 2026-07-29.  The concurrency bound and the per-request delay are ONE
+# mechanism, derived together by pacing.rate_limit_delay(): N workers each
+# sleeping the documented interval would produce N times the documented rate,
+# so the per-worker delay is (interval x concurrency) and the slot is held for
+# the duration of the sleep.  Tuning either number alone reintroduces the
+# multiplication bug.
+#
+# XposedOrNot: 2 req/s per IP on /check-email  →  0.5 s interval.  Its 25/hr
+# and 100/day caps are NOT expressible as a delay (see docs/BACKLOG.md
+# pattern 1).
+# LeakCheck public tier: 1 RPS documented (docs.leakcheck.io).  Was 0.4 s here,
+# i.e. 2.5x over the documented limit even at `normal`.
 _XON_MAX_CONCURRENCY = 2
-_XON_REQUEST_DELAY = 0.5          # seconds; keeps effective rate ≲ 2 req/s
+_XON_MIN_INTERVAL = 0.5           # documented: 2 req/s per IP
 _LEAKCHECK_MAX_CONCURRENCY = 2
-_LEAKCHECK_REQUEST_DELAY = 0.4
+_LEAKCHECK_MIN_INTERVAL = 1.1     # documented: 1 RPS, + margin
+
+
+def _xon_delay() -> float:
+    """Per-worker delay holding the aggregate XposedOrNot rate at ≤ 2 req/s."""
+    return pacing.rate_limit_delay(_XON_MIN_INTERVAL, _XON_MAX_CONCURRENCY)
+
+
+def _leakcheck_delay() -> float:
+    """Per-worker delay holding the aggregate LeakCheck rate at < 1 req/s."""
+    return pacing.rate_limit_delay(
+        _LEAKCHECK_MIN_INTERVAL, _LEAKCHECK_MAX_CONCURRENCY
+    )
 
 _xon_semaphore: Optional[asyncio.Semaphore] = None
 _leakcheck_semaphore: Optional[asyncio.Semaphore] = None
@@ -157,23 +179,42 @@ async def query_xposedornot(email: str) -> dict[str, Any]:
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with _get_xon_semaphore():
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.get(
-                    f"{XPOSEDORNOT_BASE_URL}/check-email/{email}"
-                ) as resp:
-                    if resp.status == 404:
-                        return empty
-                    if resp.status == 429:
-                        logger.warning("breach_lookup: XposedOrNot — rate limited")
-                        return {**empty, "source": "xposedornot_rate_limited"}
-                    if resp.status != 200:
-                        logger.debug(
-                            "breach_lookup: XposedOrNot → HTTP %s for %s",
-                            resp.status, _safe_log_email(email),
-                        )
-                        return {**empty, "source": "xposedornot_error"}
-                    data = await resp.json(content_type=None)
-            await asyncio.sleep(_XON_REQUEST_DELAY)
+            # The delay lives in a `finally` INSIDE the semaphore, deliberately:
+            #  - `finally` so a 404/429/error return still pays it.  Returning
+            #    early on non-200 used to skip the sleep entirely, which meant a
+            #    run of 429s — exactly what a rate limiter produces — made
+            #    VoidAccess speed up instead of back off.
+            #  - inside the semaphore so the slot stays held for the delay,
+            #    which is what makes rate_limit_delay()'s arithmetic hold.
+            server_wait = 0.0
+            try:
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                    async with session.get(
+                        f"{XPOSEDORNOT_BASE_URL}/check-email/{email}"
+                    ) as resp:
+                        if resp.status == 404:
+                            return empty
+                        if resp.status == 429:
+                            # XposedOrNot's 429 carries the hourly/daily cap
+                            # reset; honour whatever it names, floored by our
+                            # own documented interval.
+                            server_wait = pacing.retry_after_seconds(
+                                resp.headers, _xon_delay()
+                            )
+                            logger.warning(
+                                "breach_lookup: XposedOrNot — rate limited, "
+                                "backing off %.1fs", server_wait,
+                            )
+                            return {**empty, "source": "xposedornot_rate_limited"}
+                        if resp.status != 200:
+                            logger.debug(
+                                "breach_lookup: XposedOrNot → HTTP %s for %s",
+                                resp.status, _safe_log_email(email),
+                            )
+                            return {**empty, "source": "xposedornot_error"}
+                        data = await resp.json(content_type=None)
+            finally:
+                await asyncio.sleep(max(_xon_delay(), server_wait))
     except asyncio.TimeoutError:
         logger.debug("breach_lookup: XposedOrNot timed out for %s", _safe_log_email(email))
         return {**empty, "source": "xposedornot_error"}
@@ -256,24 +297,35 @@ async def query_leakcheck(email: str) -> dict[str, Any]:
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with _get_leakcheck_semaphore():
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.get(
-                    LEAKCHECK_PUBLIC_URL, params={"check": email}
-                ) as resp:
-                    if resp.status == 429:
-                        logger.warning("breach_lookup: LeakCheck — rate limited")
-                        return {**empty, "source": "leakcheck_rate_limited"}
-                    if resp.status == 400:
-                        # Public API rejects some inputs (e.g. bad format) with 400.
-                        return empty
-                    if resp.status != 200:
-                        logger.debug(
-                            "breach_lookup: LeakCheck → HTTP %s for %s",
-                            resp.status, _safe_log_email(email),
-                        )
-                        return {**empty, "source": "leakcheck_error"}
-                    data = await resp.json(content_type=None)
-            await asyncio.sleep(_LEAKCHECK_REQUEST_DELAY)
+            # See _query_xposedornot for why the delay is in a `finally` inside
+            # the semaphore rather than after a successful response.
+            server_wait = 0.0
+            try:
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                    async with session.get(
+                        LEAKCHECK_PUBLIC_URL, params={"check": email}
+                    ) as resp:
+                        if resp.status == 429:
+                            server_wait = pacing.retry_after_seconds(
+                                resp.headers, _leakcheck_delay()
+                            )
+                            logger.warning(
+                                "breach_lookup: LeakCheck — rate limited, "
+                                "backing off %.1fs", server_wait,
+                            )
+                            return {**empty, "source": "leakcheck_rate_limited"}
+                        if resp.status == 400:
+                            # Public API rejects some inputs (e.g. bad format) with 400.
+                            return empty
+                        if resp.status != 200:
+                            logger.debug(
+                                "breach_lookup: LeakCheck → HTTP %s for %s",
+                                resp.status, _safe_log_email(email),
+                            )
+                            return {**empty, "source": "leakcheck_error"}
+                        data = await resp.json(content_type=None)
+            finally:
+                await asyncio.sleep(max(_leakcheck_delay(), server_wait))
     except asyncio.TimeoutError:
         logger.debug("breach_lookup: LeakCheck timed out for %s", _safe_log_email(email))
         return {**empty, "source": "leakcheck_error"}

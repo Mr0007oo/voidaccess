@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import aiohttp
+import trafilatura
 import hashlib
 import json
 import logging
@@ -46,9 +47,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import pacing
 from sources.enrichment import is_onion_url
 from sources.proxy_client import clearnet_fetch
 from utils.content_safety import is_blocked_query, sanitize_content
+
+# Timing baselines (`normal` pacing profile); scaled at call time.
+FEED_TIMEOUT = 15    # seconds, feed fetch
+ENTRY_TIMEOUT = 10   # seconds, per-entry fetch
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +65,7 @@ MAX_ARTICLE_AGE_DAYS = 90
 MAX_ARTICLES_PER_FEED = 3
 MAX_TOTAL_ARTICLES = 20
 MAX_ARTICLE_SIZE = 100 * 1024  # 100 KB
+MIN_MEANINGFUL_ARTICLE_TEXT = 100
 
 RSS_FEEDS = [
     {
@@ -315,7 +322,7 @@ class RSSFeedScraper:
                     "application/xml, text/xml"
                 ),
             },
-            timeout=aiohttp.ClientTimeout(total=15),
+            timeout=aiohttp.ClientTimeout(total=pacing.scale_timeout(FEED_TIMEOUT)),
         )
         return self
 
@@ -464,7 +471,7 @@ class RSSFeedScraper:
             status, _content_type, body = await clearnet_fetch(
                 feed_url,
                 expect="xml",
-                timeout=15,  # preserve session's default timeout
+                timeout=pacing.scale_timeout(FEED_TIMEOUT),
                 fallback_session=self._session,
             )
             if status != 200:
@@ -602,7 +609,7 @@ class RSSFeedScraper:
             status, _content_type, body = await clearnet_fetch(
                 url,
                 expect="html",
-                timeout=10,  # preserve existing per-call timeout
+                timeout=pacing.scale_timeout(ENTRY_TIMEOUT),
                 fallback_session=self._session,
             )
             if status != 200:
@@ -626,6 +633,29 @@ class RSSFeedScraper:
             return None
 
     def _extract_article_text(self, html: str) -> str:
+        """Extract the article body, with a conservative raw-text fallback.
+
+        Keep this call aligned with ``scraper.scrape._extract_text`` so RSS
+        article pages receive the same main-content extraction as regular
+        scraped pages.  A short/empty Trafilatura result is not treated as a
+        successful extraction: some pages are difficult to parse, and their
+        raw visible text is still more useful than silently returning nothing.
+        """
+        try:
+            text = trafilatura.extract(
+                html,
+                include_comments=False,
+                include_tables=True,
+            )
+            if text and len(text.strip()) >= MIN_MEANINGFUL_ARTICLE_TEXT:
+                return text.strip()
+        except Exception:
+            pass  # Trafilatura/lxml failure -> use the raw-strip fallback
+
+        return self._raw_strip_article_text(html)
+
+    @staticmethod
+    def _raw_strip_article_text(html: str) -> str:
         """Strip scripts, styles, and tags; collapse whitespace."""
         html = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL)
         html = re.sub(r"<style[^>]*>.*?</style>", " ", html, flags=re.DOTALL)

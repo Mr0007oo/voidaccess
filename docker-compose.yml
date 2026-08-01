@@ -27,6 +27,9 @@ services:
     container_name: voidaccess-tor
     ports:
       - "9050:9050"
+      # Destination-isolated SocksPort used by the Playwright renderer — see
+      # docker/Dockerfile.tor for why that path needs its own port.
+      - "9250:9250"
     volumes:
       - tor_data:/var/lib/tor
     healthcheck:

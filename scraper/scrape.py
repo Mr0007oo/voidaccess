@@ -12,6 +12,10 @@ Internals rewritten in Phase 1B:
     hardcoded 127.0.0.1:9050      →  TOR_PROXY_HOST / TOR_PROXY_PORT from config
     no retry                      →  3-attempt exponential backoff (2 s / 4 s / 8 s)
     no DB persistence             →  pages written to Phase 1A db/ layer when DATABASE_URL is set
+
+Retry/timeout values below are the `normal` pacing baseline.  The active
+pacing profile (quiet / normal / aggressive) scales them at call time via the
+`pacing` module — see pacing/README.md.
 """
 
 from __future__ import annotations
@@ -35,7 +39,9 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import pacing
 from config import TOR_PROXY_HOST, TOR_PROXY_PORT, PLAYWRIGHT_ENABLED
+from scraper import tor_pool
 
 warnings.filterwarnings("ignore")
 
@@ -62,10 +68,32 @@ MAX_EXTRACTED_TEXT_CHARS = 50_000
 MAX_RETURN_CHARS = 15_000
 ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 
-# Retry configuration
-MAX_RETRIES = 1
-RETRY_DELAYS = (1.0,)  # seconds before attempt 1
+# Retry configuration — the `normal` pacing baseline.
+#
+# These were MAX_RETRIES=1 / RETRY_DELAYS=(1.0,) up to v1.9.4, which
+# contradicted this module's own docstring ("3-attempt exponential backoff
+# (2 s / 4 s / 8 s)").  The backoff described there is what was designed and
+# never implemented, so the code is corrected to match the documentation
+# rather than the documentation downgraded to match the code.  crawler/
+# spider.py — written against the same design — has always used exactly these
+# values, which is the corroborating evidence for which side was the bug.
+MAX_RETRIES = 3
+RETRY_DELAYS = (2.0, 4.0, 8.0)  # seconds before retry 1, 2, 3
 RETRYABLE_STATUS = {500, 502, 503, 504}
+
+# Per-attempt outer timeout and cached-session connect/read timeouts, also
+# `normal` baselines scaled by the active profile at call time.
+PER_ATTEMPT_TIMEOUT = 10.0
+DIRECT_CONNECT_TIMEOUT = 5
+DIRECT_READ_TIMEOUT = 25
+
+# Pooled-Tor-session connect/read defaults now live with the pool that bakes
+# them into the session (`scraper/tor_pool.py`); re-exported here because this
+# module documented them as part of its surface.  A caller needing different
+# patience overrides per request rather than changing these — see the timeout
+# section of tor_pool's docstring.
+TOR_CONNECT_TIMEOUT = tor_pool.TOR_CONNECT_TIMEOUT
+TOR_READ_TIMEOUT = tor_pool.TOR_READ_TIMEOUT
 
 # Tor circuit error patterns - indicates circuit failure, not URL failure
 SOCKS_ERRORS = (
@@ -297,14 +325,46 @@ def _build_proxy_url() -> str:
     return f"socks5h://{TOR_PROXY_HOST}:{TOR_PROXY_PORT}"
 
 
-def _tor_aiohttp_connector() -> ProxyConnector:
-    """SOCKS5 with remote DNS (same behavior as socks5h) for aiohttp-socks."""
-    return ProxyConnector.from_url(
-        f"socks5://{TOR_PROXY_HOST}:{TOR_PROXY_PORT}",
-        rdns=True,
-        limit=20,
-        limit_per_host=10,
-    )
+# ---------------------------------------------------------------------------
+# Tor stream isolation (SOCKS5 authentication)
+# ---------------------------------------------------------------------------
+#
+# The mechanism moved to `scraper/tor_pool.py` so that every Tor-fetching call
+# site in the codebase shares one pool and therefore one set of circuits — see
+# that module's docstring for the full rationale (why the isolation unit is the
+# hostname, how it reconciles with the v1.8.0 session-reuse fix, and why
+# timeouts are a session-level default that callers override per request).
+#
+# What stays here is this module's historical surface.  `_tor_aiohttp_connector`
+# and `TOR_ISOLATION_POOL_MAX` are re-exported as module globals *and* passed
+# into the pool at call time, so `unittest.mock.patch.object(scrape, ...)` still
+# intercepts them — tests/test_scrape_isolation.py patches both, and that file
+# is the contract for the pooling logic.
+
+TOR_ISOLATION_POOL_MAX = tor_pool.TOR_ISOLATION_POOL_MAX
+_TOR_SHARED_KEY = tor_pool._TOR_SHARED_KEY
+
+tor_isolation_key = tor_pool.tor_isolation_key
+tor_socks_credentials = tor_pool.tor_socks_credentials
+
+# The pool state itself is shared by object identity, not copied — mutating
+# `scrape._tor_sessions` and `tor_pool._tor_sessions` are the same operation.
+_tor_sessions = tor_pool._tor_sessions
+_tor_inflight = tor_pool._tor_inflight
+_pending_closes = tor_pool._pending_closes
+
+
+def _tor_aiohttp_connector(
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> ProxyConnector:
+    """SOCKS5-with-remote-DNS connector. See `tor_pool.tor_aiohttp_connector`."""
+    return tor_pool.tor_aiohttp_connector(username, password)
+
+
+def _evict_idle_tor_session() -> None:
+    """Evict one idle pooled session. See `tor_pool.evict_idle_tor_session`."""
+    tor_pool.evict_idle_tor_session(TOR_ISOLATION_POOL_MAX)
 
 
 def _direct_tcp_connector() -> aiohttp.TCPConnector:
@@ -315,20 +375,43 @@ def _direct_tcp_connector() -> aiohttp.TCPConnector:
     )
 
 
-_tor_session: Optional[aiohttp.ClientSession] = None
 _direct_session: Optional[aiohttp.ClientSession] = None
 
+_close_session_soon = tor_pool._close_session_soon
 
-def get_tor_session_cached() -> aiohttp.ClientSession:
-    """Return a cached Tor-proxied session for connection reuse."""
-    global _tor_session
-    if _tor_session is None or _tor_session.closed:
-        connector = _tor_aiohttp_connector()
-        _tor_session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=aiohttp.ClientTimeout(connect=3, sock_read=5),
-        )
-    return _tor_session
+
+def get_tor_session_cached(url: Optional[str] = None) -> aiohttp.ClientSession:
+    """
+    Return the cached Tor-proxied session for *url*'s isolation unit.
+
+    Thin pass-through to the shared pool.  The connector factory and pool cap
+    are resolved from *this* module's globals on every call so the two names
+    tests/test_scrape_isolation.py patches remain the effective ones.
+    """
+    return tor_pool.get_tor_session_cached(
+        url,
+        connector_factory=_tor_aiohttp_connector,
+        pool_max=TOR_ISOLATION_POOL_MAX,
+    )
+
+
+def _acquire_tor_session(url: str) -> Tuple[aiohttp.ClientSession, str]:
+    """
+    Resolve *url*'s session and mark it in flight.
+
+    Acquisition is synchronous and happens at task-creation time, before the
+    first await, so a session handed to a not-yet-started fetch can never be
+    chosen as an eviction victim.  Every acquire must be paired with
+    `_release_tor_session` in a `finally`.
+    """
+    return tor_pool.acquire_tor_session(
+        url,
+        connector_factory=_tor_aiohttp_connector,
+        pool_max=TOR_ISOLATION_POOL_MAX,
+    )
+
+
+_release_tor_session = tor_pool.release_tor_session
 
 
 def get_direct_session_cached() -> aiohttp.ClientSession:
@@ -338,31 +421,26 @@ def get_direct_session_cached() -> aiohttp.ClientSession:
         connector = _direct_tcp_connector()
         _direct_session = aiohttp.ClientSession(
             connector=connector,
-            timeout=aiohttp.ClientTimeout(connect=5, sock_read=25),
+            timeout=aiohttp.ClientTimeout(
+                connect=pacing.scale_timeout(DIRECT_CONNECT_TIMEOUT),
+                sock_read=pacing.scale_timeout(DIRECT_READ_TIMEOUT),
+            ),
         )
     return _direct_session
 
 
 async def close_cached_sessions() -> None:
-    """Close cached sessions - call on shutdown."""
-    global _tor_session, _direct_session
-    if _tor_session and not _tor_session.closed:
-        await _tor_session.close()
-        _tor_session = None
+    """Close every cached session (whole isolation pool + direct) - on shutdown."""
+    global _direct_session
+
+    await tor_pool.close_pool()
+
     if _direct_session and not _direct_session.closed:
         await _direct_session.close()
         _direct_session = None
 
 
-async def _reset_tor_session_on_error() -> None:
-    """Reset cached Tor session on circuit error to force reconnection."""
-    global _tor_session
-    if _tor_session is not None and not _tor_session.closed:
-        try:
-            await _tor_session.close()
-        except Exception:
-            pass
-    _tor_session = None
+_reset_tor_session_on_error = tor_pool.reset_tor_session_on_error
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +499,40 @@ async def _fetch_one(
     session: aiohttp.ClientSession,
     url_data: dict,
     semaphore: asyncio.Semaphore,
-) -> Tuple[str, str, Optional[bytes], Optional[str], Optional[datetime]]:
+    isolation_key: Optional[str] = None,
+    extract_typed_relationships: bool = False,
+) -> tuple:
+    """
+    Fetch one URL, releasing its Tor isolation slot however the fetch ends.
+
+    *isolation_key* is the value returned alongside the session by
+    `_acquire_tor_session`; pass `None` for sessions that were not acquired
+    from the isolation pool (clearnet, and direct unit-test calls).  See
+    `_fetch_one_impl` for the fetch semantics themselves.
+    """
+    try:
+        result = await _fetch_one_impl(
+            session,
+            url_data,
+            semaphore,
+            extract_typed_relationships=extract_typed_relationships,
+        ) if extract_typed_relationships else await _fetch_one_impl(
+            session, url_data, semaphore
+        )
+        if extract_typed_relationships and len(result) == 5:
+            return (*result, [])
+        return result
+    finally:
+        if isolation_key is not None:
+            _release_tor_session(isolation_key)
+
+
+async def _fetch_one_impl(
+    session: aiohttp.ClientSession,
+    url_data: dict,
+    semaphore: asyncio.Semaphore,
+    extract_typed_relationships: bool = False,
+) -> tuple:
     """
     Fetch a single URL with exponential-backoff retry.
 
@@ -466,10 +577,17 @@ async def _fetch_one(
 
     last_exc: object = None
 
+    # Baseline is 3 retries / 2 s / 4 s / 8 s (attempts 0, 1, 2, 3); the active
+    # pacing profile adjusts both the count and the backoff at call time.
+    # Resolved per call, not per import, so a profile set after this module was
+    # imported (the one-shot --pace flag) still takes effect.
+    max_retries, retry_delays = pacing.retry_plan(MAX_RETRIES, RETRY_DELAYS)
+    per_attempt_timeout = pacing.scale_timeout(PER_ATTEMPT_TIMEOUT)
+
     async with semaphore:
-        for attempt in range(MAX_RETRIES + 1):  # attempts: 0, 1, 2, 3
+        for attempt in range(max_retries + 1):
             if attempt > 0:
-                await asyncio.sleep(RETRY_DELAYS[attempt - 1])
+                await asyncio.sleep(retry_delays[attempt - 1])
 
             try:
                 async def _get_with_timeout():
@@ -506,7 +624,7 @@ async def _fetch_one(
                         return "ok", raw_bytes, encoding, None, None
 
                 status_res, r_bytes, enc, _, _ = await asyncio.wait_for(
-                    _get_with_timeout(), timeout=10.0
+                    _get_with_timeout(), timeout=per_attempt_timeout
                 )
 
                 if status_res == "retry":
@@ -532,6 +650,16 @@ async def _fetch_one(
                         from scraper.scrape_js import fetch_with_playwright, is_js_rendered
 
                         if is_js_rendered(html, db_text):
+                            # This fallback is isolated differently from every
+                            # other path here, and it has to be: Playwright's
+                            # driver rejects SOCKS5 credentials outright, so
+                            # tor_socks_credentials() can never reach Chromium.
+                            # scrape_js instead points the browser at a Tor
+                            # SocksPort carrying `IsolateDestAddr`, which makes
+                            # Tor key circuits on the destination itself. When
+                            # that port is absent (system tor, Tor Browser) the
+                            # JS path is genuinely un-isolated and says so once
+                            # at launch — see scrape_js._resolve_socks_port.
                             _logger.debug(
                                 "Playwright fallback triggered for %s...",
                                 url[:40] if len(url) > 40 else url,
@@ -571,6 +699,39 @@ async def _fetch_one(
                         url[:80] if len(url) > 80 else url,
                     )
 
+                dependency_relationships = []
+                if extract_typed_relationships and db_text:
+                    try:
+                        from extractor.dependency_relationship import (
+                            extract_dependency_relationships_from_page,
+                        )
+                        dependency_relationships = extract_dependency_relationships_from_page(
+                            db_text
+                        )
+                        _logger.info(
+                            "Dependency extractor invoked at scrape.py:861 for %s: %d chars, %d claims",
+                            url[:80],
+                            len(db_text),
+                            len(dependency_relationships),
+                        )
+                    except Exception as exc:
+                        # Relationship extraction is additive and optional;
+                        # never turn a successful page fetch into a failure.
+                        _logger.debug(
+                            "No dependency relationships extracted for %s: %s",
+                            url[:60],
+                            exc,
+                        )
+
+                if extract_typed_relationships:
+                    return (
+                        url,
+                        display_text,
+                        raw_bytes,
+                        db_text,
+                        posted_at,
+                        dependency_relationships,
+                    )
                 return url, display_text, raw_bytes, db_text, posted_at
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -581,7 +742,7 @@ async def _fetch_one(
                         url[:50] if len(url) > 50 else url,
                         error_str[:100],
                     )
-                    await _reset_tor_session_on_error()
+                    await _reset_tor_session_on_error(url)
                     return url, title, None, None, None
                 last_exc = exc
             except Exception as exc:
@@ -592,7 +753,7 @@ async def _fetch_one(
                         url[:50] if len(url) > 50 else url,
                         error_str[:100],
                     )
-                    await _reset_tor_session_on_error()
+                    await _reset_tor_session_on_error(url)
                     return url, title, None, None, None
                 last_exc = exc
 
@@ -608,7 +769,8 @@ async def _fetch_one(
 async def _gather_all(
     unique_urls_data: List[dict],
     max_workers: int,
-) -> List[Tuple[str, str, Optional[bytes], Optional[str], Optional[datetime]]]:
+    extract_typed_relationships: bool = False,
+) -> List[tuple]:
     """
     Fan out fetches: .onion URLs through Tor (separate concurrency limit),
     clearnet URLs directly (higher concurrency). Results preserve input order.
@@ -623,35 +785,51 @@ async def _gather_all(
     sem_tor = asyncio.Semaphore(max_workers)
     sem_clearnet = asyncio.Semaphore(15)
 
-    async def run_onion_batch() -> dict[
-        str, Tuple[str, str, Optional[bytes], Optional[str], Optional[datetime]]
-    ]:
+    async def run_onion_batch() -> dict[str, tuple]:
         if not onion_urls:
             return {}
-        out: dict[
-            str, Tuple[str, str, Optional[bytes], Optional[str], Optional[datetime]]
-        ] = {}
-        tor_session = get_tor_session_cached()
-        tasks = [
-            _fetch_one(tor_session, item, sem_tor) for item in onion_urls
-        ]
+        out: dict[str, tuple] = {}
+        # One session per distinct .onion hostname, not one per batch and not
+        # one per fetch — see the stream-isolation block near the top of this
+        # module for why that specific granularity.  Acquisition is synchronous
+        # and completes for the whole batch before the first await, so no
+        # session handed out here can be evicted while its fetch is pending.
+        tasks = []
+        for item in onion_urls:
+            item_url, _ = _normalize_url_data(item)
+            tor_session, iso_key = _acquire_tor_session(item_url)
+            tasks.append(
+                _fetch_one(
+                    tor_session,
+                    item,
+                    sem_tor,
+                    iso_key,
+                    extract_typed_relationships,
+                )
+            )
+        _logger.info(
+            "Tor stream isolation: %d onion URLs across %d distinct circuits",
+            len(onion_urls),
+            len({tor_isolation_key(_normalize_url_data(i)[0]) for i in onion_urls}),
+        )
         rows = await asyncio.gather(*tasks)
         for row in rows:
             if row[0]:
                 out[row[0]] = row
         return out
 
-    async def run_clearnet_batch() -> dict[
-        str, Tuple[str, str, Optional[bytes], Optional[str], Optional[datetime]]
-    ]:
+    async def run_clearnet_batch() -> dict[str, tuple]:
         if not clearnet_urls:
             return {}
-        out: dict[
-            str, Tuple[str, str, Optional[bytes], Optional[str], Optional[datetime]]
-        ] = {}
+        out: dict[str, tuple] = {}
         direct_session = get_direct_session_cached()
         tasks = [
-            _fetch_one(direct_session, item, sem_clearnet)
+            _fetch_one(
+                direct_session,
+                item,
+                sem_clearnet,
+                extract_typed_relationships=extract_typed_relationships,
+            )
             for item in clearnet_urls
         ]
         rows = await asyncio.gather(*tasks)
@@ -665,18 +843,25 @@ async def _gather_all(
         run_clearnet_batch(),
     )
 
-    merged: List[
-        Tuple[str, str, Optional[bytes], Optional[str], Optional[datetime]]
-    ] = []
+    merged: List[tuple] = []
     for item in unique_urls_data:
         url, _title = _normalize_url_data(item)
         if not url:
-            merged.append(("", _title, None, None, None))
+            merged.append(
+                ("", _title, None, None, None, [])
+                if extract_typed_relationships
+                else ("", _title, None, None, None)
+            )
             continue
+        empty_row = (
+            (url, _title, None, None, None, [])
+            if extract_typed_relationships
+            else (url, _title, None, None, None)
+        )
         if is_onion_url(url):
-            merged.append(tor_map.get(url, (url, _title, None, None, None)))
+            merged.append(tor_map.get(url, empty_row))
         else:
-            merged.append(clearnet_map.get(url, (url, _title, None, None, None)))
+            merged.append(clearnet_map.get(url, empty_row))
 
     tor_ok = sum(1 for r in merged if r[0] and is_onion_url(r[0]) and r[2])
     clear_ok = sum(
@@ -861,10 +1046,19 @@ def _persist_pages(
 # Public API
 # ---------------------------------------------------------------------------
 
+
+class ScrapeBatchResult(dict):
+    """Dict-compatible scrape result with optional full-text metadata."""
+
+    def __init__(self, *args, relationship_claims_by_url=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.relationship_claims_by_url = relationship_claims_by_url or {}
+
 async def scrape_multiple(
     urls_data,
     max_workers: int = 5,
     investigation_id: Optional[str] = None,
+    extract_typed_relationships: bool = False,
 ) -> Dict[str, str]:
     """
     Scrape a list of URLs concurrently and return a dict mapping URL → content.
@@ -910,16 +1104,24 @@ async def scrape_multiple(
         return {}
 
     # Async fetch phase
-    raw_results = await _gather_all(unique_urls_data, max_workers)
+    raw_results = await _gather_all(
+        unique_urls_data,
+        max_workers,
+        extract_typed_relationships=extract_typed_relationships,
+    )
 
     # Assemble public dict with MAX_RETURN_CHARS truncation
     suffix = "...(truncated)"
     results: Dict[str, str] = {}
+    relationship_claims_by_url: dict[str, list[dict]] = {}
     db_items: List[
         Tuple[str, str, Optional[bytes], Optional[str], Optional[datetime]]
     ] = []
 
-    for url, display_text, raw_bytes, db_text, posted_at in raw_results:
+    for row in raw_results:
+        url, display_text, raw_bytes, db_text, posted_at = row[:5]
+        if len(row) > 5 and row[5]:
+            relationship_claims_by_url[url] = row[5]
         if not url:
             continue
         if len(display_text) > MAX_RETURN_CHARS:
@@ -939,7 +1141,8 @@ async def scrape_multiple(
     # failures are swallowed inside _discover_seeds_from_one_page.
     discovery_counter: dict = {"count": 0}
     discovery_tasks: List[asyncio.Task] = []
-    for url, _display, _raw, db_text, _posted in raw_results:
+    for row in raw_results:
+        url, _display, _raw, db_text, _posted = row[:5]
         if not url or not db_text:
             continue
         if ".onion" not in url.lower():
@@ -970,6 +1173,11 @@ async def scrape_multiple(
 
         await asyncio.gather(*[_run_discovery(t) for t in discovery_tasks])
 
+    if extract_typed_relationships:
+        return ScrapeBatchResult(
+            results,
+            relationship_claims_by_url=relationship_claims_by_url,
+        )
     return results
 
 

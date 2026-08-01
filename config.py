@@ -37,6 +37,16 @@ DATABASE_URL = _clean_env("DATABASE_URL")
 TOR_PROXY_HOST = _clean_env("TOR_PROXY_HOST", "127.0.0.1")
 TOR_PROXY_PORT = _clean_env("TOR_PROXY_PORT", "9050")
 
+# Optional second SocksPort configured with `IsolateDestAddr`, used only by the
+# Playwright renderer.  Every aiohttp caller isolates by handing Tor a distinct
+# SOCKS credential per target, but Playwright's driver refuses SOCKS5
+# credentials outright, so that path needs Tor to do the keying itself.
+# docker/Dockerfile.tor opens 9250 for exactly this.  If the port is absent —
+# system tor, Tor Browser, any deployment not using our container — the JS
+# render path runs un-isolated and says so once; it is never silently assumed to
+# be isolated.  Set to an empty value to disable the probe entirely.
+TOR_ISOLATION_SOCKS_PORT = _clean_env("TOR_ISOLATION_SOCKS_PORT", "9250")
+
 # Phase 1D — expanded sources (all optional; missing vars disable that source)
 DARKSEARCH_API_KEY = _clean_env("DARKSEARCH_API_KEY")          # optional free-tier key
 TELEGRAM_API_ID   = _clean_env("TELEGRAM_API_ID")              # from my.telegram.org
@@ -79,6 +89,14 @@ else:
 # Threat Intelligence API Keys
 OTX_API_KEY = _clean_env("OTX_API_KEY", "")  # AlienVault OTX — free at otx.alienvault.com
 VT_API_KEY = _clean_env("VT_API_KEY", "")    # VirusTotal — free tier at virustotal.com
+
+# VirusTotal pacing tier.  The public API allows 4 requests/minute (a 15 s gap);
+# premium keys have no per-minute limit at all, and a key string is
+# indistinguishable between the two, so a paying subscriber was being paced 25x
+# slower than their entitlement.  Set VT_API_TIER=premium to opt out of
+# free-tier pacing.  Unset or unrecognised means "public" — the safe default,
+# since guessing premium wrongly earns a 429.
+VT_API_TIER = (_clean_env("VT_API_TIER", "public") or "public").strip().lower()
 
 # IP Reputation Enrichment (all optional — features degrade gracefully without keys)
 ABUSEIPDB_API_KEY = _clean_env("ABUSEIPDB_API_KEY", "")   # Community IP abuse reports
@@ -127,6 +145,10 @@ SCRAPINGANT_API_KEY = _clean_env("SCRAPINGANT_API_KEY", "")
 # UserApiKey registration on the API surface).
 SCRAPINGANT_PROXY_TYPE = _clean_env("SCRAPINGANT_PROXY_TYPE", "residential")
 
+# Shodan InternetDB publishes NO rate limit and needs no API key (verified
+# 2026-07-29) — this is VoidAccess's own courtesy pacing, not a quota.  It is
+# still routed through pacing.scale_delay_floor() at the call site in
+# sources/shodan.py so the mechanism matches every other enrichment client.
 SHODAN_RATE_LIMIT_DELAY = 1.0        # seconds between Shodan requests (InternetDB)
 MAX_IPS_PER_INVESTIGATION = 50      # max IPs to query Shodan per investigation
 MAX_HASHES_PER_INVESTIGATION = 20    # max file hashes to query VirusTotal per investigation

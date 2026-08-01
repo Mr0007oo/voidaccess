@@ -357,6 +357,65 @@ def configure_tor(
     console.print(f"Tor set to {host}:{port}")
 
 
+@app.command("pace")
+def configure_pace(
+    profile: Optional[str] = typer.Option(
+        None,
+        "--profile",
+        help=f"Set the default pacing profile: {' | '.join(cli_config.PACE_PROFILES)}.",
+    ),
+    show: bool = typer.Option(
+        False,
+        "--show",
+        help="Print the current pacing profile and what it does, then exit.",
+    ),
+) -> None:
+    """Set the persistent default pacing profile.
+
+    The pacing profile governs how patient and polite VoidAccess is with every
+    scraped target — Tor, clearnet fetches, search engines, the individual
+    source scrapers, and the Playwright JS renderer — through one shared
+    setting instead of per-subsystem constants.
+
+    \b
+      quiet       long timeouts, long gaps between retries, fewer retries,
+                  much longer politeness delays between requests
+      normal      the baseline (default)
+      aggressive  short timeouts, fast retries, minimal politeness delay
+
+    This value persists across runs.  `voidaccess investigate --pace ...`
+    overrides it for a single invocation without touching this config.
+    """
+    import pacing
+
+    cfg = cli_config.load_config()
+    current = cli_config.normalize_pace(cfg.get("pace", cli_config.DEFAULT_PACE))
+
+    if profile is None or show:
+        console.print("  [bold]Pacing profile[/bold]")
+        for name in cli_config.PACE_PROFILES:
+            marker = "[green]→[/green]" if name == current else " "
+            console.print(f"  {marker} {pacing.describe(name)}")
+        console.print(
+            "\n  Override for one run with "
+            "[bold]voidaccess investigate ... --pace <profile>[/bold]."
+        )
+        return
+
+    candidate = profile.strip().lower()
+    if candidate not in cli_config.PACE_PROFILES:
+        console.print(
+            f"[red]Invalid pace:[/red] {profile}. "
+            f"Choose one of: {', '.join(cli_config.PACE_PROFILES)}."
+        )
+        raise typer.Exit(code=2)
+
+    cfg["pace"] = candidate
+    cli_config.save_config(cfg)
+    console.print(f"Default pacing profile set to [green]{candidate}[/green]")
+    console.print(f"  {pacing.describe(candidate)}")
+
+
 @app.command("proxy")
 def configure_proxy(
     enable: Optional[bool] = typer.Option(

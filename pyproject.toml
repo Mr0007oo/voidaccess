@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voidaccess"
-version = "1.9.4"
+version = "2.0.0"
 description = "Dark web OSINT CLI — automated threat intelligence from query to report"
 readme = "README.md"
 license = "MIT"
@@ -51,6 +51,7 @@ dependencies = [
     "pydantic==2.13.3",
     "python-jose[cryptography]==3.5.0",
     "passlib[bcrypt]==1.7.4",
+    "bcrypt>=3.1.0,<4.1",
     "slowapi==0.1.9",
     "redis==7.4.0",
     "pyyaml==6.0.3",
@@ -61,6 +62,7 @@ dependencies = [
     "pyvis==0.3.2",
     "urllib3==2.6.3",
     "trafilatura==2.0.0",
+    "lxml_html_clean>=0.4.2",
     "requests==2.33.1",
     "python-socks[asyncio]==2.8.1",
     "tldextract==5.3.1",
@@ -68,7 +70,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio"]
+dev = ["pytest", "pytest-asyncio", "aioresponses>=0.7.6"]
 nlp = [
     "sentence-transformers>=3.0",
     "torch>=2.3",
@@ -116,6 +118,7 @@ include = [
     "vector*",
     "monitor*",
     "crawler*",
+    "pacing*",
     "auth*",
     "voidaccess*",
     "api*",
@@ -149,6 +152,13 @@ exclude = [
 [tool.setuptools.package-data]
 "sources" = ["data/onion_seeds.json"]
 "sources.data" = ["onion_seeds.json"]
+
+# Alembic's runtime startup hook resolves its config relative to the installed
+# package root (the same root that contains api/ and db/ after wheel install).
+# Ship the config there so both `alembic upgrade head` and API startup
+# migrations work from a non-editable installation.
+[tool.setuptools.data-files]
+"." = ["alembic.ini"]
 
 [tool.ruff.lint.per-file-ignores]
 # These are legacy/optional-import cases audited in docs/ruff-triage.md.
