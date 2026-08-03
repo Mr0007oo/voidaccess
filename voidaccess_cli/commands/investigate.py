@@ -1662,50 +1662,73 @@ def _build_cooccurrence_edges(
 
 
 def _detect_communities_for_investigation(investigation_id: str) -> dict[str, int]:
+    """Detect communities over the SAME canonical graph the API partitions.
+
+    Returns ``{entity_id_str: community_id}``.
+
+    An investigation's community grouping must be surface-independent: the CLI
+    JSON/TUI and the FastAPI graph endpoint must place the same entities in the
+    same communities.  Achieving that requires both surfaces to run detection
+    over one graph model.  The authoritative model is
+    ``graph.builder.build_graph_from_db`` — the exact graph
+    ``api.routes.investigations`` detects on — whose nodes are *canonical
+    identity* nodes (one node per ``entity_graph_id``, collapsing the same
+    entity observed on multiple pages) joined by semantically-filtered
+    CO_APPEARED_ON edges, with graph-unmapped entity types excluded.
+
+    Historically the CLI built a *different* graph here — one node per entity
+    **UUID** joined by every persisted relationship row — which produced a
+    partition that could not even be compared to the API's (different node
+    identity, different edge set).  We now partition the canonical graph and
+    translate the result back to per-entity UUIDs through the shared
+    ``entity_graph_id`` (the sanctioned identity accessor, byte-for-byte
+    compatible with the builder's node ids): every entity row that resolves to
+    a canonical node inherits that node's community.  The *grouping* is then
+    identical to the API's; only the key representation differs (UUID here for
+    the CLI's entity-keyed consumers, canonical node id on the API for its
+    node-keyed graph JSON).
     """
-    Run greedy-modularity community detection over the same entity/edge set
-    that the CLI just persisted.  Returns ``{entity_id_str: community_id}``.
+    import uuid as _uuid
 
-    Implementation reuses ``graph.builder.detect_communities`` so the CLI and
-    the FastAPI graph endpoint produce identical partitions for the same
-    investigation.  NetworkX is built into the project already — no new dep.
-    """
-    import networkx as nx
+    from graph.builder import build_graph_from_db, detect_communities
+    from extractor.identity import entity_graph_id
 
-    from graph.builder import detect_communities
-    from voidaccess_cli.adapters import sqlite as sqlite_adapter
-
-    entities = sqlite_adapter.get_entities(investigation_id)
-    relationships = sqlite_adapter.get_relationships(investigation_id)
-    if not entities or not relationships:
+    try:
+        inv_uuid = _uuid.UUID(str(investigation_id))
+    except (ValueError, TypeError, AttributeError):
         return {}
 
-    G = nx.Graph()
-    for ent in entities:
-        eid = ent.get("id")
-        if not eid:
-            continue
-        G.add_node(
-            str(eid),
-            entity_type=ent.get("entity_type") or "",
-            confidence=float(ent.get("confidence") or 0.0),
-        )
-    for rel in relationships:
-        a = rel.get("entity_a_id")
-        b = rel.get("entity_b_id")
-        if not a or not b or a == b:
-            continue
-        G.add_edge(
-            str(a),
-            str(b),
-            relationship_type=rel.get("relationship_type") or "",
-            confidence=float(rel.get("confidence") or 0.0),
-        )
+    graph = build_graph_from_db(investigation_id=inv_uuid)
+    if graph.number_of_nodes() == 0:
+        return {}
+    partition = detect_communities(graph)  # keyed by canonical node id
+    if not partition:
+        return {}
 
-    partition = detect_communities(G)
-    # Cast keys to str so the JSON payload is uniform (sqlite_adapter returns
-    # plain dicts already, but be defensive).
-    return {str(k): int(v) for k, v in partition.items()}
+    from db.models import Entity, InvestigationEntityLink
+    from db.session import get_session
+    from sqlalchemy.orm import joinedload
+
+    communities: dict[str, int] = {}
+    with get_session() as session:
+        rows = (
+            session.query(Entity)
+            .outerjoin(
+                InvestigationEntityLink,
+                InvestigationEntityLink.entity_id == Entity.id,
+            )
+            .filter(
+                (Entity.investigation_id == inv_uuid)
+                | (InvestigationEntityLink.investigation_id == inv_uuid)
+            )
+            .options(joinedload(Entity.page))
+            .all()
+        )
+        for ent in rows:
+            node_id = entity_graph_id(ent)
+            if node_id in partition:
+                communities[str(ent.id)] = int(partition[node_id])
+    return communities
 
 
 async def _update_cli_actor_profiles(

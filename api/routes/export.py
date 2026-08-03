@@ -16,6 +16,7 @@ POST /export/{investigation_id}/<fmt>/selected             — same exports rest
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import re
@@ -474,6 +475,21 @@ async def export_package(
                     investigation_dict["created_at"] = (
                         inv.created_at.isoformat() if inv.created_at else None
                     )
+                    # Backfill sources_used from investigation metadata, the
+                    # same place the CLI export reads it (adapters/sqlite.py
+                    # ``_investigation_row``). ``metadata_json`` is a dict on
+                    # Postgres and may be a JSON string on legacy SQLite rows.
+                    metadata_raw = getattr(inv, "metadata_json", None)
+                    if isinstance(metadata_raw, str):
+                        try:
+                            metadata_parsed = json.loads(metadata_raw) if metadata_raw.strip() else {}
+                        except (ValueError, TypeError):
+                            metadata_parsed = {}
+                    elif isinstance(metadata_raw, dict):
+                        metadata_parsed = metadata_raw
+                    else:
+                        metadata_parsed = {}
+                    investigation_dict["sources_used"] = metadata_parsed.get("sources_used") or {}
         except Exception as exc:
             logger.warning("export_package: investigation lookup failed: %s", exc)
 

@@ -169,6 +169,19 @@ def init_db() -> None:
         conn.execute(text(CREATE_SEARCH_ENGINE_STATS_SQL))
         conn.commit()
 
+    # Gate *every* CLI entry point on a migrated schema.  ``init_db`` is the
+    # single choke point that all read paths (list/show/export/enrich/actors/
+    # timeline/status) and the write path (investigate) call before touching
+    # the DB, so validating here guarantees a stale SQLite file produces one
+    # actionable ``DatabaseSchemaError`` (rendered by the CLI entry wrapper as
+    # a clean message + non-zero exit) instead of a silent zero-entity run on
+    # the write path or a raw ``OperationalError`` traceback / misleading exit
+    # 0 on a read path.  ``create_all`` above only creates *missing* tables; it
+    # never adds columns to an existing one, so a v0.5-shaped DB survives table
+    # creation and is caught here.  investigate.py keeps its own explicit
+    # ``validate_schema()`` call as documentation of intent (harmless re-check).
+    validate_schema()
+
 
 def validate_schema() -> None:
     """Fail before a run if the DB is missing columns required by the ORM.

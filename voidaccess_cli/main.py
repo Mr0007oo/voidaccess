@@ -530,5 +530,24 @@ def main(
         show_banner(console)
 
 
+def run() -> None:
+    """Console-script entry point.
+
+    Wraps the Typer app so a stale local database surfaces as a single clean,
+    actionable line and a non-zero exit code on *every* command — instead of a
+    raw ``OperationalError`` traceback (or a misleading exit 0) on the read
+    paths that never had explicit handling.  ``init_db`` raises
+    ``DatabaseSchemaError`` for a schema behind the code; we render it here once
+    for all commands.  Typer's pretty-exception handler is disabled for this
+    type so the message reaches this wrapper cleanly.
+    """
+    from voidaccess_cli.adapters.sqlite import DatabaseSchemaError
+    try:
+        app()
+    except DatabaseSchemaError as exc:
+        console.print(f"[red]Database schema error:[/red] {exc}")
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
-    app()
+    run()

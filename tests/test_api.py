@@ -417,6 +417,60 @@ class TestExportMisp(unittest.TestCase):
 
 
 # ===========================================================================
+# TestExportPackage
+# ===========================================================================
+
+
+class TestExportPackage(unittest.TestCase):
+    """The IOC package route must backfill sources_used from investigation
+    metadata (previously hardcoded empty) so it reaches metadata.json."""
+
+    @patch(
+        "api.routes.export._resolve_internal_investigation_id",
+        return_value=uuid.UUID(_VALID_UUID),
+    )
+    @patch("api.routes.export._check_investigation_owner")
+    def test_package_backfills_sources_used_into_metadata(self, _mock_owner, _mock_resolve):
+        import io as _io
+        import zipfile as _zipfile
+        import datetime as _dt
+        from types import SimpleNamespace
+
+        entities = [
+            {"entity_type": "IP_ADDRESS", "value": "185.220.101.1", "confidence": 0.9,
+             "source_url": "http://leak.onion/c2"},
+            {"entity_type": "CVE_NUMBER", "value": "CVE-2024-3094", "confidence": 0.9,
+             "source_url": "http://forum.onion/exploit"},
+        ]
+        sources_used = {"otx": "ok_3_enrichments", "greynoise": "skipped_no_key"}
+        inv = SimpleNamespace(
+            id=uuid.UUID(_VALID_UUID),
+            run_id=None,
+            query="lockbit leak",
+            summary="s",
+            created_at=_dt.datetime(2026, 8, 2, tzinfo=_dt.timezone.utc),
+            metadata_json={"sources_used": sources_used},
+        )
+
+        session_cm = MagicMock()
+        session_cm.__enter__.return_value = MagicMock()
+        session_cm.__exit__.return_value = False
+
+        with patch("export.stix._load_entities_for_investigation", return_value=entities), \
+             patch("db.session.get_session", return_value=session_cm), \
+             patch("db.queries.get_investigation_by_id_or_run", return_value=inv):
+            client = _make_client()
+            resp = client.get(f"/export/{_VALID_UUID}/package")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("content-type"), "application/zip")
+        with _zipfile.ZipFile(_io.BytesIO(resp.content)) as zf:
+            meta = json.loads(zf.read("metadata.json").decode("utf-8"))
+        # The exact fix: sources_used is no longer an empty stub.
+        self.assertEqual(meta["sources_used"], sources_used)
+
+
+# ===========================================================================
 # TestMonitors
 # ===========================================================================
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voidaccess"
-version = "2.0.0"
+version = "2.0.1"
 description = "Dark web OSINT CLI — automated threat intelligence from query to report"
 readme = "README.md"
 license = "MIT"
@@ -94,7 +94,7 @@ all = [
 ]
 
 [project.scripts]
-voidaccess = "voidaccess_cli.main:app"
+voidaccess = "voidaccess_cli.main:run"
 
 [tool.setuptools]
 py-modules = ["config"]
@@ -122,6 +122,7 @@ include = [
     "auth*",
     "voidaccess*",
     "api*",
+    "data*",
 ]
 exclude = [
     "tests*",
@@ -152,6 +153,24 @@ exclude = [
 [tool.setuptools.package-data]
 "sources" = ["data/onion_seeds.json"]
 "sources.data" = ["onion_seeds.json"]
+
+# v2.0.1 — ship the top-level reference data bundle inside the installed
+# package.  The runtime resolves each of these via
+# ``os.path.dirname(os.path.dirname(__file__))/data`` (from extractor/ and
+# monitor/), i.e. ``site-packages/data/<file>`` after a wheel install.  The
+# ``data`` package (empty ``data/__init__.py``, declared in packages.find via
+# ``data*`` above) is the same data-dir-as-package mechanism that already ships
+# ``sources/data/onion_seeds.json``.  Without these entries a fresh
+# ``pip install voidaccess`` logs "Gazetteer snapshot not found" and
+# "Common-word list not found", silently degrading query expansion and
+# shape-checking to structural-signals-only.
+"data" = [
+    "threat_gazetteer.json",
+    "common_words_en.txt",
+    "domain_stopwords_en.txt",
+    "seed_data.json.gz",
+    "monitors.yaml",
+]
 
 # Alembic's runtime startup hook resolves its config relative to the installed
 # package root (the same root that contains api/ and db/ after wheel install).

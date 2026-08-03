@@ -807,6 +807,12 @@ def test_status_routing_state_both_transports_proxy_wins(isolated_config_home, m
     _scrub_env(monkeypatch)
     cfg = isolated_config_home.load_config()
     cfg["enrichment_keys"]["SCRAPINGANT_API_KEY"] = "abcdefgh12345678"
+    # Proxy credentials are required for the proxy transport to be usable;
+    # without them the status display honestly reports "disabled" regardless
+    # of which gate select_transport() picked. Provide them so the both-gates
+    # precedence display ("proxy wins") is actually exercised.
+    cfg["enrichment_keys"]["SCRAPINGANT_PROXY_USERNAME"] = "user"
+    cfg["enrichment_keys"]["SCRAPINGANT_PROXY_PASSWORD"] = "pass"
     cfg["features"]["use_proxies"] = True
     cfg["features"]["use_proxy"] = True
     isolated_config_home.save_config(cfg)
@@ -818,8 +824,8 @@ def test_status_routing_state_both_transports_proxy_wins(isolated_config_home, m
     runner = CliRunner()
     result = runner.invoke(main_app, ["status"])
     assert result.exit_code == 0
-    # Both transports should appear (the user has both configured), but
-    # the active transport is proxy.
+    # Both transports are configured; proxy wins and the REST API is
+    # overridden — the routing row must name the proxy transport.
     assert "proxy" in result.output.lower()
 
 

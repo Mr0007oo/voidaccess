@@ -85,6 +85,10 @@ async def list_entities(
                 .limit(limit)
                 .all()
             )
+            # Score each row against its own investigation (cached per
+            # investigation id so a page of same-investigation entities builds
+            # the map once), matching the CLI export and /entities/{id} exactly.
+            priority_cache: dict = {}
             return {
                 "items": [
                     {
@@ -98,6 +102,7 @@ async def list_entities(
                         "investigation_id": str(e.investigation_id) if e.investigation_id else None,
                         "investigation_count": getattr(e, "investigation_count", 1) or 1,
                         "created_at": e.created_at.isoformat() if e.created_at else None,
+                        **_entity_priority_fields(session, e, priority_cache),
                     }
                     for e in entities
                 ],
@@ -150,7 +155,10 @@ async def export_entity_stix(
                     })
             except Exception as exc:
                 logger.warning("STIX export for entity %s failed, falling back to raw JSON: %s", entity_id, exc)
-                json_str = json.dumps(_entity_to_dict(entity), indent=2)
+                json_str = json.dumps(
+                    _entity_to_dict(entity, _entity_priority_fields(session, entity)),
+                    indent=2,
+                )
 
             filename = f"voidaccess_entity_{entity_id}_stix.json"
             return Response(
@@ -184,7 +192,7 @@ async def export_entity_json(
             _assert_entity_accessible(session, eid, current_user.user.id)
 
             appearances = get_entity_appearances(session, eid, current_user.user.id)
-            data = _entity_to_dict(entity)
+            data = _entity_to_dict(entity, _entity_priority_fields(session, entity))
             data["appearances"] = appearances
             json_str = json.dumps(data, indent=2, default=str)
 
@@ -629,8 +637,10 @@ async def get_entity(
                 if entity.context:
                     display_context = defang_text(entity.context)
 
+            priority = _entity_priority_fields(session, entity)
+
             return {
-                **_entity_to_dict(entity),
+                **_entity_to_dict(entity, priority),
                 "value": display_value,
                 "canonical_value": display_canonical,
                 "context": display_context,
@@ -798,7 +808,90 @@ def _assert_entity_accessible(session, entity_id: uuid.UUID, user_id: int) -> No
         raise HTTPException(status_code=404, detail="Entity not found")
 
 
-def _entity_to_dict(entity) -> dict:  # type: ignore[type-arg]
+# Default priority fields for an entity we could not (or chose not to) score.
+# Mirrors the zero-defaults the investigation entities endpoint uses so the two
+# API surfaces are shape-identical.
+_EMPTY_PRIORITY: dict = {
+    "priority_score": 0.0,
+    "priority_score_components": {},
+    "priority_score_centrality_contribution": 0.0,
+}
+
+
+def _investigation_priority_map(session, investigation_id) -> dict:
+    """Return ``score_map`` for a whole investigation, scoped identically to the
+    investigation entities endpoint and the CLI export.
+
+    Prioritization is normalized against the *complete* investigation (direct +
+    linked entities, all relationships), never a single entity or a filtered
+    page — that is what makes the value returned here byte-for-byte comparable
+    to ``GET /investigations/{id}/entities`` and to the CLI JSON/CSV/MD export
+    for the same entity (see ``api/routes/investigations.py`` and
+    ``voidaccess_cli/commands/export.py``).
+    """
+    from db.models import Entity, EntityRelationship, InvestigationEntityLink  # noqa: PLC0415
+    import sqlalchemy as sa  # noqa: PLC0415
+    from utils.entity_priority import score_map  # noqa: PLC0415
+
+    linked_ids = (
+        sa.select(InvestigationEntityLink.entity_id)
+        .where(InvestigationEntityLink.investigation_id == investigation_id)
+    )
+    scoped = (
+        session.query(Entity)
+        .filter(
+            (Entity.investigation_id == investigation_id)
+            | Entity.id.in_(linked_ids)
+        )
+        .all()
+    )
+    relationships = (
+        session.query(EntityRelationship)
+        .filter(EntityRelationship.investigation_id == investigation_id)
+        .all()
+    )
+    return score_map(scoped, relationships)
+
+
+def _entity_priority_fields(session, entity, cache: Optional[dict] = None) -> dict:
+    """Return the three ``priority_score`` fields for *entity*, computed with the
+    same function and the same investigation-wide input set the CLI export uses.
+
+    ``cache`` (an optional ``dict`` keyed by investigation id) lets a list
+    endpoint score many entities from the same investigation without rebuilding
+    the score map per row.  Any failure degrades to zero defaults rather than
+    breaking the response.
+    """
+    inv_id = getattr(entity, "investigation_id", None)
+    if inv_id is None:
+        return dict(_EMPTY_PRIORITY)
+    try:
+        if cache is not None and inv_id in cache:
+            pmap = cache[inv_id]
+        else:
+            pmap = _investigation_priority_map(session, inv_id)
+            if cache is not None:
+                cache[inv_id] = pmap
+        entry = pmap.get(str(entity.id), {})
+        return {
+            "priority_score": entry.get("priority_score", 0.0),
+            "priority_score_components": entry.get("priority_score_components", {}),
+            "priority_score_centrality_contribution": entry.get(
+                "priority_score_centrality_contribution", 0.0
+            ),
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("entity priority computation failed: %s", exc)
+        return dict(_EMPTY_PRIORITY)
+
+
+def _entity_to_dict(entity, priority: Optional[dict] = None) -> dict:  # type: ignore[type-arg]
+    # ``priority`` carries the three prioritization fields (see
+    # ``_entity_priority_fields``).  It is passed in by callers that hold an open
+    # session so the score matches the CLI export exactly; when absent we emit
+    # the same zero defaults as the investigation entities endpoint so the field
+    # is always present on the ``/entities`` surface.
+    priority = priority or _EMPTY_PRIORITY
     return {
         "id": str(entity.id),
         "entity_type": entity.entity_type,
@@ -816,6 +909,11 @@ def _entity_to_dict(entity) -> dict:  # type: ignore[type-arg]
         "source_count": getattr(entity, "source_count", 1) or 1,
         "investigation_count": getattr(entity, "investigation_count", 1) or 1,
         "corroborating_sources": getattr(entity, "corroborating_sources", None),
+        "priority_score": priority.get("priority_score", 0.0),
+        "priority_score_components": priority.get("priority_score_components", {}),
+        "priority_score_centrality_contribution": priority.get(
+            "priority_score_centrality_contribution", 0.0
+        ),
     }
 
 
