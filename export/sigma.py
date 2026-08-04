@@ -207,7 +207,8 @@ def entities_to_sigma_rules(
     Falls back to base rule if LLM fails.
     """
     rules: list[dict] = []
-    for entity in entities:
+    for raw_entity in entities:
+        entity = _adapt_entity(raw_entity)
         if entity.entity_type not in _SIGMA_ENTITY_TYPES:
             continue
         base = _build_base_rule(entity)
@@ -226,6 +227,23 @@ def sigma_rule_to_yaml(rule: dict) -> str:
     except Exception as exc:
         logger.warning("sigma_rule_to_yaml failed: %s", exc)
         return ""
+
+
+def render_sigma_rules(
+    entities: list[Any],
+    llm: Optional[Any] = None,
+) -> str:
+    """Render the shared Sigma artifact used by every export surface.
+
+    The CLI export and the IOC package both receive the same export payload,
+    whose entities are normally dictionaries.  Keeping adaptation, rule
+    generation, and YAML assembly here prevents one surface from growing a
+    second DB-loading implementation with different failure semantics.
+    """
+    rules = entities_to_sigma_rules(list(entities or []), llm=llm)
+    return "\n---\n".join(
+        sigma_rule_to_yaml(rule) for rule in rules if rule
+    )
 
 
 def export_sigma_rules(
@@ -318,6 +336,45 @@ def _load_entities_for_investigation(investigation_id: Any) -> list[Any]:
     except Exception as exc:
         logger.warning("sigma _load_entities_for_investigation failed: %s", exc)
         return []
+
+
+class _DictEntityAdapter:
+    """Expose dictionary-shaped export entities through Sigma's object API."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    @property
+    def entity_type(self) -> str:
+        return str(self._data.get("entity_type") or "")
+
+    @property
+    def value(self) -> str:
+        return str(
+            self._data.get("canonical_value")
+            or self._data.get("value")
+            or ""
+        )
+
+    @property
+    def confidence(self) -> float:
+        try:
+            return float(self._data.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @property
+    def source_url(self) -> str:
+        return str(self._data.get("source_url") or "")
+
+
+def _adapt_entity(entity: Any) -> Any:
+    """Accept both ORM/normalized entities and export dictionaries."""
+    if isinstance(entity, dict):
+        return _DictEntityAdapter(entity)
+    return entity
 
 
 def _coerce_uuid(value: Any):

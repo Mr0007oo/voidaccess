@@ -11,7 +11,6 @@ import csv
 import io
 import json
 import re as _re
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -83,7 +82,10 @@ def run(
         include_raw=include_raw,
     )
     out_path = output or _default_out_path(
-        target, suffix, fmt=fmt, query=(data.get("investigation") or {}).get("query")
+        target,
+        suffix,
+        fmt=fmt,
+        query=_investigation_metadata(data, inv_id).get("query"),
     )
     out_path = Path(out_path).expanduser()
     if out_path.exists():
@@ -122,8 +124,23 @@ def _load_target(target: str) -> tuple[Optional[str], Optional[dict]]:
         return inv_id, data
     from voidaccess_cli.adapters import sqlite as sqlite_adapter
     sqlite_adapter.init_db()
-    resolved = sqlite_adapter.resolve_investigation_id(target) or target
-    data = sqlite_adapter.investigation_to_export_dict(resolved)
+    try:
+        resolved = sqlite_adapter.resolve_investigation_id(target) or target
+        data = sqlite_adapter.investigation_to_export_dict(resolved)
+    except Exception as exc:
+        # Do not let an ORM/SQLAlchemy read failure become an empty export.
+        # init_db() is the schema choke-point; this guard covers a schema
+        # mismatch that manifests while loading a table/column not included in
+        # the lightweight preflight contract.  Rendering happens only after
+        # this function returns, so no artifact can be written on failure.
+        from sqlalchemy.exc import OperationalError
+
+        if isinstance(exc, OperationalError):
+            raise sqlite_adapter.DatabaseSchemaError(
+                "Export could not read the database; the schema may be stale. "
+                "Run `alembic upgrade head` and retry."
+            ) from exc
+        raise
     if not data or not data.get("investigation"):
         return None, None
     return resolved, data
@@ -193,17 +210,12 @@ def _render(
         return misp_event_to_json(event), ".json"
 
     if fmt == "sigma":
-        from export import export_sigma_rules
-        # The Sigma exporter writes one YAML file per rule and therefore needs
-        # an output directory.  The CLI itself promises one output artifact,
-        # so collect those files in a temporary directory and combine them.
-        with tempfile.TemporaryDirectory(prefix="voidaccess-sigma-") as temp_dir:
-            rule_paths = export_sigma_rules(inv_uuid, temp_dir)
-            rules_yaml = "\n---\n".join(
-                Path(rule_path).read_text(encoding="utf-8")
-                for rule_path in rule_paths
-            )
-        return rules_yaml, ".yml"
+        from export import render_sigma_rules
+        # The IOC package and direct CLI export must share the same generator.
+        # ``data`` was loaded through the CLI's init_db() choke-point above;
+        # loading the entities again through export_sigma_rules() used to
+        # create a second, error-swallowing DB path and yielded empty files.
+        return render_sigma_rules(data.get("entities") or []), ".yml"
 
     raise typer.BadParameter(f"Unknown format: {fmt}")
 
@@ -221,7 +233,7 @@ def _render_detection_rule(
     already embedded in the JSON payload so this still works when the user
     passes a ``.json`` file (the API path requires a DB investigation).
     """
-    investigation = data.get("investigation") or {}
+    investigation = _investigation_metadata(data, inv_id)
     investigation_dict: dict = {
         "id": investigation.get("id") or inv_id or "",
         "run_id": investigation.get("run_id"),
@@ -278,7 +290,7 @@ def _render_package(
     import asyncio
     from export.ioc_package import build_package_filename, generate_ioc_package
 
-    investigation = data.get("investigation") or {}
+    investigation = _investigation_metadata(data, inv_id)
     entities = data.get("entities") or []
 
     # Build the flat-shape dict the package generator expects.
@@ -307,6 +319,30 @@ def _render_package(
         )
     )
     return zip_bytes, suffix
+
+
+def _investigation_metadata(data: dict, inv_id: Optional[str] = None) -> dict:
+    """Return metadata from either DB-shaped or flat CLI JSON payloads."""
+    nested = data.get("investigation")
+    nested = nested if isinstance(nested, dict) else {}
+    fields = (
+        "id",
+        "run_id",
+        "query",
+        "refined_query",
+        "model_used",
+        "summary",
+        "created_at",
+        "sources_used",
+    )
+    metadata = {field: data[field] for field in fields if field in data}
+    metadata.update(nested)
+    metadata["id"] = nested.get("id") or data.get("id") or inv_id or ""
+    metadata["query"] = nested.get("query") or data.get("query") or ""
+    metadata["sources_used"] = (
+        nested.get("sources_used") or data.get("sources_used") or {}
+    )
+    return metadata
 
 
 def _csv_from_data(data: dict) -> str:

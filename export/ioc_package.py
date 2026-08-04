@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PACKAGE_FORMAT = "voidaccess-ioc-v1"
-PACKAGE_VERSION = "2.0.1"
+PACKAGE_VERSION = "2.0.2"
 SNORT_SID_BASE = 9000001  # 9xxxxxx reserved for VoidAccess-generated rules
 
 # Map extractor upper-case entity types to the per-file bucket they belong to.
@@ -702,55 +702,11 @@ def _safe_misp_json(entities: list[Any], investigation_id: Any) -> str:
 
 def _safe_sigma_yml(entities: list[Any]) -> str:
     try:
-        from export.sigma import entities_to_sigma_rules, sigma_rule_to_yaml
-        # Sigma rules expect object-style entities (NormalizedEntity).  When the
-        # caller passes plain dicts, wrap them in a tiny adapter so Sigma can
-        # read .entity_type, .value, .confidence, and .source_url.
-        adapted: list[Any] = []
-        for e in entities or []:
-            if isinstance(e, dict):
-                adapted.append(_DictEntityAdapter(e))
-            else:
-                adapted.append(e)
-        rules = entities_to_sigma_rules(adapted)
-        return "\n---\n".join(sigma_rule_to_yaml(r) for r in rules if r)
+        from export.sigma import render_sigma_rules
+        return render_sigma_rules(entities or [])
     except Exception as exc:
         logger.warning("Sigma generation for IOC package failed: %s", exc)
         return ""
-
-
-class _DictEntityAdapter:
-    """Adapt a plain dict into an object with .entity_type / .value / etc.
-
-    Used to feed dict-shaped entities into Sigma / STIX / MISP generators
-    that expect object access.  Keeps the IOC package module standalone
-    without changing the existing Sigma / STIX / MISP module signatures.
-    """
-
-    __slots__ = ("_d",)
-
-    def __init__(self, d: dict[str, Any]) -> None:
-        self._d = d
-
-    @property
-    def entity_type(self) -> str:
-        return _entity_type(self._d)
-
-    @property
-    def value(self) -> str:
-        return _entity_value(self._d)
-
-    @property
-    def canonical_value(self) -> str:
-        return entity_canonical_id(self._d)
-
-    @property
-    def confidence(self) -> float:
-        return _entity_confidence(self._d)
-
-    @property
-    def source_url(self) -> str:
-        return _entity_source_url(self._d)
 
 
 # ---------------------------------------------------------------------------

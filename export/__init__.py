@@ -17,6 +17,7 @@ from export.misp import (
 from export.sigma import (
     entities_to_sigma_rules,
     export_sigma_rules,
+    render_sigma_rules,
     sigma_rule_to_yaml,
 )
 from export.yara_export import (
@@ -44,6 +45,7 @@ __all__ = [
     # sigma
     "entities_to_sigma_rules",
     "sigma_rule_to_yaml",
+    "render_sigma_rules",
     "export_sigma_rules",
     # yara
     "generate_yara_rules",
