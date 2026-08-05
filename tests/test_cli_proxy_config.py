@@ -46,6 +46,8 @@ No real network.  All file I/O uses tmp_path.
 from __future__ import annotations
 
 import os
+import stat
+import subprocess
 import sys
 import types
 
@@ -64,9 +66,40 @@ def isolated_config_home(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli_config, "CLI_HOME", tmp_path)
     monkeypatch.setattr(cli_config, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(cli_config, "ENV_PATH", tmp_path / ".env")
     monkeypatch.setattr(cli_config, "DB_PATH", tmp_path / "investigations.db")
     monkeypatch.setattr(cli_config, "DEFAULT_OUTPUT_DIR", tmp_path / "results")
     return cli_config
+
+
+def test_fresh_configure_run_locks_env_file(isolated_config_home):
+    """A configure write applies the same owner-only protection to .env."""
+    isolated_config_home.ENV_PATH.write_text(
+        "JWT_SECRET=test-only\n",
+        encoding="utf-8",
+    )
+
+    from typer.testing import CliRunner
+    from voidaccess_cli.commands.configure import app as configure_app
+
+    result = CliRunner().invoke(
+        configure_app,
+        ["tor", "--host", "127.0.0.1", "--port", "9050"],
+    )
+    assert result.exit_code == 0, result.output
+
+    if os.name != "nt":
+        assert stat.S_IMODE(isolated_config_home.ENV_PATH.stat().st_mode) == 0o600
+    else:
+        acl = subprocess.run(
+            ["icacls", str(isolated_config_home.ENV_PATH)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "(I)" not in acl
+        assert "BUILTIN\\Users" not in acl
+        assert "Authenticated Users" not in acl
 
 
 def _scrub_env(monkeypatch):

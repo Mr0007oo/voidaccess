@@ -2,6 +2,15 @@
 
 All notable changes to VoidAccess are documented here.
 
+## [2.0.3] - 2026-08-04
+
+- Enforce owner-only permissions on the project `.env` in both CLI configure
+  and setup flows, using the same protection path as `~/.voidaccess/config.json`.
+- Add a one-time legacy-data backfill for typed relationship page provenance
+  and persisted community partitions.
+- Re-verify typed-relationship yield on five fresh real investigations and
+  record the measured baseline in the release audit.
+
 ## [1.9.4] - 2026-07-27
 
 - Version bump.

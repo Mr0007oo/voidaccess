@@ -103,12 +103,18 @@ with open('$env_file', 'w') as f:
     else
         echo "${key}=${value}" >> "$env_file"
     fi
+    chmod 600 "$env_file"
 }
 
 env_append() {
     local line="$1"
     local env_file="$SCRIPT_DIR/.env"
     echo "$line" >> "$env_file"
+    chmod 600 "$env_file"
+}
+
+lock_env_file() {
+    [ -f "$ENV_FILE" ] && chmod 600 "$ENV_FILE"
 }
 
 wait_for_key() {
@@ -397,6 +403,7 @@ else
     touch "$ENV_FILE"
     print_info "Created empty .env"
 fi
+lock_env_file
 
 # =============================================================================
 # STEP 3: Generate Required Secrets
@@ -975,6 +982,9 @@ else
 fi
 
 # =============================================================================
+# Keep the final environment file owner-only after the direct Redis edit above.
+lock_env_file
+
 # Ensure MITRE ATT&CK seed dataset is present locally before the import step.
 # The file is gitignored (~45MB) so a fresh clone will not have it on disk.
 # =============================================================================

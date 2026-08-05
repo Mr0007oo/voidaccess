@@ -332,7 +332,7 @@ async def _periodic_stuck_sweep() -> None:
 app = FastAPI(
     title="VoidAccess Intelligence API",
     description="VoidAccess: Dark Web Intelligence Platform",
-    version="2.0.2",
+    version="2.0.3",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,

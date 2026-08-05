@@ -192,6 +192,7 @@ if exist "%~dp0.env.example" (
     type nul > "%~dp0.env"
     echo %DIM%   -^>%NC%  Created empty .env
 )
+call :lock_env_file
 echo.
 
 :: -- STEP 3: Secrets -----------------------------------------------------------
@@ -392,6 +393,12 @@ exit /b 0
 :: =============================================================================
 :: Subroutine: set or update a key=value line in .env
 :: =============================================================================
+:lock_env_file
+if not exist "%~dp0.env" exit /b 0
+icacls "%~dp0.env" /inheritance:r >nul 2>&1
+icacls "%~dp0.env" /grant:r "%USERDOMAIN%\%USERNAME%":F >nul 2>&1
+exit /b 0
+
 :env_set
 set "_KEY=%~1"
 set "_VAL=%~2"
@@ -418,4 +425,5 @@ if not errorlevel 1 (
     :: Append new line
     echo !_KEY!=!_VAL! >> "!_ENV!"
 )
+call :lock_env_file
 exit /b 0

@@ -20,6 +20,7 @@ _WARNED_CONFIG_KEYS: set[str] = set()
 
 CLI_HOME = Path(os.path.expanduser("~/.voidaccess"))
 CONFIG_PATH = CLI_HOME / "config.json"
+ENV_PATH = Path.cwd() / ".env"
 DB_PATH = CLI_HOME / "investigations.db"
 DEFAULT_OUTPUT_DIR = CLI_HOME / "results"
 
@@ -248,6 +249,19 @@ def _lock_file(path: Path) -> None:
         pass
 
 
+def lock_env_file() -> None:
+    """Apply the same owner-only protection to the project ``.env`` file.
+
+    ``voidaccess configure`` stores its CLI settings separately in
+    ``~/.voidaccess/config.json``, but a self-hosted checkout may also have a
+    project-level ``.env`` containing the API/database credentials consumed by
+    the runtime.  Lock it whenever configuration is saved, while keeping the
+    operation a no-op for CLI-only installs that have no ``.env``.
+    """
+    if ENV_PATH.is_file():
+        _lock_file(ENV_PATH)
+
+
 def save_config(config: dict[str, Any]) -> None:
     features = config.setdefault("features", {})
     # Keep the legacy aliases readable for older clients.  When a caller
@@ -271,6 +285,7 @@ def save_config(config: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     _lock_file(CONFIG_PATH)
+    lock_env_file()
 
 
 def is_configured() -> bool:
